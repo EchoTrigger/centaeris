@@ -1,3 +1,5 @@
+from app_core.issue_templates import issue_execution_prompt
+from app_core.issue_access import visible_issues
 """Issue origins for caller-owned interactive sessions."""
 from django.db import transaction
 from ninja import Router, Status
@@ -46,7 +48,7 @@ def _execution_context(request, workspace_id, issue_id, payload, digest):
     if membership is None:
         raise HostedOperationError(404, "workspace_not_found")
     lock_operation_identity(request.user, workspace_id, "submitMessage", payload.operation_id)
-    issue = Issue.objects.select_for_update().filter(id=issue_id, workspace_id=workspace_id).first()
+    issue = visible_issues(request.user, workspace_id, Issue.objects.select_for_update()).filter(id=issue_id).first()
     if issue is None:
         raise HostedOperationError(404, "issue_not_found")
     receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest)
@@ -86,7 +88,7 @@ def create_issue_execution(request, workspace_id: str, issue_id: str, payload: I
             workspace, issue, receipt = _execution_context(request, workspace_id, issue_id, payload, digest)
             if receipt is not None:
                 return Status(202, serialize_operation(receipt))
-            prompt = f"{issue.title}\n\n{issue.description}".strip()
+            prompt = issue_execution_prompt(issue)
             message = workspaces.SessionMessageRequest.model_validate({
                 "operationId": payload.operation_id, "text": prompt,
                 "modelConfigRef": payload.model_config_ref, "thinkingMode": payload.thinking_mode,
@@ -111,7 +113,7 @@ def create_issue_execution(request, workspace_id: str, issue_id: str, payload: I
 def list_issue_executions(request, workspace_id: str, issue_id: str):
     if workspace_membership_for(request.user, workspace_id) is None:
         return Status(404, {"error": "workspace_not_found"})
-    if not Issue.objects.filter(id=issue_id, workspace_id=workspace_id).exists():
+    if not visible_issues(request.user, workspace_id).filter(id=issue_id).exists():
         return Status(404, {"error": "issue_not_found"})
     page = _pagination(request)
     if page is None:

@@ -91,3 +91,12 @@ api.add_router("/api", issue_execution_read_router)
 
 from app_core.http.model_defaults import router as model_defaults_router
 api.add_router("/api", model_defaults_router)
+
+from app_core.http.issue_templates import router as issue_templates_router
+api.add_router("/api", issue_templates_router)
+
+from app_core.http.issue_deliverables import router as issue_deliverables_router
+api.add_router("/api", issue_deliverables_router)
+
+from app_core.http.workspace_search import router as workspace_search_router
+api.add_router("/api", workspace_search_router)

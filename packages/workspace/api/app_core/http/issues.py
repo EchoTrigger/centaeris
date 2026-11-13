@@ -3,11 +3,15 @@ from typing import Literal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from ninja import Router, Status
 from pydantic import Field, field_validator
 
-from app_core.models import Issue, IssueEvent, WorkspaceMembership
+from app_core.models import Issue, IssueEvent, IssueDeliverable, WorkspaceMembership
+from app_core.issue_access import visible_issues
+from app_core.issue_templates import prepare_template, validate_definition, validate_properties
+from app_core.hosted_operations import HostedOperationError
 from app_core.issue_notifications import project_issue_notifications
 from app_core.workspace_access import locked_workspace_membership_for, workspace_membership_for
 from .query import valid_query_fields
@@ -24,6 +28,8 @@ class IssueFields(StrictSchema):
     description: str = Field(default="", max_length=65536)
     status: IssueStatus = "todo"
     assignee_id: str | None = None
+    template_key: str = Field(default="", max_length=64)
+    properties: dict = Field(default_factory=dict)
 
     @field_validator("title")
     @classmethod
@@ -41,6 +47,7 @@ class IssuePatch(StrictSchema):
     status: IssueStatus = "todo"
     assignee_id: str | None = None
     archived: bool = False
+    properties: dict = Field(default_factory=dict)
 
     _normalize_title = field_validator("title")(IssueFields.normalize_title.__func__)
 
@@ -57,6 +64,10 @@ class IssueResponse(StrictSchema):
     archived_at: str | None
     created_at: str
     updated_at: str
+    visibility: str
+    template_key: str
+    template_snapshot: dict
+    properties: dict
 
 
 class IssueEnvelope(StrictSchema):
@@ -82,7 +93,7 @@ class IssueEventResponse(StrictSchema):
     id: str
     issue_id: str
     actor: IssueActor
-    type: Literal["created", "updated", "archived", "restored"]
+    type: Literal["created", "updated", "archived", "restored", "deliverableSubmitted", "deliverableFeedback", "deliverableAccepted"]
     changes: dict[str, IssueChange]
     created_at: str
 
@@ -105,6 +116,8 @@ def _serialize(issue):
         "description": issue.description, "status": issue.status,
         "assigneeId": str(issue.assignee_id) if issue.assignee_id is not None else None,
         "creatorId": str(issue.creator_id), "version": issue.version,
+        "visibility": issue.visibility, "templateKey": issue.templateKey,
+        "templateSnapshot": issue.templateSnapshot, "properties": issue.properties,
         "archivedAt": issue.archivedAt.isoformat() if issue.archivedAt else None,
         "createdAt": issue.createdAt.isoformat(), "updatedAt": issue.updatedAt.isoformat()}
 
@@ -142,7 +155,7 @@ def list_issues(request, workspace_id: str):
     page = _pagination(request, ("mine", "archived"))
     if page is None or any(request.GET.get(key, "false") not in {"true", "false"} for key in ("mine", "archived")):
         return Status(400, {"error": "issue_query_invalid"})
-    issues = Issue.objects.filter(workspace_id=workspace_id, archivedAt__isnull=request.GET.get("archived", "false") == "false")
+    issues = visible_issues(request.user, workspace_id).filter(archivedAt__isnull=request.GET.get("archived", "false") == "false")
     if request.GET.get("mine", "false") == "true":
         issues = issues.filter(assignee=request.user)
     limit, offset = page
@@ -157,8 +170,13 @@ def create_issue(request, workspace_id: str, payload: IssueFields):
             return Status(404, {"error": "workspace_not_found"})
         if not _assignee_valid(workspace_id, payload.assignee_id):
             return Status(400, {"error": "issue_assignee_invalid"})
+        try:
+            snapshot, properties, visibility = prepare_template(workspace_id, payload.template_key, payload.properties)
+        except HostedOperationError as error:
+            return Status(error.status, {"error": error.code})
         issue = Issue.objects.create(workspace_id=workspace_id, creator=request.user,
-            title=payload.title, description=payload.description, status=payload.status, assignee_id=payload.assignee_id)
+            title=payload.title, description=payload.description, status=payload.status, assignee_id=payload.assignee_id,
+            templateKey=payload.template_key, templateSnapshot=snapshot, properties=properties, visibility=visibility)
         data = _serialize(issue)
         event = IssueEvent.objects.create(issue=issue, actor=request.user, type="created", changes={
             key: {"before": None, "after": data[key]} for key in ("title", "description", "status", "assigneeId")})
@@ -180,7 +198,7 @@ def list_assignees(request, workspace_id: str):
 def get_issue(request, workspace_id: str, issue_id: str):
     if workspace_membership_for(request.user, workspace_id) is None:
         return Status(404, {"error": "workspace_not_found"})
-    issue = Issue.objects.filter(workspace_id=workspace_id, id=issue_id).first()
+    issue = visible_issues(request.user, workspace_id).filter(id=issue_id).first()
     return {"issue": _serialize(issue)} if issue else Status(404, {"error": "issue_not_found"})
 
 
@@ -190,7 +208,7 @@ def update_issue(request, workspace_id: str, issue_id: str, payload: IssuePatch)
     with transaction.atomic():
         if locked_workspace_membership_for(request.user, workspace_id) is None:
             return Status(404, {"error": "workspace_not_found"})
-        issue = Issue.objects.select_for_update().filter(workspace_id=workspace_id, id=issue_id).first()
+        issue = visible_issues(request.user, workspace_id, Issue.objects.select_for_update()).filter(id=issue_id).first()
         if issue is None:
             return Status(404, {"error": "issue_not_found"})
         if issue.version != payload.version:
@@ -198,6 +216,12 @@ def update_issue(request, workspace_id: str, issue_id: str, payload: IssuePatch)
         fields = payload.model_fields_set - {"version"}
         if "assignee_id" in fields and not _assignee_valid(workspace_id, payload.assignee_id):
             return Status(400, {"error": "issue_assignee_invalid"})
+        if "properties" in fields:
+            try:
+                payload.properties = (validate_properties(validate_definition(issue.templateSnapshot["definition"]), payload.properties)
+                                      if issue.templateKey else prepare_template(workspace_id, "", payload.properties)[1])
+            except HostedOperationError as error:
+                return Status(error.status, {"error": error.code})
         before = _serialize(issue)
         changes = {}
         for field in fields:
@@ -211,7 +235,8 @@ def update_issue(request, workspace_id: str, issue_id: str, payload: IssuePatch)
                 value = getattr(payload, field)
                 if before[key] != value:
                     setattr(issue, field, value)
-                    changes[key] = {"before": before[key], "after": value}
+                    changes[key] = ({"before": issue.version, "after": issue.version + 1} if key == "properties"
+                                    else {"before": before[key], "after": value})
         if changes:
             issue.version += 1
             issue.save()
@@ -226,14 +251,16 @@ def update_issue(request, workspace_id: str, issue_id: str, payload: IssuePatch)
 def list_events(request, workspace_id: str, issue_id: str):
     if workspace_membership_for(request.user, workspace_id) is None:
         return Status(404, {"error": "workspace_not_found"})
-    issue = Issue.objects.filter(workspace_id=workspace_id, id=issue_id).first()
+    issue = visible_issues(request.user, workspace_id).filter(id=issue_id).first()
     if issue is None:
         return Status(404, {"error": "issue_not_found"})
     page = _pagination(request)
     if page is None:
         return Status(400, {"error": "issue_query_invalid"})
     limit, offset = page
-    events = issue.events.select_related("actor").order_by("createdAt", "id")
+    allowed = [str(pk) for pk in IssueDeliverable.objects.filter(issue=issue).filter(Q(author=request.user) | Q(recipient=request.user)).values_list("pk", flat=True)]
+    events = issue.events.filter(Q(type__in=["created", "updated", "archived", "restored"])
+        | Q(changes__deliverableId__after__in=allowed)).select_related("actor").order_by("createdAt", "id")
     return {"events": [{"id": event.id, "issueId": issue.id, "actor": _actor(event.actor),
         "type": event.type, "changes": event.changes, "createdAt": event.createdAt.isoformat()}
         for event in events[offset:offset + limit]], "total": events.count()}

@@ -2767,6 +2767,10 @@ class Issue(models.Model):
         null=True, blank=True, related_name="assigned_issues")
     creator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_issues")
     version = models.PositiveIntegerField(default=1)
+    visibility = models.CharField(max_length=16, default="workspace")
+    templateKey = models.CharField(max_length=64, blank=True, default="")
+    templateSnapshot = models.JSONField(default=dict)
+    properties = models.JSONField(default=dict)
     archivedAt = models.DateTimeField(null=True, blank=True)
     createdAt = models.DateTimeField(auto_now_add=True)
     updatedAt = models.DateTimeField(auto_now=True)
@@ -2776,6 +2780,7 @@ class Issue(models.Model):
         constraints = [
             models.CheckConstraint(condition=models.Q(status__in=["backlog", "todo", "inProgress", "done", "canceled"]), name="issue_status_valid"),
             models.CheckConstraint(condition=models.Q(version__gte=1), name="issue_version_positive"),
+            models.CheckConstraint(condition=models.Q(visibility__in=["workspace", "participants"]), name="issue_visibility_valid"),
         ]
 
 
@@ -2783,13 +2788,13 @@ class IssueEvent(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_issue_event_id)
     issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="events")
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="issue_events")
-    type = models.CharField(max_length=16)
+    type = models.CharField(max_length=32)
     changes = models.JSONField(default=dict)
     createdAt = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [models.Index(fields=["issue", "createdAt", "id"], name="issue_event_chronological")]
-        constraints = [models.CheckConstraint(condition=models.Q(type__in=["created", "updated", "archived", "restored"]), name="issue_event_type_valid")]
+        constraints = [models.CheckConstraint(condition=models.Q(type__in=["created", "updated", "archived", "restored", "deliverableSubmitted", "deliverableFeedback", "deliverableAccepted"]), name="issue_event_type_valid")]
 
 
 
@@ -2802,7 +2807,7 @@ class IssueNotification(models.Model):
     event = models.ForeignKey(IssueEvent, on_delete=models.CASCADE, related_name="notifications")
     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="issue_notifications")
     issueTitle = models.CharField(max_length=240)
-    kind = models.CharField(max_length=16)
+    kind = models.CharField(max_length=32)
     readAt = models.DateTimeField(null=True, blank=True)
     archivedAt = models.DateTimeField(null=True, blank=True)
     createdAt = models.DateTimeField(auto_now_add=True)
@@ -2811,7 +2816,7 @@ class IssueNotification(models.Model):
         indexes = [models.Index(fields=["recipient", "-createdAt", "-id"], name="notification_recipient_created")]
         constraints = [
             models.UniqueConstraint(fields=["event", "recipient"], name="notification_event_recipient_unique"),
-            models.CheckConstraint(condition=models.Q(kind__in=["assigned", "statusChanged"]), name="notification_kind_valid"),
+            models.CheckConstraint(condition=models.Q(kind__in=["assigned", "statusChanged", "deliverable"]), name="notification_kind_valid"),
         ]
 
 
@@ -2855,3 +2860,55 @@ class IssueExecution(models.Model):
             name="issue_execution_owner_created")]
         constraints = [models.CheckConstraint(condition=models.Q(issueVersion__gte=1),
             name="issue_execution_version_positive")]
+
+
+class WorkspaceIssueTemplate(models.Model):
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name="issue_templates")
+    key = models.CharField(max_length=64)
+    name = models.CharField(max_length=160)
+    definition = models.JSONField(default=dict)
+    revision = models.PositiveIntegerField(default=1)
+    enabled = models.BooleanField(default=True)
+    updatedAt = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="issue_template_workspace_key"),
+            models.CheckConstraint(condition=models.Q(revision__gte=1), name="issue_template_revision_positive"),
+        ]
+
+
+class IssueDeliverable(models.Model):
+    """One deliberately shared result revision, never a grant to its private Session."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="deliverables")
+    execution = models.ForeignKey(IssueExecution, on_delete=models.PROTECT, related_name="deliverables")
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="deliverables")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="authored_deliverables")
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="received_deliverables")
+    revision = models.PositiveIntegerField()
+    replaces = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True, related_name="replacements")
+    summary = models.TextField(blank=True, default="")
+    artifacts = models.JSONField(default=list)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["issue", "revision"], name="issue_deliverable_revision_unique"),
+            models.CheckConstraint(condition=models.Q(revision__gte=1), name="issue_deliverable_revision_positive"),
+        ]
+
+
+class IssueDeliverableResponse(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deliverable = models.ForeignKey(IssueDeliverable, on_delete=models.CASCADE, related_name="responses")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="deliverable_responses")
+    action = models.CharField(max_length=16)
+    text = models.TextField(blank=True, default="")
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(action__in=["feedback", "accept"]), name="deliverable_response_action_valid"),
+            models.UniqueConstraint(fields=["deliverable"], condition=models.Q(action="accept"), name="deliverable_accept_once"),
+        ]

@@ -1072,3 +1072,58 @@ as the API; it does not start agent execution environments.
 Outcome logs include the job ID, status, reason, queue wait and processing time;
 failures include the exception class and HTTP status when available. Prompts,
 generated titles, credentials and raw provider errors are excluded.
+
+## Workspace work forms and submitted results
+
+`GET /api/workspaces/{workspaceId}/issue-templates` lists installed forms.
+Owner/admin members can install one with `POST`, supplying `key`, `name` and a
+strict `definition`. Definitions support text, textarea, date, decimal money and
+bounded item lists, required fields, money minima and date ordering. Business
+definitions are Workspace data, not built-in financial policy. Issue creation
+accepts `templateKey` and `properties`, captures the definition revision, validates
+the values and derives record visibility. Later edits use that captured definition.
+`participants` records are visible only to their creator and current assignee;
+ordinary records retain Workspace visibility. Listing, activity, notifications,
+material links and execution entry points use the same record visibility.
+Execution prompts include the captured form and its instructions.
+
+`GET /api/workspaces/{workspaceId}/issues/{issueId}/deliverables` lists submissions
+visible to the caller. `POST` accepts `version`, `executionId`, `agentRunId`,
+`summary`, selected `artifactIds`, `recipientId` and optional `replacesId`.
+The caller must own the linked execution and its Run; selected artifacts must be
+published current files from that Run. A submission captures immutable summary,
+file identities, recipient and revision. A replacement preserves author and
+recipient. Participants-only records restrict recipients to their participants.
+
+`POST .../deliverables/{deliverableId}/responses` accepts `version`, `action`
+(`feedback` or `accept`) and `text`. Feedback requires text; acceptance belongs
+to the recipient. Replaced submissions cannot receive new responses. These
+operations advance the Issue version and notify the other participant without
+marking the Issue done. Concurrent writes return a version conflict.
+
+`GET .../deliverables/{deliverableId}/artifacts/{artifactId}` checks current
+membership, record visibility, submission author/recipient and captured file
+identity before streaming. Sharing a submission grants no access to the private
+execution conversation or its unselected files. Deleted or changed files are
+unavailable. Artifact references do not create a new independent file copy.
+
+## Authorized browser resource search
+
+`GET /api/workspaces/{workspaceId}/search?query=...&limit=20&cursor=...` searches
+current personal materials, granted Workspace source objects and summaries
+explicitly submitted to the caller. Responses contain `matches` (`id`, `kind`,
+`title`, bounded `snippet`, `href`) and `nextCursor`. Cursors bind caller,
+Workspace, query and page size. Every page checks current authorization.
+Existing private conversation search remains a separate authorized endpoint.
+
+Body matches use existing `DerivedRepresentation` and `KnowledgeSegment` data
+bound to the owner's current content generation and hash. Unindexed objects can
+match names; search neither scans original files nor creates an Agent Run or a
+synchronous extraction task. Submitted summaries retain their explicit audience.
+
+`GET /api/workspaces/{workspaceId}/search/materials/{kind}/{objectId}` accepts
+optional `representationId` and `offset`. It rechecks membership, ownership or
+source grants and current content identity, then reads verified canonical text.
+Pages contain at most 200 lines and 50 KiB, with `nextOffset`. Search links carry
+real segment line offsets where available. Stale versions, denied sources and
+missing representations are rejected rather than rendered from a cached result.

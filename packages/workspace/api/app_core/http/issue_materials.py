@@ -1,3 +1,4 @@
+from app_core.issue_access import visible_issues
 """Attach existing Space objects without granting access to their contents."""
 from typing import Literal
 from uuid import UUID
@@ -46,7 +47,7 @@ class IssueMaterialsEnvelope(StrictSchema):
 def _locked_issue(request, workspace_id, issue_id, version):
     if locked_workspace_membership_for(request.user, workspace_id) is None:
         raise HostedOperationError(404, "workspace_not_found")
-    issue = Issue.objects.select_for_update().filter(id=issue_id, workspace_id=workspace_id).first()
+    issue = visible_issues(request.user, workspace_id, Issue.objects.select_for_update()).filter(id=issue_id).first()
     if issue is None:
         raise HostedOperationError(404, "issue_not_found")
     if issue.archivedAt is not None:
@@ -70,7 +71,7 @@ def _record_change(issue, user, before, after):
 def list_issue_materials(request, workspace_id: str, issue_id: str):
     if workspace_membership_for(request.user, workspace_id) is None:
         return Status(404, {"error": "workspace_not_found"})
-    issue = Issue.objects.filter(id=issue_id, workspace_id=workspace_id).first()
+    issue = visible_issues(request.user, workspace_id).filter(id=issue_id).first()
     if issue is None:
         return Status(404, {"error": "issue_not_found"})
     return material_envelope(issue, request.user)

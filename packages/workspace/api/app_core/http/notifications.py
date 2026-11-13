@@ -1,3 +1,4 @@
+from app_core.issue_access import visible_issues
 """Recipient-only issue inbox and receipt mutations."""
 from typing import Literal
 
@@ -21,7 +22,7 @@ class NotificationResponse(StrictSchema):
     workspace_id: str
     issue_id: str
     issue_title: str
-    kind: Literal["assigned", "statusChanged"]
+    kind: Literal["assigned", "statusChanged", "deliverable"]
     event: IssueEventResponse
     read_at: str | None
     archived_at: str | None
@@ -50,7 +51,7 @@ class NotificationPatch(StrictSchema):
 
 
 def _notifications(user, workspace_id):
-    return IssueNotification.objects.filter(recipient=user, event__issue__workspace_id=workspace_id)
+    return IssueNotification.objects.filter(recipient=user, event__issue__in=visible_issues(user, workspace_id))
 
 
 def _serialize(notification):

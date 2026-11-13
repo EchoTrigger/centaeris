@@ -1,3 +1,4 @@
+from app_core.issue_access import visible_issues
 """Caller-private results from an Issue's linked interactive Session."""
 from datetime import UTC, datetime
 from uuid import UUID
@@ -49,7 +50,7 @@ class ExecutionRunsEnvelope(StrictSchema):
 def read_issue_execution(request, workspace_id: str, issue_id: str, execution_id: UUID):
     if workspace_membership_for(request.user, workspace_id) is None:
         return Status(404, {"error": "workspace_not_found"})
-    if not Issue.objects.filter(id=issue_id, workspace_id=workspace_id).exists():
+    if not visible_issues(request.user, workspace_id).filter(id=issue_id).exists():
         return Status(404, {"error": "issue_not_found"})
     execution = IssueExecution.objects.filter(id=execution_id, issue_id=issue_id,
         issuer=request.user, session__workspace_id=workspace_id, session__owner=request.user,
