@@ -920,6 +920,12 @@ fn postgres_control_leases_require_intent_and_survive_reclaim_exhaustion() {
             .unwrap()
     };
     assert!(!store.control_ready("advance").unwrap());
+    assert_eq!(
+        store
+            .control_job_wait("advance", Duration::from_secs(5))
+            .unwrap(),
+        Duration::from_secs(5)
+    );
     assert!(
         claim("advance").is_empty(),
         "a requested purpose alone is not authorization"
@@ -938,6 +944,23 @@ fn postgres_control_leases_require_intent_and_survive_reclaim_exhaustion() {
         }
     }
     assert!(store.control_ready("advance").unwrap());
+    let later: i64 = db
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint+2000",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    db.execute("UPDATE runtime.runtime_jobs SET run_at_ms=$1,lease_reclaim_not_before_ms=$2 WHERE job_kind='agent_run.lifecycle'", &[&later,&(later+1000)]).unwrap();
+    assert!(
+        claim("advance").is_empty(),
+        "future control work must not run early"
+    );
+    let wait = store
+        .control_job_wait("advance", Duration::from_secs(5))
+        .unwrap();
+    assert!(wait > Duration::from_secs(2) && wait <= Duration::from_secs(3));
+    db.execute("UPDATE runtime.runtime_jobs SET run_at_ms=$1,lease_reclaim_not_before_ms=NULL WHERE job_kind='agent_run.lifecycle'", &[&now]).unwrap();
     let short = claim("advance");
     assert_eq!(short.len(), 2);
     assert!(store.control_ready("advance").unwrap());

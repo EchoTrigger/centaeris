@@ -57,9 +57,11 @@ const RECOVERABLE_CLEANUP: &str = r#"EXISTS(
    OR p.payload_json::jsonb->>'authorizationDigest' IS DISTINCT FROM a.digest)))"#;
 
 fn control_candidates(stage: &str) -> String {
-    let queued = format!(
-        "j.status='queued' AND j.run_at_ms<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND {PENDING} AND ({TERMINAL})=$2"
-    );
+    control_candidates_at(stage, "AND j.run_at_ms<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint")
+}
+
+fn control_candidates_at(stage: &str, due: &str) -> String {
+    let queued = format!("j.status='queued' {due} AND {PENDING} AND ({TERMINAL})=$2");
     let eligible = if stage == "cleanup" {
         format!("({queued}) OR (j.status IN('failed','dead_lettered') AND {RECOVERABLE_CLEANUP})")
     } else {
@@ -110,6 +112,29 @@ pub(super) fn mark_terminal_pending(tx: &mut impl GenericClient, run: &str) -> R
 }
 
 impl PostgresRuntimeStore {
+    pub(crate) fn control_job_wait(
+        &self,
+        stage: &str,
+        max_wait: std::time::Duration,
+    ) -> Result<std::time::Duration, String> {
+        if !matches!(stage, "advance" | "cleanup") {
+            return Err("control stage invalid".into());
+        }
+        self.with_execution_control_client(|client| {
+            let affinity = super::execution_capacity::host_affinity("$3");
+            let row = client.query_one(
+                &format!("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint, MIN(CASE WHEN j.status='queued' THEN GREATEST(j.run_at_ms,COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)) ELSE 0 END) FROM runtime_jobs j WHERE {} AND {affinity}", control_candidates_at(stage, "")),
+                &[&None::<String>, &(stage == "cleanup"), &self.dispatch_host_id()],
+            ).map_err(|e| e.to_string())?;
+            let now: i64 = row.get(0);
+            let due: Option<i64> = row.get(1);
+            // A due row can be locked by another claimant. Keep the existing
+            // bounded recheck in that case instead of spinning on the same row.
+            Ok(due.map(|at| std::time::Duration::from_millis(at.saturating_sub(now).max(250) as u64))
+                .unwrap_or(max_wait).min(max_wait))
+        })
+    }
+
     pub(crate) fn verify_lifecycle_completion(&self, id: &str) -> Result<(), String> {
         self.with_client(|client| {
             let mut tx = client.transaction().map_err(|e| e.to_string())?;

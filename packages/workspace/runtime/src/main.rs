@@ -494,11 +494,6 @@ fn main() -> Result<(), String> {
                     ProviderPollingSchedulerConfig::default(),
                 );
             provider_polling.start()?;
-            runtime.spawn(run_hosted_subagent_worker(
-                store.clone(),
-                job_store.clone(),
-                tool_layers.clone(),
-            ));
             Ok(())
         },
     )?;
@@ -514,7 +509,13 @@ fn main() -> Result<(), String> {
         request_policy: request_policy::RequestPolicy::from_env()?,
         native_model,
     };
-    let mut lifecycle = lifecycle_executor::start(state.clone())?;
+    let mut lifecycle = lifecycle_executor::start(state.clone(), Default::default())?;
+    runtime.spawn(run_hosted_subagent_worker(
+        state.store.clone(),
+        state.job_store.clone(),
+        state.tool_layers.clone(),
+        lifecycle.work_wake.clone(),
+    ));
     let result = runtime.block_on(serve_http(listener, state));
     runtime.block_on(lifecycle.shutdown());
     result
@@ -762,15 +763,27 @@ async fn run_hosted_subagent_worker(
     store: Arc<RuntimeStoreActor>,
     job_store: Arc<PostgresRuntimeStore>,
     contexts: ToolLayerRegistry,
+    work_wake: lifecycle_executor::WorkWake,
 ) {
     loop {
-        if let Err(error) =
-            run_next_hosted_subagent_batch(store.as_ref(), job_store.clone(), contexts.clone())
-                .await
+        let mut ready = work_wake.subscribe();
+        let wait = match run_next_hosted_subagent_batch(
+            store.as_ref(),
+            job_store.clone(),
+            contexts.clone(),
+        )
+        .await
         {
-            eprintln!("hosted subagent worker failed: {error}");
+            Ok(wait) => wait,
+            Err(error) => {
+                eprintln!("hosted subagent worker failed: {error}");
+                Duration::from_secs(1)
+            }
+        };
+        tokio::select! {
+            _ = ready.changed() => {},
+            _ = tokio::time::sleep(wait) => {},
         }
-        tokio::time::sleep(Duration::from_millis(HOSTED_SUBAGENT_IDLE_MS)).await;
     }
 }
 
@@ -778,9 +791,9 @@ async fn run_next_hosted_subagent_batch(
     store: &RuntimeStoreActor,
     job_store: Arc<PostgresRuntimeStore>,
     contexts: ToolLayerRegistry,
-) -> Result<(), String> {
+) -> Result<Duration, String> {
     let now = now_ms()?;
-    store.reclaim_expired_runtime_job_leases(now).await?;
+    // Lifecycle owns global expired-lease recovery, including child jobs.
     let jobs = store
         .list_runtime_jobs(ListRuntimeJobsRequest {
             statuses: vec![RuntimeJobStatus::Queued],
@@ -791,11 +804,24 @@ async fn run_next_hosted_subagent_batch(
             offset: 0,
         })
         .await?;
+    let wait = jobs
+        .iter()
+        .map(|job| {
+            Duration::from_millis(
+                job.run_at_ms
+                    .saturating_sub(now)
+                    .max(HOSTED_SUBAGENT_IDLE_MS as i64) as u64,
+            )
+        })
+        .min()
+        .unwrap_or(lifecycle_executor::IDLE_RECHECK)
+        .min(lifecycle_executor::IDLE_RECHECK);
     let batches = hosted_subagent_batches(&jobs, &contexts, now)?;
     run_hosted_subagent_batches(batches, |batch| {
         run_hosted_subagent_batch(store, job_store.clone(), batch, now)
     })
-    .await
+    .await?;
+    Ok(wait)
 }
 
 struct HostedSubagentBatch {

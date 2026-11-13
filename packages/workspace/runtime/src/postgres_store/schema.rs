@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 20;
+const STORE_SCHEMA_VERSION: i64 = 21;
 const SUBAGENT_PRESENTATION_DDL: &str = r#"
 CREATE FUNCTION runtime.notify_subagent_presentation_v1() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -314,6 +314,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_sandbox_deployment(client)?;
         upgrade_worker_dispatch_host(client)?;
         upgrade_subagent_presentation(client)?;
+        upgrade_child_job_notifications(client)?;
     } else {
         create_schema(client)?;
     }
@@ -521,6 +522,10 @@ fn upgrade_worker_dispatch_host(client: &mut Client) -> Result<(), String> {
 
 fn upgrade_subagent_presentation(client: &mut Client) -> Result<(), String> {
     upgrade_dispatch_schema(client, 20, SUBAGENT_PRESENTATION_DDL)
+}
+
+fn upgrade_child_job_notifications(client: &mut Client) -> Result<(), String> {
+    upgrade_dispatch_schema(client, 21, CHILD_JOB_NOTIFICATION_DDL)
 }
 
 fn upgrade_sandbox_deployment(client: &mut Client) -> Result<(), String> {
@@ -801,6 +806,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
     tx.batch_execute(WORKER_DISPATCH_HOST_DDL)
         .map_err(|e| e.to_string())?;
     tx.batch_execute(SUBAGENT_PRESENTATION_DDL)
+        .map_err(|e| e.to_string())?;
+    tx.batch_execute(CHILD_JOB_NOTIFICATION_DDL)
         .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
@@ -1460,6 +1467,26 @@ CREATE INDEX idx_external_context_links_session_linked ON runtime.external_conte
 CREATE INDEX idx_external_context_links_object ON runtime.external_context_links(object_id, linked_at_ms DESC, session_id ASC);
 "#;
 
+const CHILD_JOB_NOTIFICATION_DDL: &str = r#"
+CREATE OR REPLACE FUNCTION runtime.notify_runtime_job_ready_v1() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.job_kind = 'agent_run.lifecycle' AND OLD.status IN ('leased','running') AND NEW.status NOT IN ('leased','running') THEN
+            PERFORM pg_notify('runtime_job_ready_v1', '');
+        END IF;
+    END IF;
+    IF NEW.status = 'queued' AND NEW.job_kind IN ('agent_run.lifecycle','worker.noop','subagent.run') THEN
+        IF TG_OP = 'INSERT' THEN
+            PERFORM pg_notify('runtime_job_ready_v1', '');
+        ELSIF OLD.status IS DISTINCT FROM 'queued' OR OLD.run_at_ms IS DISTINCT FROM NEW.run_at_ms OR OLD.job_kind IS DISTINCT FROM NEW.job_kind THEN
+            PERFORM pg_notify('runtime_job_ready_v1', '');
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+"#;
+
 const TRANSCRIPT_DDL: &str = r#"
 CREATE TABLE runtime.transcript_projection_heads(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,source_high_water bigint NOT NULL CHECK(source_high_water>=0),invalidation_reason text,PRIMARY KEY(session_id,projection_version,projection_generation));
 CREATE TABLE runtime.transcript_projection_current_generations(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,source_high_water bigint NOT NULL CHECK(source_high_water>=0),PRIMARY KEY(session_id,projection_version),FOREIGN KEY(session_id,projection_version,projection_generation) REFERENCES runtime.transcript_projection_heads(session_id,projection_version,projection_generation) ON DELETE CASCADE);
@@ -1521,7 +1548,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 20);
+        assert_eq!(STORE_SCHEMA_VERSION, 21);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

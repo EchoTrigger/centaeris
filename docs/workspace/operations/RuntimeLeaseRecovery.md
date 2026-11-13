@@ -34,6 +34,40 @@ settings do not change ordinary-operation durability. Tests verify the critical
 settings and persisted transitions; they do not establish survival of actual
 hardware power loss or safe external-provider replay after an unknown result.
 
+## Hosted idle dispatch
+
+The hosted lifecycle executor owns global expired-lease recovery, including
+subagent jobs, on its five-second reconciliation loop. The subagent dispatcher
+does not run a second global reclaim scan.
+
+Advance, cleanup and subagent dispatch subscribe to a shared local wake before
+checking durable work. The execute lane broadcasts after registering its
+existing PostgreSQL listener and on `runtime_job_ready_v1` notifications. The
+listener pool does not gain another long-held connection. Runtime schema 21
+extends the existing notification trigger to queued `subagent.run` jobs through
+an explicit forward migration; lifecycle and no-op notifications retain their
+previous behavior.
+
+When no work exists these dispatchers recheck after five seconds. Future work
+uses its due time, including the control job's reclaim backoff, bounded by that
+recheck interval. Already-due but unavailable work retains the 250 ms recheck.
+Notifications only accelerate durable checks: startup, reconnect and the bounded
+timer recover missed hints. Claim fences, host affinity, cancellation authority,
+cleanup receipts and active-run renewal remain the dispatch authority.
+
+Deadline-scoped PostgreSQL checkout uses its timeout-setting query as the idle
+connection health check. The pool still checks the remaining deadline before
+calling the operation, never replays an operation after an uncertain result,
+and returns connections only after `DISCARD ALL` and restoring the search path.
+That reset is required by production listeners and session advisory locks.
+
+Platform reconciliation only schedules a missing lifecycle job. An existing
+queued, leased or running job still requires its exact run/authorization binding
+and current interactive authority; API revocation, queued expiry and terminal
+projection remain reconciliation responsibilities. Session presentation merges
+the authority facts into one query while retaining the recheck before every
+delivered frame. It does not cache membership or extend revocation latency.
+
 ## Continuous hosted Worker renewal
 
 The hosted heartbeat endpoint uses the existing reserved control pool. It takes
