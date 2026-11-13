@@ -27,7 +27,10 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
   const root = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues`;
   const base = `/w/${encodeURIComponent(workspaceId)}/work/${mine ? "mine" : "tasks"}`;
   const query = params.toString() ? `?${params.toString()}` : "";
-  const listUrl = `${base}${query}`;
+  const inboxPath = `/w/${encodeURIComponent(workspaceId)}/work/inbox`;
+  const returnTo = params.get("returnTo");
+  const inboxReturn = returnTo && !returnTo.includes("#") && (returnTo === inboxPath || returnTo.startsWith(`${inboxPath}?`)) ? returnTo : null;
+  const listUrl = inboxReturn || `${base}${query}`;
   const creating = issueId === "new";
   const detail = Boolean(issueId) && !creating;
   const title = t(mine ? "work.myIssues" : "work.issues");
@@ -66,7 +69,7 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
   const time = value => new Date(value).toLocaleString(i18n.language);
   const issue = data?.issue;
   return <section className="issuesSurface" aria-busy={!data && !error}>
-    <header className="workHeader"><WorkBreadcrumb parents={issueId ? [{ to: listUrl, label: title }] : []} current={creating ? t("issues.new") : detail ? issue?.title || "" : title} count={!issueId ? data?.total : undefined} />
+    <header className="workHeader"><WorkBreadcrumb parents={issueId ? [{ to: listUrl, label: inboxReturn ? t("work.inbox") : title }] : []} current={creating ? t("issues.new") : detail ? issue?.title || "" : title} count={!issueId ? data?.total : undefined} />
       {!issueId ? <Button variant="outline" onClick={() => navigate(`${base}/new${query}`)}><Plus aria-hidden="true" />{t("issues.new")}</Button> : null}
     </header>
     {error ? <div className="issueError" role="alert"><span>{error.status === 409 ? t("issues.conflict") : t("issues.failed", { message: error.message })}</span><Button variant="ghost" disabled={pending} onClick={() => setRevision(value => value + 1)}>{t("issues.reload")}</Button></div> : null}

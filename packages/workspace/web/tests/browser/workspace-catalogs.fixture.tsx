@@ -11,7 +11,7 @@ import WorkPrototypeRoute from "../../src/work/WorkPrototypeRoute";
 import "../../src/globals.css";
 
 configureApi({ apiBaseUrl: location.origin });
-document.documentElement.dataset.theme = "light";
+document.documentElement.dataset.theme = new URLSearchParams(location.search).get("theme") || "light";
 await i18n.changeLanguage("en");
 const workspace = { id: "workspace", name: "Research workspace", role: "owner", avatarUrl: null };
 const user = { id: "user", email: "fixture@example.invalid" };
@@ -22,8 +22,24 @@ const skill = { skillId: "plugin:research:evidence", name: "Evidence review", de
 const failures: string[] = [];
 window.addEventListener("error", event => failures.push(event.message));
 window.addEventListener("unhandledrejection", event => failures.push(String(event.reason)));
+const notification = { id: "notification-evidence", workspaceId: workspace.id, issueId: issue.id, issueTitle: issue.title, kind: "assigned", event: { id: "assignment-evidence", issueId: issue.id, actor: { id: "other", name: "Alex" }, type: "updated", changes: { assigneeId: { before: null, after: user.id } }, createdAt: issue.createdAt }, readAt: null, archivedAt: null, createdAt: issue.createdAt, ...JSON.parse(localStorage.getItem("fixtureNotificationReceipt") || "{}") };
 window.fetch = async (input, options) => {
   const url = new URL(String(input), location.href);
+  if (url.pathname === "/api/csrf") return Response.json({ csrfToken: "fixture" });
+  if (url.pathname.endsWith("/notifications/notification-evidence")) {
+    if (options?.method === "PATCH") {
+      const body = JSON.parse(String(options.body));
+      if (body.read !== undefined) notification.readAt = body.read ? new Date().toISOString() : null;
+      if (body.archived !== undefined) notification.archivedAt = body.archived ? new Date().toISOString() : null;
+      localStorage.setItem("fixtureNotificationReceipt", JSON.stringify({ readAt: notification.readAt, archivedAt: notification.archivedAt }));
+    }
+    return Response.json({ notification });
+  }
+  if (url.pathname.endsWith("/notifications")) {
+    const view = url.searchParams.get("view");
+    const visible = view === "archived" ? notification.archivedAt : !notification.archivedAt && (view !== "unread" || !notification.readAt);
+    return Response.json({ notifications: visible ? [notification] : [], total: visible ? 1 : 0, unreadCount: notification.readAt || notification.archivedAt ? 0 : 1 });
+  }
   if (options?.method && options.method !== "GET") throw new Error(`Unexpected mutation: ${url.pathname}`);
   if (url.pathname.endsWith("/issues/assignees")) return Response.json({ assignees: [{ id: user.id, name: "Alex" }] });
   if (url.pathname.endsWith("/issues/issue-evidence/events")) return Response.json({ events: [{ id: "event-evidence", issueId: issue.id, actor: { id: user.id, name: "Alex" }, type: "created", changes: { title: { before: null, after: issue.title } }, createdAt: issue.createdAt }], total: 1 });

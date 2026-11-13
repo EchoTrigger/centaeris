@@ -12,7 +12,7 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
   const server = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), server: { port: 0, host: "127.0.0.1" } });
   try {
     await server.listen();
-    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/workspace-catalogs.html`, { width: 1280, height: 900 }, profile, async ({ evaluate, send, frame }) => {
+    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/workspace-catalogs.html?theme=${process.env.CENTAERIS_CATALOG_THEME || "light"}`, { width: 1280, height: 900 }, profile, async ({ evaluate, send, frame }) => {
       const text = value => evaluate(`document.body.textContent.includes(${JSON.stringify(value)})`);
       const click = value => evaluate(`([...document.querySelectorAll('button,a,[role=menuitem]')].find(element => element.textContent.trim() === ${JSON.stringify(value)})).click()`);
       async function capture(name) {
@@ -22,18 +22,25 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
         const { data } = await send("Page.captureScreenshot", { format: "png" });
         await writeFile(join(process.env.CENTAERIS_CATALOG_SCREENSHOT_DIR, `${name}.png`), Buffer.from(data, "base64"));
       }
-      await waitFor(() => text("The release review needs one more example."), "Inbox items");
+      await waitFor(() => text("Alex assigned this issue to you."), "Inbox items");
       await evaluate("document.querySelector('.inboxItem').click()");
-      await waitFor(() => text("The guide and license checks passed."), "notification detail");
+      await waitFor(() => evaluate("Boolean(document.querySelector('[aria-label=\"Mark as unread\"]:not(:disabled)'))"), "notification detail acknowledged");
       await capture("inbox");
+      await click("Open Issues");
+      await waitFor(() => text("Check the source permissions and record the result."), "linked Issue");
+      await evaluate("document.querySelector('.workBreadcrumb a').click()");
+      await waitFor(() => evaluate("Boolean(document.querySelector('[aria-label=\"Archive notification\"]:not(:disabled)'))"), "Inbox selection restored after Issue");
       await evaluate("document.querySelector('[aria-label=\"Archive notification\"]').click()");
+      await waitFor(() => evaluate("!document.querySelector('[aria-label=\"Archive notification\"]')"), "archive acknowledged");
       await click("Archived");
       await evaluate("window.catalogFixture = undefined");
       await send("Page.reload");
       await waitFor(() => evaluate("Boolean(window.catalogFixture && document.querySelector('.inboxItem'))"), "reloaded Inbox");
-      await waitFor(() => text("The release review needs one more example."), "archived notification after reload");
+      await waitFor(() => text("Alex assigned this issue to you."), "archived notification after reload");
       await evaluate("document.querySelector('.inboxItem').click()");
       await waitFor(() => evaluate("Boolean(document.querySelector('[aria-label=\"Restore to inbox\"]'))"), "restorable archived notification");
+      await evaluate("document.querySelector('[aria-label=\"Restore to inbox\"]').click()");
+      await waitFor(() => text("No archived notifications"), "restored notification");
       await evaluate("catalogFixture.navigate('library')");
       await waitFor(() => text("Research brief.pdf"), "Space materials");
       await capture("space");
@@ -59,6 +66,7 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
       await waitFor(() => text("Can view"), "source list history");
       await evaluate("catalogFixture.navigate('work/home')");
       await waitFor(() => text("Workspace resources"), "Home resources");
+      await capture("home");
       await evaluate("[...document.querySelectorAll('.catalogRows a')].find(a => a.textContent.includes('Manage connections')).click()");
       await waitFor(() => text("Credentials required"), "connection status");
       assert.equal(await evaluate("document.querySelectorAll('.connectionCatalog .catalogRows a').length"), 1, "one MCP entry for the plugin");
@@ -87,7 +95,7 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
       await capture("plugins");
       await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
       await evaluate("catalogFixture.navigate('work/inbox')");
-      await waitFor(() => text("Confirm which sources the research can use."), "narrow Inbox");
+      await waitFor(() => text("Alex assigned this issue to you."), "narrow Inbox");
       await evaluate("document.querySelector('.inboxItem').click()");
       await waitFor(() => evaluate("Boolean(document.querySelector('[aria-label=\"Close notification\"]'))"), "narrow notification detail");
       await capture("inbox-mobile");
