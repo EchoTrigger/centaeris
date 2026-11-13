@@ -30,15 +30,37 @@ pub struct McpServersFileV1 {
 #[serde(deny_unknown_fields)]
 pub struct McpServerDeclarationV1 {
     pub id: String,
-    #[serde(rename = "modelContractDigest")]
-    pub model_contract_digest: String,
+    #[serde(
+        rename = "modelContractDigest",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub model_contract_digest: Option<String>,
+    #[serde(
+        rename = "toolDiscovery",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub tool_discovery: Option<McpToolDiscoveryV1>,
     pub transport: McpTransportV1,
     pub lifecycle: McpLifecycleV1,
     #[serde(rename = "startupTimeoutMs")]
     pub startup_timeout_ms: u64,
     #[serde(rename = "toolTimeoutMs")]
     pub tool_timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<McpToolDeclarationV1>,
+}
+
+/// Package-owned naming and authority for a remotely discovered tool directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpToolDiscoveryV1 {
+    pub name_prefix: String,
+    pub concurrency_safe: bool,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,48 +224,72 @@ impl McpServerDeclarationV1 {
         if !(1..=300_000).contains(&self.tool_timeout_ms) {
             return Err("MCP toolTimeoutMs must be between 1 and 300000".to_string());
         }
+        if let Some(discovery) = &self.tool_discovery {
+            if self.model_contract_digest.is_some() || !self.tools.is_empty() {
+                return Err(
+                    "MCP toolDiscovery cannot be combined with pinned tools or modelContractDigest"
+                        .into(),
+                );
+            }
+            validate_lower_snake("MCP toolDiscovery namePrefix", &discovery.name_prefix)?;
+            validate_scopes(&discovery.scopes)?;
+            return Ok(());
+        }
         if self.tools.is_empty() || self.tools.len() > MAX_TOOLS_PER_SERVER {
             return Err("MCP server must declare 1-128 tools".to_string());
         }
-        let mut previous_source_name: Option<&str> = None;
-        let mut model_names = HashSet::new();
-        for tool in &self.tools {
-            validate_exact_text("MCP sourceName", tool.source_name.as_str(), 128)?;
-            validate_lower_snake("MCP model tool name", tool.name.as_str())?;
-            validate_model_description(tool.description.as_str())?;
-            if !tool.input_schema.is_object() {
-                return Err(
-                    "MCP tool inputSchema must be an object of at most 65536 bytes".to_string(),
-                );
-            }
-            json_size_with_limit(&tool.input_schema, MAX_TOOL_INPUT_SCHEMA_BYTES)
-                .map_err(|error| format!("MCP tool inputSchema: {error}"))?;
-            if previous_source_name.is_some_and(|previous| previous >= tool.source_name.as_str()) {
-                return Err("MCP tools must be sorted by unique sourceName".to_string());
-            }
-            previous_source_name = Some(tool.source_name.as_str());
-            if !model_names.insert(tool.name.as_str()) {
-                return Err("MCP model tool names must be unique per server".to_string());
-            }
-            let mut previous_scope: Option<&str> = None;
-            for scope in &tool.scopes {
-                validate_exact_text("MCP tool scope", scope.as_str(), 128)?;
-                if previous_scope.is_some_and(|previous| previous >= scope.as_str()) {
-                    return Err("MCP tool scopes must be sorted and unique".to_string());
-                }
-                previous_scope = Some(scope.as_str());
-            }
-        }
-        require_sha256(
-            "MCP modelContractDigest",
-            self.model_contract_digest.as_str(),
-        )?;
-        if mcp_model_contract_digest(self.id.as_str(), self.tools.as_slice())?
-            != self.model_contract_digest
-        {
+        validate_tool_declarations(&self.tools)?;
+        let digest = self
+            .model_contract_digest
+            .as_deref()
+            .ok_or("MCP pinned tools require modelContractDigest")?;
+        require_sha256("MCP modelContractDigest", digest)?;
+        if mcp_model_contract_digest(self.id.as_str(), self.tools.as_slice())? != digest {
             return Err("MCP modelContractDigest mismatch".to_string());
         }
         Ok(())
+    }
+
+    /// Validates an upstream directory under the installed package's authority.
+    pub fn discovered_tool_declarations(
+        &self,
+        discovered: Vec<McpDiscoveredToolV1>,
+    ) -> Result<Vec<McpToolDeclarationV1>, String> {
+        self.validate()?;
+        let discovery = self
+            .tool_discovery
+            .as_ref()
+            .ok_or("MCP server does not use toolDiscovery")?;
+        if discovered.len() > MAX_TOOLS_PER_SERVER {
+            return Err("MCP discovery exceeds 128 tools".into());
+        }
+        let mut tools = Vec::with_capacity(discovered.len());
+        for tool in discovered {
+            validate_lower_snake("MCP discovered sourceName", &tool.name)?;
+            tools.push(McpToolDeclarationV1 {
+                name: format!("{}_{}", discovery.name_prefix, tool.name),
+                source_name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+                concurrency_safe: discovery.concurrency_safe,
+                scopes: discovery.scopes.clone(),
+            });
+        }
+        tools.sort_by(|left, right| left.source_name.cmp(&right.source_name));
+        validate_tool_declarations(&tools)?;
+        Ok(tools)
+    }
+
+    /// Projects validated discovered tools into Core's execution contracts.
+    pub fn discovered_tool_catalog(
+        &self,
+        plugin_name: &str,
+        discovered: Vec<McpDiscoveredToolV1>,
+    ) -> Result<(Vec<McpToolDeclarationV1>, Vec<DynamicToolContract>), String> {
+        let tools = self.discovered_tool_declarations(discovered)?;
+        let provider_id = mcp_provider_id(plugin_name, &self.id)?;
+        let contracts = tool_contracts(&provider_id, &tools);
+        Ok((tools, contracts))
     }
 
     pub fn dynamic_tool_contracts(
@@ -252,21 +298,74 @@ impl McpServerDeclarationV1 {
     ) -> Result<Vec<DynamicToolContract>, String> {
         self.validate()?;
         let provider_id = mcp_provider_id(plugin_name, self.id.as_str())?;
-        Ok(self
-            .tools
-            .iter()
-            .map(|tool| DynamicToolContract {
-                name: tool.name.clone(),
-                category: "external.mcp".to_string(),
-                summary: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-                provider_id: provider_id.clone(),
-                scopes: tool.scopes.clone(),
-                concurrency_safe: tool.concurrency_safe,
-                turn_behavior: ToolTurnBehavior::ContinueTurn,
-            })
-            .collect())
+        Ok(tool_contracts(&provider_id, &self.tools))
     }
+}
+
+/// Transport-independent metadata received from MCP tools/list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpDiscoveredToolV1 {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+fn validate_tool_declarations(tools: &[McpToolDeclarationV1]) -> Result<(), String> {
+    let mut budget = ToolContractBudget::default();
+    let mut previous_source_name: Option<&str> = None;
+    let mut model_names = HashSet::new();
+    for tool in tools {
+        validate_exact_text("MCP sourceName", tool.source_name.as_str(), 128)?;
+        validate_lower_snake("MCP model tool name", tool.name.as_str())?;
+        validate_model_description(tool.description.as_str())?;
+        if !tool.input_schema.is_object() {
+            return Err(
+                "MCP tool inputSchema must be an object of at most 65536 bytes".to_string(),
+            );
+        }
+        json_size_with_limit(&tool.input_schema, MAX_TOOL_INPUT_SCHEMA_BYTES)
+            .map_err(|error| format!("MCP tool inputSchema: {error}"))?;
+        if previous_source_name.is_some_and(|previous| previous >= tool.source_name.as_str()) {
+            return Err("MCP tools must be sorted by unique sourceName".to_string());
+        }
+        previous_source_name = Some(tool.source_name.as_str());
+        if !model_names.insert(tool.name.as_str()) {
+            return Err("MCP model tool names must be unique per server".to_string());
+        }
+        validate_scopes(&tool.scopes)?;
+    }
+    for tool in tools {
+        budget.add(tool)?;
+    }
+    Ok(())
+}
+
+fn validate_scopes(scopes: &[String]) -> Result<(), String> {
+    let mut previous: Option<&str> = None;
+    for scope in scopes {
+        validate_exact_text("MCP tool scope", scope, 128)?;
+        if previous.is_some_and(|value| value >= scope.as_str()) {
+            return Err("MCP tool scopes must be sorted and unique".into());
+        }
+        previous = Some(scope);
+    }
+    Ok(())
+}
+
+fn tool_contracts(provider_id: &str, tools: &[McpToolDeclarationV1]) -> Vec<DynamicToolContract> {
+    tools
+        .iter()
+        .map(|tool| DynamicToolContract {
+            name: tool.name.clone(),
+            category: "external.mcp".to_string(),
+            summary: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
+            provider_id: provider_id.to_string(),
+            scopes: tool.scopes.clone(),
+            concurrency_safe: tool.concurrency_safe,
+            turn_behavior: ToolTurnBehavior::ContinueTurn,
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -439,9 +538,12 @@ mod tests {
         McpServersFileV1 {
             schema: MCP_SERVERS_SCHEMA_V1.to_string(),
             servers: vec![McpServerDeclarationV1 {
+                tool_discovery: None,
                 id: "banana-source".to_string(),
-                model_contract_digest: mcp_model_contract_digest("banana-source", tools.as_slice())
-                    .expect("model contract digest"),
+                model_contract_digest: Some(
+                    mcp_model_contract_digest("banana-source", tools.as_slice())
+                        .expect("model contract digest"),
+                ),
                 transport: McpTransportV1::Stdio {
                     program: "bin/banana-mcp".to_string(),
                     args: vec![],
@@ -452,6 +554,51 @@ mod tests {
                 tools,
             }],
         }
+    }
+
+    #[test]
+    fn discovery_contract_is_explicit_and_keeps_package_authority() {
+        let mut declaration = valid();
+        let server = &mut declaration.servers[0];
+        server.tools.clear();
+        server.model_contract_digest = None;
+        server.tool_discovery = Some(McpToolDiscoveryV1 {
+            name_prefix: "banana".into(),
+            concurrency_safe: false,
+            scopes: vec!["banana:read".into()],
+        });
+        let directory = vec![McpDiscoveredToolV1 {
+            name: "search".into(),
+            description: "Search current records.".into(),
+            input_schema: json!({"type":"object", "properties":{"query":{"type":"string"}}, "required":["query"]}),
+        }];
+        let (tools, contracts) = server
+            .discovered_tool_catalog("banana-plugin", directory.clone())
+            .unwrap();
+        assert_eq!(tools[0].source_name, "search");
+        assert_eq!(contracts[0].name, "banana_search");
+        assert_eq!(contracts[0].scopes, ["banana:read"]);
+        assert!(!contracts[0].concurrency_safe);
+        let encoded = serde_json::to_value(&*server).unwrap();
+        assert!(encoded.get("tools").is_none());
+        assert!(encoded.get("modelContractDigest").is_none());
+        let mut invalid = directory.clone();
+        invalid[0].name = "SearchRecords".into();
+        assert!(server
+            .discovered_tool_catalog("banana-plugin", invalid)
+            .is_err());
+        assert!(server
+            .discovered_tool_catalog("banana-plugin", [directory.clone(), directory].concat())
+            .is_err());
+        server.model_contract_digest = Some(format!("sha256:{}", "0".repeat(64)));
+        assert!(server
+            .validate()
+            .unwrap_err()
+            .contains("cannot be combined"));
+        server.model_contract_digest = None;
+        let mut invalid = serde_json::to_value(&*server).unwrap();
+        invalid["toolDiscovery"]["extra"] = json!(true);
+        assert!(serde_json::from_value::<McpServerDeclarationV1>(invalid).is_err());
     }
 
     #[test]
@@ -519,11 +666,13 @@ mod tests {
         );
         let mut unsorted_declaration = declaration.clone();
         unsorted_declaration.servers[0].tools = unsorted;
-        unsorted_declaration.servers[0].model_contract_digest = mcp_model_contract_digest(
-            "banana-source",
-            unsorted_declaration.servers[0].tools.as_slice(),
-        )
-        .expect("manifest digest");
+        unsorted_declaration.servers[0].model_contract_digest = Some(
+            mcp_model_contract_digest(
+                "banana-source",
+                unsorted_declaration.servers[0].tools.as_slice(),
+            )
+            .expect("manifest digest"),
+        );
         assert!(unsorted_declaration.validate().is_err());
     }
 
@@ -534,7 +683,7 @@ mod tests {
         let description = "\n  Search bananas.\n";
         server.tools[0].description = description.to_string();
         server.model_contract_digest =
-            mcp_model_contract_digest(&server.id, &server.tools).expect("exact digest");
+            Some(mcp_model_contract_digest(&server.id, &server.tools).expect("exact digest"));
         server
             .validate()
             .expect("non-empty description with whitespace");

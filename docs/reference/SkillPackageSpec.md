@@ -167,39 +167,62 @@ an undeclared tool, access a credential, or bypass Host policy.
 
 ## MCP declarations
 
-An MCP declaration uses schema `mcp_servers_v1`. Each server freezes transport,
-lifecycle and timeout fields plus its model contract. Tools in the declaration
-are sorted by unique `sourceName`; Core constructs model-visible tools in that
-frozen declaration order.
+An MCP declaration uses schema `mcp_servers_v1`. Every server freezes its
+transport, credential reference, lifecycle and timeout fields. It selects one
+of two explicit tool catalog modes:
 
-`modelContractDigest` is independent of live discovery order. Its SHA-256 input
-is:
+- **Pinned:** declare `tools` sorted by unique `sourceName` and the matching
+  `modelContractDigest`. Runtime connects lazily on first use and rejects
+  missing, additional or changed live tools. Description comparison tolerates
+  whitespace changes while retaining exact words and schema values.
+- **Discovered:** declare `toolDiscovery` and omit `tools` and
+  `modelContractDigest`. For example:
 
-```text
-UTF-8("centaeris.mcp_model_contract.v1")
-0x00
-canonicalJson(modelContract)
-```
+  ```json
+  {"namePrefix":"records","concurrencySafe":false,"scopes":["records:read"]}
+  ```
 
-`modelContract` has schema `mcp_model_contract_v1`, the exact `serverId`, and
-tools sorted by `sourceName`. Each digest tool contains exactly `sourceName`,
-model-visible `name`, `description`, and `inputSchema`. Canonical JSON is compact
-UTF-8 JSON with object keys sorted lexicographically at every depth and array
-order preserved. `concurrencySafe` and `scopes` remain frozen package contract
-fields, but are not model-visible fields and are not inputs to
-`modelContractDigest`; the package digest still binds them.
+Discovery authorizes a directory from the installed server under the
+package-owned scopes and concurrency policy. Upstream annotations cannot add
+scopes or change concurrency. A newly discovered tool is not evidence that it
+is read-only; only install discovery for a server whose capabilities belong
+inside that package grant. Existing Host enablement and credentials are still
+checked at dispatch.
 
-Catalog construction validates declarations and `modelContractDigest` offline.
-Runtime connects lazily on first use. Live `tools/list` responses may enumerate
-the same tools in any order. Runtime compares tools by `sourceName` and rejects
-missing, additional, duplicate, or changed descriptions and input schemas. It
-then uses the frozen declaration, not discovery order, to construct the model
-contract. A credential appears only as a Host-resolved reference.
+Core requires discovered source names to already use canonical
+`lower_snake_case`; the model name is exactly `<namePrefix>_<sourceName>`.
+It validates descriptions, schemas, directory limits and duplicate identities.
+No source-name alias or argument rewriting is applied.
 
-The [MCP tools specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
-represents `tools/list` as a paginated array but does not make array position
-part of tool identity. Deterministic server ordering can improve caching; it is
-not a Centaeris connection requirement.
+Hosts discover dynamic directories when preparing a new activation. Connections
+are reused within it. Native `notifications/tools/list_changed` invalidates
+the cache; negotiated 2026-07-28 connections use `subscriptions/listen` when
+the server advertises notifications. Hosts refresh an invalidated directory
+before the next model request. A reconnect also discovers a new directory.
+Servers without notifications are rediscovered for a new activation and after
+an upstream name/parameter rejection. No metadata scan is required before
+every tool call. Failed refreshes retain invalidation. An unavailable or invalid
+remote directory contributes no executable tools and a Host diagnostic; it does
+not block unrelated connectors or built-in tools. Later metadata refresh can
+restore a validated directory without replaying any business call.
+
+Each model request freezes its execution contracts alongside its tool
+definitions. A stale call is rejected, and business calls are never replayed
+automatically. Delegated work validates and freezes the exact contracts in its
+work packet; later parent directory updates do not widen that delegation.
+
+For pinned mode, `modelContractDigest` is SHA-256 over the UTF-8 domain
+`centaeris.mcp_model_contract.v1`, a zero byte, and canonical JSON containing
+schema `mcp_model_contract_v1`, `serverId`, and tools sorted by `sourceName`.
+Each digest tool contains `sourceName`, `name`, `description`, and `inputSchema`.
+Object keys are sorted recursively and array order is preserved. The package
+resource digest separately binds transport, scopes and concurrency. Credentials
+appear only as Host-resolved references.
+
+Catalog publication validates both modes offline. The contract CLI `--sync`
+updates pinned declarations from complete authorized `tools/list` snapshots;
+for discovered declarations it validates snapshots without embedding them.
+Neither mode is a fallback for an invalid declaration of the other mode.
 
 ## Hook declarations
 

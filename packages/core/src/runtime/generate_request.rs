@@ -268,13 +268,22 @@ impl<
         Ok(Some(manifest_json))
     }
 
+    #[cfg(test)]
     pub(super) fn build_generate_tool_projection(
         &self,
         session: &SessionStateSnapshot,
     ) -> Result<(Vec<ModelToolDefinition>, String), String> {
+        self.build_generate_tool_projection_with_tools(session, &self.tools_port)
+    }
+
+    pub(super) fn build_generate_tool_projection_with_tools(
+        &self,
+        session: &SessionStateSnapshot,
+        tools: &ToolLayer,
+    ) -> Result<(Vec<ModelToolDefinition>, String), String> {
         let (mut definitions, guidance) = tool_projection::build_generate_tool_projection(
             session,
-            self.tools_port.dynamic_tool_registry(),
+            tools.dynamic_tool_registry().as_ref(),
             self.config.allowed_tools.as_deref(),
             self.tools_port.execution_host_kind(),
         )?;
@@ -400,6 +409,7 @@ impl<
         driver: &D,
         intake: Option<&mut MainRequestIntake<'_>>,
     ) -> Result<GenerateDriverRequest, String> {
+        self.tools_port.refresh_dynamic_tool_catalogs().await?;
         let mut session = self.session_manager.load_or_create_session(session_id)?;
         let pending_compaction = super::prompt_compaction_commit::active_commit(&session)?
             .filter(|commit| !commit.acknowledged);
@@ -531,6 +541,7 @@ impl<
         prepared_inputs: Option<PreparedRequestInputs>,
         prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<GenerateDriverRequest, String> {
+        let execution_tools = self.tools_port.clone();
         let projection_span = RequestPreparationSpan::new(
             self.request_preparation_observer.as_ref(),
             RequestPreparationStage::Projection,
@@ -542,6 +553,7 @@ impl<
             turn_id,
             input,
             prepared_agents,
+            &execution_tools,
         )?;
         let GeneratePromptProjection {
             mut session,
@@ -589,6 +601,17 @@ impl<
             system_prompt_manifest_json,
             compression_stats_json,
             context_token_estimate,
+            tool_contracts: self
+                .model_tool_contracts_for(&execution_tools)?
+                .into_iter()
+                .filter(|contract| {
+                    prepared_prompt
+                        .tool_definitions
+                        .iter()
+                        .any(|definition| definition.name == contract.name)
+                })
+                .collect(),
+            execution_tools,
             prepared_prompt,
             observations,
             live_content_prefix: input
@@ -643,6 +666,7 @@ impl<
                 turn_id,
                 input,
                 prepared_agents,
+                &self.tools_port,
             )
             .and_then(|projection| {
                 let estimate = u64::from(
@@ -672,12 +696,13 @@ impl<
         turn_id: &str,
         input: &TurnInput,
         prepared_agents: &mut Option<PreparedAgentsInstructions>,
+        execution_tools: &ToolLayer,
     ) -> Result<GeneratePromptProjection, String> {
         let answer_now = input.answer_now_intervention().is_some();
         let (tool_definitions, _) = if answer_now {
             (Vec::new(), String::new())
         } else {
-            self.build_generate_tool_projection(&session)?
+            self.build_generate_tool_projection_with_tools(&session, execution_tools)?
         };
         let (system_prompt, system_prompt_manifest_json) =
             if self.config.enable_system_prompt_template {

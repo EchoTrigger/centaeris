@@ -78,7 +78,11 @@ async fn question_tool_requires_persistent_host_and_is_not_delegated() {
         .iter()
         .any(|tool| tool.name == question::TOOL_NAME));
     assert!(unsupported
-        .validate_tool_turn_behavior_preflight(&session, &question_generate_result())
+        .validate_tool_turn_behavior_preflight(
+            &session,
+            &question_generate_result(),
+            &unsupported.tools_port
+        )
         .is_err());
     let supported = AgentRuntime::new_for_test(store.clone(), config());
     assert!(supported

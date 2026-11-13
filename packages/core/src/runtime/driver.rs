@@ -1407,6 +1407,9 @@ pub struct GenerateDriverRequest {
     pub compression_stats_json: Option<String>,
     pub context_token_estimate: u32,
     pub prepared_prompt: PreparedPromptV1,
+    /// Execution contracts frozen alongside the model-visible tool definitions.
+    pub tool_contracts: Vec<crate::tool::ToolContract>,
+    pub execution_tools: crate::tool::layer::ToolLayer,
     pub observations: Vec<ModelObservationV1>,
     pub live_content_prefix: String,
 }

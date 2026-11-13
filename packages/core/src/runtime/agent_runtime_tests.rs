@@ -2416,6 +2416,8 @@ async fn failed_stream_retracts_tentative_content_before_runtime_error() {
     };
     let driver = ModelClientGenerateDriver::new(&model_client, &config_store);
     let request = GenerateDriverRequest {
+        execution_tools: ToolLayer::new(),
+        tool_contracts: Vec::new(),
         prompt_compaction: None,
         session_id: "chat-partial-stream".to_string(),
         turn_id: "turn-partial-stream".to_string(),
@@ -2890,6 +2892,8 @@ async fn query_loop_preserves_dynamic_description_at_durable_model_request_bound
         &serde_json::to_string(&prepared_prompt.tool_definitions).unwrap(),
     );
     let request = GenerateDriverRequest {
+        execution_tools: ToolLayer::new(),
+        tool_contracts: environment.tool_contracts.clone(),
         prompt_compaction: None,
         session_id: "chat-description".to_string(),
         turn_id: "turn-description".to_string(),
@@ -2976,6 +2980,8 @@ async fn query_loop_persistence_fences_provider_dispatch_and_stream_output() {
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        execution_tools: ToolLayer::new(),
+        tool_contracts: Vec::new(),
         prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),
@@ -3796,8 +3802,11 @@ async fn protected_root_recursive_delete_is_blocked_while_scoped_cleanup_execute
         prompt_cache_miss_tokens: None,
     };
 
-    let preview =
-        engine.build_tool_permission_preview(&session, generate_result.tool_calls.as_slice());
+    let preview = engine.build_tool_permission_preview(
+        &session,
+        generate_result.tool_calls.as_slice(),
+        &engine.tools_port,
+    );
     let preview_decision = preview
         .get("call-protected-delete")
         .expect("protected delete permission preview");
@@ -3916,7 +3925,11 @@ fn host_process_capability_allows_bash_without_claiming_a_sandbox() {
         args_json: json!({ "command": "whoami" }).to_string(),
     };
 
-    let preview = engine.build_tool_permission_preview(&session, std::slice::from_ref(&call));
+    let preview = engine.build_tool_permission_preview(
+        &session,
+        std::slice::from_ref(&call),
+        &engine.tools_port,
+    );
     let decision = preview
         .get("call-host-process")
         .expect("host process decision");
@@ -12332,6 +12345,8 @@ async fn query_loop_reasoning_commits_before_return_and_persistence_failure_stop
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        execution_tools: ToolLayer::new(),
+        tool_contracts: Vec::new(),
         prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),
@@ -12503,6 +12518,8 @@ async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing
             .as_str(),
     );
     let request = GenerateDriverRequest {
+        execution_tools: ToolLayer::new(),
+        tool_contracts: Vec::new(),
         prompt_compaction: None,
         session_id: "chat-safe-point".to_string(),
         turn_id: "turn-safe-point".to_string(),

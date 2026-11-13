@@ -83,15 +83,28 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
         purpose: ModelRequestPurposeV1,
         request: ModelClientRequest,
         observations: Vec<ModelObservationV1>,
+        tool_contracts: &[crate::tool::ToolContract],
         prompt_compaction: Option<super::prompt_compaction_commit::PreparedCompactionCommit>,
     ) -> Result<Option<String>, String> {
         let Some(sink) = self.tool_safe_point else {
             return Ok(None);
         };
-        let composition = self
+        let mut environment = self
             .composition_environment
             .ok_or_else(|| "model request durability requires agent composition".to_string())?
-            .resolve_request(&request)?;
+            .clone();
+        environment.tool_contracts = tool_contracts
+            .iter()
+            .filter(|contract| {
+                request
+                    .prepared_prompt
+                    .tool_definitions
+                    .iter()
+                    .any(|definition| definition.name == contract.name)
+            })
+            .cloned()
+            .collect();
+        let composition = environment.resolve_request(&request)?;
         let mut started =
             ModelRequestStartedV1::from_request(purpose, &request, observations, composition)?;
         if let Some(commit) = prompt_compaction {
@@ -185,6 +198,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 ModelRequestPurposeV1::Main,
                 request.clone(),
                 req.observations.clone(),
+                &req.tool_contracts,
                 req.prompt_compaction.clone(),
             )?;
             let response = self
@@ -226,6 +240,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 ModelRequestPurposeV1::Main,
                 request.clone(),
                 req.observations.clone(),
+                &req.tool_contracts,
                 req.prompt_compaction.clone(),
             )?;
             sink(TurnUpdate::ModelRequestStart {
@@ -278,6 +293,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                                     ModelRequestPurposeV1::Main,
                                     request.clone(),
                                     req.observations.clone(),
+                                    &req.tool_contracts,
                                     req.prompt_compaction.clone(),
                                 )
                             });

@@ -1107,7 +1107,7 @@ impl HostedSubagentRunner {
             config,
             self.context.tool_concurrency.clone(),
         );
-        runtime.validate_subagent_tool_contracts(&binding)?;
+        runtime.prepare_subagent_tool_contracts(&binding).await?;
         let agent_run_identity = RuntimeAgentRunIdentityV1 {
             agent_run_id: req.job.job_id.clone(),
             execution_id: self.context.agent_run_identity.execution_id.clone(),

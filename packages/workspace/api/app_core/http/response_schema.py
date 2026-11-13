@@ -128,9 +128,16 @@ class WorkspaceMcpToolResponse(StrictSchema):
     scopes: list[str]
 
 
+class WorkspaceMcpToolDiscoveryResponse(StrictSchema):
+    name_prefix: str
+    concurrency_safe: bool
+    scopes: list[str]
+
+
 class WorkspaceMcpServerResponse(StrictSchema):
     id: str
-    model_contract_digest: str
+    model_contract_digest: str | None
+    tool_discovery: WorkspaceMcpToolDiscoveryResponse | None = None
     transport: WorkspaceMcpTransportResponse
     auth: WorkspaceMcpAuthResponse
     startup_timeout_ms: int

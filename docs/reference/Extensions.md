@@ -129,17 +129,19 @@ until every affected AgentRun lease releases.
 
 ## MCP contract and failures
 
-Every declared MCP tool freezes its source name, model-visible name,
-description, input schema, provider identity, and model-contract digest.
-Catalog construction validates the declaration offline and does not start the
-server.
+A server explicitly chooses pinned tools or dynamic `toolDiscovery`. Catalog
+publication validates the selected contract offline without starting a server.
+Pinned tools retain exact source/model identities, descriptions and schemas,
+with a deterministic model-contract digest; their first use checks the live
+catalog and rejects drift.
 
-First use performs one lazy connection and live `tools/list` check. Discovery
-order is irrelevant; identity and contract bytes must match. A contract
-mismatch is deterministic and remains sticky for that Activation. A transport
-availability failure is retryable only at the adapter's defined boundary.
-Neither case may disable unrelated packages or replace the frozen declaration
-with live server content.
+Discovery freezes the endpoint and package-owned naming, scopes and concurrency
+policy while obtaining tool definitions from `tools/list`. A cached directory
+is replaced only at a model-request boundary after invalidation or reconnect.
+Every request and delegated packet keeps the exact contracts it was granted.
+The Host still checks mutable authority at dispatch, rejects stale calls and
+never remaps arguments or replays business calls. Upstream tool annotations do
+not grant permissions. See [MCP declarations](SkillPackageSpec.md#mcp-declarations).
 
 ## Strictness and change policy
 

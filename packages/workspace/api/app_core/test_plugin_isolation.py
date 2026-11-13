@@ -9,14 +9,39 @@ from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 
 from app_core.credentials import decrypt_credential_secret
 from app_core.models import McpBearerCredential, Workspace, WorkspaceMembership, WorkspacePluginEnablement, WorkspacePluginInstallation
 from app_core.plugin_catalog import (
     MAX_PLUGIN_METADATA_BYTES, activation_digest, load_plugin_bearer_credential_refs,
     load_plugin_catalog, load_plugin_interfaces, plugin_activation_for_workspace,
+    validate_plugin_activation,
 )
+
+
+class PluginVersionTests(SimpleTestCase):
+    def activation(self, version):
+        packages = [{
+            "name": "banana", "version": version,
+            "packageDigest": "sha256:" + "a" * 64,
+            "skills": [], "cli": [], "mcpServers": [], "hooks": [],
+        }]
+        return {"schema": "plugin_activation_snapshot_v1",
+                "digest": activation_digest(packages), "packages": packages}
+
+    def test_activation_preserves_release_and_prerelease_versions(self):
+        for version in ("0.1.0", "1.1.0-rc.1", "2.1.0-rc", "1.0.0-alpha.2+build.001"):
+            with self.subTest(version=version):
+                payload = self.activation(version)
+                validate_plugin_activation(payload)
+                self.assertEqual(payload["packages"][0]["version"], version)
+
+    def test_activation_rejects_noncanonical_versions(self):
+        for version in (None, 1, "1.0", "v1.0.0", "01.0.0", "1.0.0-01", "1.0.0-",
+                        "1.0.0-rc_1", "1.0.0+", " 1.0.0", "1.0.0\n", "18446744073709551616.0.0"):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "valid SemVer"):
+                validate_plugin_activation(self.activation(version))
 
 
 class PluginIsolationTests(TestCase):
@@ -375,6 +400,41 @@ class PluginIsolationTests(TestCase):
         self.assertEqual(plugin["errors"], [])
         self.assertEqual(plugin["mcpServers"][0]["tools"], self.mcp.return_value["plugins"][0]["servers"][0]["tools"])
         self.assertTrue(plugin["mcpServers"][0]["auth"]["credentialConfigured"])
+        self.assertNotIn("synthetic-private-token", response.content.decode())
+
+    def test_discovered_mcp_metadata_preserves_credentials_and_response_contract(self):
+        from app_core.http.response_schema import WorkspaceMcpServerResponse
+
+        discovery = {"namePrefix": "banana", "concurrencySafe": True, "scopes": ["fruit:read"]}
+        self.write_mcp({"schema": "mcp_servers_v1", "servers": [{
+            "id": "banana-source", "transport": {
+                "type": "streamableHttp", "url": "https://banana.invalid/mcp",
+                "bearerCredentialRef": "banana-token",
+            }, "lifecycle": "initialize", "startupTimeoutMs": 1000,
+            "toolTimeoutMs": 1000, "toolDiscovery": discovery,
+        }]}, name="banana")
+        self.mcp.side_effect = None
+        self.mcp.return_value = {"plugins": [{"pluginName": "banana", "servers": [{
+            "id": "banana-source", "modelContractDigest": None, "toolDiscovery": discovery,
+            "transport": {"type": "streamableHttp", "endpoint": "https://banana.invalid/mcp"},
+            "auth": {"type": "bearer", "credentialRef": "banana-token"},
+            "startupTimeoutMs": 1000, "toolTimeoutMs": 1000, "tools": [],
+        }]}]}
+        created = self.client.post(self.credentials_url, data=json.dumps({
+            "pluginName": "banana", "credentialRef": "banana-token", "displayName": "Banana",
+            "secret": "synthetic-private-token",
+        }), content_type="application/json")
+        self.assertEqual(created.status_code, 201, created.content)
+        response = self.client.get(f"{self.url}/banana")
+        self.assertEqual(response.status_code, 200, response.content)
+        plugin = response.json()["plugin"]
+        self.assertEqual(plugin["errors"], [])
+        self.assertEqual(plugin["mcpCredentialRefs"], ["banana-token"])
+        server = plugin["mcpServers"][0]
+        self.assertEqual(server["toolDiscovery"], discovery)
+        self.assertIsNone(server["modelContractDigest"])
+        self.assertTrue(server["auth"]["credentialConfigured"])
+        WorkspaceMcpServerResponse.model_validate(server)
         self.assertNotIn("synthetic-private-token", response.content.decode())
 
     def test_bare_and_prefixed_token_inputs_store_only_the_token_on_create_and_rotate(self):

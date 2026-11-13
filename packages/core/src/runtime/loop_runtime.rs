@@ -1615,6 +1615,7 @@ impl<
         stream_sink: &mut (dyn FnMut(TurnUpdate) + Send),
         streamed_session_event_ids: &mut HashSet<String>,
         tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
+        execution_tools: Option<&ToolLayer>,
     ) -> Result<TurnStepResult, String> {
         let mut tracked_sink = |event: TurnUpdate| {
             track_streamed_runtime_event_id(&event, streamed_session_event_ids);
@@ -1624,12 +1625,17 @@ impl<
             turn_req,
             Some(&mut tracked_sink),
             tool_safe_point,
+            execution_tools,
         )
         .await
     }
 
-    pub(super) fn build_tool_batch_executor_async(&self, session_id: &str) -> ToolBatchExecutor {
-        let scoped_tools = self.tools_port.clone().with_session_id(session_id);
+    pub(super) fn build_tool_batch_executor_async(
+        &self,
+        session_id: &str,
+        execution_tools: &ToolLayer,
+    ) -> ToolBatchExecutor {
+        let scoped_tools = execution_tools.clone().with_session_id(session_id);
         let async_tools_port = scoped_tools.clone();
         let async_execute_tool = Arc::new(move |request: ToolInvocationRequest| {
             let tools_port = async_tools_port.clone();
@@ -2326,6 +2332,13 @@ impl<
                 &runtime_scope,
             )?;
             let context_token_estimate = generate_req.context_token_estimate;
+            let execution_tools = generate_req.execution_tools.clone();
+            let request_tool_names = generate_req
+                .prepared_prompt
+                .tool_definitions
+                .iter()
+                .map(|definition| definition.name.clone())
+                .collect::<HashSet<_>>();
             let recovery_content_prefix = input
                 .output_token_recovery_partial()
                 .unwrap_or_default()
@@ -2431,6 +2444,14 @@ impl<
                 }
                 Err(error) => return Err(error.into()),
             };
+            for call in &turn_req.generate_result.tool_calls {
+                if !request_tool_names.contains(&call.name) {
+                    return Err(format!(
+                        "tool call is not permitted by the model request catalog: {}",
+                        call.name
+                    ));
+                }
+            }
             if !recovery_content_prefix.is_empty() {
                 turn_req.generate_result.content = format!(
                     "{}{}",
@@ -2517,6 +2538,7 @@ impl<
                     sink,
                     &mut streamed_session_event_ids,
                     tool_safe_point,
+                    Some(&execution_tools),
                 )
                 .await?
             } else {
@@ -2524,6 +2546,7 @@ impl<
                     turn_req,
                     None,
                     tool_safe_point,
+                    Some(&execution_tools),
                 )
                 .await?
             };

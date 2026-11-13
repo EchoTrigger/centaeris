@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use centaeris_core::extension::{
     load_mcp_servers_file, load_verified_mcp_servers_file, McpServerDeclarationV1,
-    McpToolDeclarationV1, McpTransportV1, PluginActivationSnapshotV1,
+    McpToolDeclarationV1, McpToolDiscoveryV1, McpTransportV1, PluginActivationSnapshotV1,
 };
 use centaeris_core::tool::layer::{
     DynamicToolProvider, DynamicToolProviderRequest, DynamicToolProviderResponse,
@@ -126,6 +126,14 @@ struct AuthorizedMcpProvider {
 }
 
 impl DynamicToolProvider for AuthorizedMcpProvider {
+    fn has_dynamic_catalog(&self) -> bool {
+        self.inner.has_dynamic_catalog()
+    }
+
+    fn refresh_catalog<'a>(&'a self) -> centaeris_core::tool::layer::DynamicToolCatalogFuture<'a> {
+        self.inner.refresh_catalog()
+    }
+
     fn provider_id(&self) -> &str {
         self.inner.provider_id()
     }
@@ -182,7 +190,8 @@ pub(crate) struct WorkspaceMcpPluginSummary {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkspaceMcpServerSummary {
     pub id: String,
-    pub model_contract_digest: String,
+    pub model_contract_digest: Option<String>,
+    pub tool_discovery: Option<McpToolDiscoveryV1>,
     pub transport: WorkspaceMcpTransportSummary,
     pub auth: WorkspaceMcpAuthSummary,
     pub startup_timeout_ms: u64,
@@ -259,6 +268,7 @@ fn workspace_mcp_catalog_at(
                 WorkspaceMcpServerSummary {
                     id: server.id,
                     model_contract_digest: server.model_contract_digest,
+                    tool_discovery: server.tool_discovery,
                     transport,
                     auth,
                     startup_timeout_ms: server.startup_timeout_ms,
@@ -602,32 +612,53 @@ pub(crate) async fn connect_mcp_servers(
     docker: Arc<DockerExecutionHostRunner>,
 ) -> Result<(McpBindings, McpStartupMetrics), String> {
     let server_count = prepared.servers.len();
+    let discovery_started = Instant::now();
+    let resolver = prepared.credential_resolver;
+    let bindings =
+        futures::future::try_join_all(prepared.servers.into_iter().map(|(identity, server)| {
+            let resolver = resolver.clone();
+            let docker = docker.clone();
+            async move {
+                let plugin_name = identity.plugin_name.clone();
+                let authorization = Arc::new(McpDispatchAuthorization {
+                    identity,
+                    resolver,
+                    binding_digest: tokio::sync::Mutex::new(None),
+                });
+                let dynamic = server.tool_discovery.is_some();
+                let mut binding = lazy_mcp_server_binding(
+                    &plugin_name,
+                    &server,
+                    Arc::new(WorkspaceMcpConnector {
+                        plugin_name: plugin_name.clone(),
+                        server: server.clone(),
+                        authorization,
+                        docker,
+                    }),
+                )?;
+                if dynamic {
+                    binding.contracts = binding
+                        .provider
+                        .refresh_catalog()
+                        .await?
+                        .ok_or("dynamic MCP connector did not return a directory")?;
+                }
+                Ok::<_, String>((binding, dynamic))
+            }
+        }))
+        .await?;
     let mut contracts = Vec::new();
     let mut providers: Vec<Arc<dyn DynamicToolProvider + Send + Sync>> = Vec::new();
     let mut provider_ids = HashSet::new();
-    for (identity, server) in prepared.servers {
-        let plugin_name = identity.plugin_name.clone();
-        let authorization = Arc::new(McpDispatchAuthorization {
-            identity,
-            resolver: prepared.credential_resolver.clone(),
-            binding_digest: tokio::sync::Mutex::new(None),
-        });
-        let binding = lazy_mcp_server_binding(
-            plugin_name.as_str(),
-            &server,
-            Arc::new(WorkspaceMcpConnector {
-                plugin_name: plugin_name.clone(),
-                server: server.clone(),
-                authorization: authorization.clone(),
-                docker: docker.clone(),
-            }),
-        )?;
+    let mut connection_count = 0;
+    for (binding, dynamic) in bindings {
         if !provider_ids.insert(binding.provider.provider_id().to_string()) {
             return Err(format!(
                 "duplicate MCP server identity: {}",
                 binding.provider.provider_id()
             ));
         }
+        connection_count += usize::from(dynamic);
         contracts.extend(binding.contracts);
         providers.push(binding.provider);
     }
@@ -639,12 +670,17 @@ pub(crate) async fn connect_mcp_servers(
         McpStartupMetrics {
             server_count,
             credential_count: 0,
-            connection_count: 0,
+            connection_count,
             credential_resolve_ms: 0,
-            discovery_ms: 0,
+            discovery_ms: if connection_count == 0 {
+                0
+            } else {
+                discovery_started.elapsed().as_millis()
+            },
         },
     ))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,8 +1141,9 @@ mod tests {
             scopes: vec!["banana:read".into()],
         }];
         let server = McpServerDeclarationV1 {
+            tool_discovery: None,
             id: "ledger".into(),
-            model_contract_digest: mcp_model_contract_digest("ledger", &tools).unwrap(),
+            model_contract_digest: Some(mcp_model_contract_digest("ledger", &tools).unwrap()),
             transport: McpTransportV1::StreamableHttp {
                 url: "https://business.invalid/mcp".into(),
                 bearer_credential_ref: Some("business-token".into()),
@@ -1537,12 +1574,12 @@ mod tests {
             serde_json::to_vec_pretty(&McpServersFileV1 {
                 schema: MCP_SERVERS_SCHEMA_V1.to_string(),
                 servers: vec![McpServerDeclarationV1 {
+                    tool_discovery: None,
                     id: "banana-source".to_string(),
-                    model_contract_digest: mcp_model_contract_digest(
-                        "banana-source",
-                        tools.as_slice(),
-                    )
-                    .expect("model contract digest"),
+                    model_contract_digest: Some(
+                        mcp_model_contract_digest("banana-source", tools.as_slice())
+                            .expect("model contract digest"),
+                    ),
                     transport: McpTransportV1::StreamableHttp {
                         url: "https://banana.invalid/mcp".to_string(),
                         bearer_credential_ref: Some("banana-token".to_string()),
@@ -1645,7 +1682,7 @@ mod tests {
                 })
                 .collect();
             server.model_contract_digest =
-                mcp_model_contract_digest(&server.id, &server.tools).unwrap();
+                Some(mcp_model_contract_digest(&server.id, &server.tools).unwrap());
             let relative = format!("mcp/large-{index}.json");
             fs::write(
                 package_root.join(&relative),

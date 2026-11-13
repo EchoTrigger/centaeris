@@ -198,10 +198,10 @@ class PluginUploadLifecycleTests(TestCase):
         self.assertEqual(duplicate.status_code, 409, duplicate.content)
         self.assertEqual(duplicate.json(), {"error": "plugin_already_installed"})
 
-        updated = self.upload(_plugin_zip(version="1.0.1"))
+        updated = self.upload(_plugin_zip(version="1.1.0-rc.1"))
         self.assertEqual(updated.status_code, 200, updated.content)
-        self.assertEqual(updated.json()["plugin"]["version"], "1.0.1")
-        self.assertEqual(self.client.get(self.base).json()["plugins"][0]["version"], "1.0.1")
+        self.assertEqual(updated.json()["plugin"]["version"], "1.1.0-rc.1")
+        self.assertEqual(self.client.get(self.base).json()["plugins"][0]["version"], "1.1.0-rc.1")
 
         removed = self.client.delete(f"{self.base}/banana/installation")
         self.assertEqual(removed.status_code, 204, removed.content)

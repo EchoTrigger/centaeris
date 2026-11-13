@@ -27,7 +27,7 @@ fn host_headers(headers: &[(&str, &str)]) -> Result<HeaderMap, McpConnectError> 
 }
 
 pub struct HttpMcpClient {
-    client: RunningService<RoleClient, ()>,
+    client: RunningService<RoleClient, super::DirectoryClient>,
     protocol_version: String,
     tools: Vec<Tool>,
 }

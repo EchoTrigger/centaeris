@@ -1,5 +1,6 @@
 use centaeris_core::extension::{
-    mcp_provider_id, McpLifecycleV1, McpServerDeclarationV1, McpToolDeclarationV1, McpTransportV1,
+    mcp_provider_id, McpDiscoveredToolV1, McpLifecycleV1, McpServerDeclarationV1,
+    McpToolDeclarationV1, McpTransportV1,
 };
 use centaeris_core::tool::layer::{
     DynamicToolProvider, DynamicToolProviderRequest, DynamicToolProviderResponse,
@@ -21,7 +22,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -85,6 +89,7 @@ pub fn lazy_mcp_server_binding(
         contracts,
         provider: Arc::new(LazyMcpDynamicToolProvider {
             provider_id,
+            dynamic_catalog: server.tool_discovery.is_some(),
             connector,
             state: Mutex::new(LazyConnectionState::Empty),
         }),
@@ -139,6 +144,7 @@ where
     let provider_id = mcp_provider_id(plugin_name, server.id.as_str())
         .map_err(McpConnectError::ContractMismatch)?;
     let startup_timeout = Duration::from_millis(server.startup_timeout_ms);
+    let startup_started = Instant::now();
     let (client, protocol_version, discovered) = initialize_client_with_timeout(
         transport,
         startup_timeout,
@@ -146,7 +152,57 @@ where
         provider_id.as_str(),
     )
     .await?;
-    let tools = validate_live_tools(server.tools.as_slice(), discovered.as_slice())?;
+    let (tools, discovery) = if server.tool_discovery.is_some() {
+        let snapshot = discovered_directory(&server, plugin_name, &discovered)?;
+        let subscription = if protocol_version == "2026-07-28"
+            && client.peer_info().is_some_and(|info| {
+                info.capabilities
+                    .tools
+                    .as_ref()
+                    .is_some_and(|tools| tools.list_changed == Some(true))
+            }) {
+            let mut filter = rmcp::model::SubscriptionFilter::new();
+            filter.tools_list_changed = Some(true);
+            let mut subscription = tokio::time::timeout(
+                startup_timeout.saturating_sub(startup_started.elapsed()),
+                client.listen(filter),
+            )
+            .await
+            .map_err(|_| {
+                McpConnectError::Unavailable("subscribe to MCP tool changes timed out".into())
+            })?
+            .map_err(|_| {
+                McpConnectError::Unavailable("subscribe to MCP tool changes failed".into())
+            })?;
+            let dirty = client.service().dirty.clone();
+            Some(DirectorySubscription(tokio::spawn(async move {
+                while let Ok(Some(notification)) = subscription.next().await {
+                    if matches!(
+                        notification,
+                        rmcp::model::ServerNotification::ToolListChangedNotification(_)
+                    ) {
+                        dirty.store(true, Ordering::Release);
+                    }
+                }
+                dirty.store(true, Ordering::Release);
+            })))
+        } else {
+            None
+        };
+        (
+            HashMap::new(),
+            Some(McpDirectory {
+                server: server.clone(),
+                snapshot: Mutex::new(snapshot),
+                _subscription: subscription,
+            }),
+        )
+    } else {
+        (
+            validate_live_tools(server.tools.as_slice(), discovered.as_slice())?,
+            None,
+        )
+    };
     let provider: DynamicProvider = Arc::new(McpDynamicToolProvider {
         provider_id,
         plugin_name: plugin_name.to_string(),
@@ -154,6 +210,7 @@ where
         protocol_version,
         tool_timeout: Duration::from_millis(server.tool_timeout_ms),
         tools,
+        discovery,
         client,
     });
     Ok(provider)
@@ -171,6 +228,7 @@ enum LazyConnectionState {
 
 struct LazyMcpDynamicToolProvider {
     provider_id: String,
+    dynamic_catalog: bool,
     connector: Arc<dyn McpServerConnector + Send + Sync>,
     state: Mutex<LazyConnectionState>,
 }
@@ -226,6 +284,54 @@ impl LazyMcpDynamicToolProvider {
 }
 
 impl DynamicToolProvider for LazyMcpDynamicToolProvider {
+    fn has_dynamic_catalog(&self) -> bool {
+        self.dynamic_catalog
+    }
+
+    fn refresh_catalog<'a>(&'a self) -> centaeris_core::tool::layer::DynamicToolCatalogFuture<'a> {
+        Box::pin(async move {
+            if !self.dynamic_catalog {
+                return Ok(None);
+            }
+            let refresh = async {
+            let provider = self.connected_provider().await.map_err(|error| error.to_string())?;
+            match provider.refresh_catalog().await {
+                Err(error) if error.starts_with("mcp_connection_lost:") => {
+                    let mut state = self.state.lock().await;
+                    if matches!(&*state, LazyConnectionState::Connected(current) if Arc::ptr_eq(current, &provider))
+                    {
+                        *state = LazyConnectionState::Empty;
+                    }
+                    drop(state);
+                    self.connected_provider()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .refresh_catalog()
+                        .await
+                }
+                result => result,
+            }
+            }.await;
+            match refresh {
+                Ok(directory) => Ok(directory),
+                Err(error) => {
+                    let category = if error.starts_with("mcp_model_contract_mismatch:") {
+                        "contractMismatch"
+                    } else {
+                        "unavailable"
+                    };
+                    eprintln!(
+                        "mcp_directory_refresh_failed: providerId={}; category={category}",
+                        self.provider_id
+                    );
+                    // This provider has no currently executable contracts. Other
+                    // connectors and built-in tools remain available to the model.
+                    Ok(Some(Vec::new()))
+                }
+            }
+        })
+    }
+
     fn execute_with_error_info<'a>(
         &'a self,
         request: DynamicToolProviderRequest,
@@ -246,7 +352,9 @@ impl DynamicToolProvider for LazyMcpDynamicToolProvider {
                 let diagnostic = ToolErrorInfo::from_unstructured_error(message.clone()).diagnostic_id;
                 // Only expose code-owned categories. Connector errors can contain
                 // host paths or credentials and must not be copied into model context.
-                let safe_message = if message.starts_with("mcp_model_contract_mismatch:") {
+                let safe_message = if message.starts_with("mcp_tool_directory_changed:") {
+                    "mcp_tool_directory_changed: refresh the tool definitions before choosing a new call; do not automatically replay the prior call"
+                } else if message.starts_with("mcp_model_contract_mismatch:") {
                     "mcp_model_contract_mismatch: installed tool declaration differs from server discovery; update the plugin contract before retrying"
                 } else if message.starts_with("mcp_connection_failed:") {
                     "mcp_connection_failed: MCP initialization or discovery failed"
@@ -342,7 +450,14 @@ async fn initialize_client_with_timeout<T, E, A>(
     startup_timeout: Duration,
     lifecycle: McpLifecycleV1,
     provider_id: &str,
-) -> Result<(RunningService<RoleClient, ()>, String, Vec<Tool>), McpConnectError>
+) -> Result<
+    (
+        RunningService<RoleClient, DirectoryClient>,
+        String,
+        Vec<Tool>,
+    ),
+    McpConnectError,
+>
 where
     T: IntoTransport<RoleClient, E, A>,
     E: std::error::Error + Send + Sync + 'static,
@@ -365,7 +480,14 @@ async fn initialize_client<T, E, A>(
     transport: T,
     lifecycle: McpLifecycleV1,
     provider_id: &str,
-) -> Result<(RunningService<RoleClient, ()>, String, Vec<Tool>), McpConnectError>
+) -> Result<
+    (
+        RunningService<RoleClient, DirectoryClient>,
+        String,
+        Vec<Tool>,
+    ),
+    McpConnectError,
+>
 where
     T: IntoTransport<RoleClient, E, A>,
     E: std::error::Error + Send + Sync + 'static,
@@ -382,7 +504,9 @@ where
         McpLifecycleV1::Initialize => ClientLifecycleMode::Initialize,
     };
     let initialize_started = Instant::now();
-    let client = ().serve_with_lifecycle(transport, lifecycle).await;
+    let client = DirectoryClient::default()
+        .serve_with_lifecycle(transport, lifecycle)
+        .await;
     eprintln!(
         "mcp_lazy_phase_profile: providerId={provider_id}; phase=initialize; elapsedMs={:.3}; succeeded={}",
         initialize_started.elapsed().as_secs_f64() * 1_000.0,
@@ -525,6 +649,61 @@ fn validate_live_tools(
     Ok(tools)
 }
 
+#[derive(Default)]
+struct DirectoryClient {
+    dirty: Arc<AtomicBool>,
+}
+
+impl rmcp::ClientHandler for DirectoryClient {
+    async fn on_tool_list_changed(&self, _context: rmcp::service::NotificationContext<RoleClient>) {
+        self.dirty.store(true, Ordering::Release);
+    }
+}
+
+struct DirectorySubscription(tokio::task::JoinHandle<()>);
+
+impl Drop for DirectorySubscription {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct DirectorySnapshot {
+    sources: HashMap<String, String>,
+    registry: centaeris_core::tool::DynamicToolRegistry,
+}
+
+struct McpDirectory {
+    server: McpServerDeclarationV1,
+    snapshot: Mutex<DirectorySnapshot>,
+    _subscription: Option<DirectorySubscription>,
+}
+
+fn discovered_directory(
+    server: &McpServerDeclarationV1,
+    plugin_name: &str,
+    discovered: &[Tool],
+) -> Result<DirectorySnapshot, McpConnectError> {
+    let discovered = discovered
+        .iter()
+        .map(|tool| McpDiscoveredToolV1 {
+            name: tool.name.to_string(),
+            description: tool.description.as_deref().unwrap_or_default().to_string(),
+            input_schema: Value::Object(tool.input_schema.as_ref().clone()),
+        })
+        .collect();
+    let (declarations, contracts) = server
+        .discovered_tool_catalog(plugin_name, discovered)
+        .map_err(McpConnectError::ContractMismatch)?;
+    let sources = declarations
+        .iter()
+        .map(|tool| (tool.name.clone(), tool.source_name.clone()))
+        .collect();
+    let registry = centaeris_core::tool::DynamicToolRegistry::from_contracts(contracts)
+        .map_err(McpConnectError::ContractMismatch)?;
+    Ok(DirectorySnapshot { sources, registry })
+}
+
 struct McpDynamicToolProvider {
     provider_id: String,
     plugin_name: String,
@@ -532,10 +711,49 @@ struct McpDynamicToolProvider {
     protocol_version: String,
     tool_timeout: Duration,
     tools: HashMap<String, String>,
-    client: RunningService<RoleClient, ()>,
+    discovery: Option<McpDirectory>,
+    client: RunningService<RoleClient, DirectoryClient>,
 }
 
 impl DynamicToolProvider for McpDynamicToolProvider {
+    fn has_dynamic_catalog(&self) -> bool {
+        self.discovery.is_some()
+    }
+
+    fn refresh_catalog<'a>(&'a self) -> centaeris_core::tool::layer::DynamicToolCatalogFuture<'a> {
+        Box::pin(async move {
+            let Some(directory) = &self.discovery else {
+                return Ok(None);
+            };
+            if self.client.is_closed() {
+                return Err("mcp_connection_lost: MCP transport is closed".into());
+            }
+            let mut snapshot = directory.snapshot.lock().await;
+            if self.client.service().dirty.swap(false, Ordering::AcqRel) {
+                let refreshed = async {
+                    let tools = tokio::time::timeout(
+                        Duration::from_millis(directory.server.startup_timeout_ms),
+                        discover_tools(&self.client),
+                    )
+                    .await
+                    .map_err(|_| "MCP tool directory refresh timed out".to_string())?
+                    .map_err(|error| error.to_string())?;
+                    discovered_directory(&directory.server, &self.plugin_name, &tools)
+                        .map_err(|error| error.to_string())
+                }
+                .await;
+                match refreshed {
+                    Ok(refreshed) => *snapshot = refreshed,
+                    Err(error) => {
+                        self.client.service().dirty.store(true, Ordering::Release);
+                        return Err(error);
+                    }
+                }
+            }
+            Ok(Some(snapshot.registry.list_dynamic_contracts()))
+        })
+    }
+
     fn provider_id(&self) -> &str {
         self.provider_id.as_str()
     }
@@ -546,10 +764,29 @@ impl DynamicToolProvider for McpDynamicToolProvider {
     ) -> Pin<Box<dyn Future<Output = Result<DynamicToolProviderResponse, String>> + Send + 'a>>
     {
         Box::pin(async move {
-            let source_name = self
-                .tools
-                .get(request.tool_name.as_str())
-                .ok_or_else(|| format!("MCP tool is not configured: {}", request.tool_name))?;
+            let source_name = if let Some(directory) = &self.discovery {
+                if self.client.service().dirty.load(Ordering::Acquire) {
+                    return Err("mcp_tool_directory_changed: the call was not dispatched".into());
+                }
+                let snapshot = directory.snapshot.lock().await;
+                if self.client.service().dirty.load(Ordering::Acquire) {
+                    return Err("mcp_tool_directory_changed: the call was not dispatched".into());
+                }
+                let current = snapshot.registry.find_contract(&request.tool_name);
+                if current.as_ref() != Some(&request.contract) {
+                    return Err("mcp_tool_directory_changed: the call was not dispatched".into());
+                }
+                snapshot
+                    .sources
+                    .get(&request.tool_name)
+                    .cloned()
+                    .ok_or("mcp_tool_directory_changed: the call was not dispatched")?
+            } else {
+                self.tools
+                    .get(&request.tool_name)
+                    .cloned()
+                    .ok_or_else(|| format!("MCP tool is not configured: {}", request.tool_name))?
+            };
             let arguments = serde_json::from_str::<Value>(request.args_json.as_str())
                 .map_err(|error| format!("parse MCP tool arguments failed: {error}"))?
                 .as_object()
@@ -575,6 +812,10 @@ impl DynamicToolProvider for McpDynamicToolProvider {
                 .map_err(|error| match error {
                     ServiceError::TransportSend(_) | ServiceError::TransportClosed => {
                         "mcp_connection_lost: MCP transport is closed".to_string()
+                    }
+                    ServiceError::McpError(error) if self.discovery.is_some() && matches!(error.code.0, -32601 | -32602) => {
+                        self.client.service().dirty.store(true, Ordering::Release);
+                        "mcp_tool_directory_changed: upstream rejected the tool contract; choose a new call after definitions refresh".into()
                     }
                     _ => "MCP tool call failed".to_string(),
                 })?;
@@ -715,9 +956,12 @@ mod tests {
     ) -> McpServerDeclarationV1 {
         let tools = vec![declared_tool()];
         McpServerDeclarationV1 {
+            tool_discovery: None,
             id: server_id.to_string(),
-            model_contract_digest: mcp_model_contract_digest(server_id, tools.as_slice())
-                .expect("model contract digest"),
+            model_contract_digest: Some(
+                mcp_model_contract_digest(server_id, tools.as_slice())
+                    .expect("model contract digest"),
+            ),
             transport,
             lifecycle,
             startup_timeout_ms: 10_000,
@@ -895,6 +1139,217 @@ mod tests {
             .expect("contract"),
             cancellation_probe: None,
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_dynamic_connector_exposes_no_contract_and_does_not_dispatch() {
+        let (fixed, fake) = fake_connector(
+            "mcp:legal:banana-source".into(),
+            vec![vec![matching_tool()]],
+            false,
+            false,
+        );
+        let connector = Arc::new(FlakyConnector {
+            connects: AtomicUsize::new(0),
+            discoveries: AtomicUsize::new(0),
+            outcomes: StdMutex::new(VecDeque::from([Err(McpConnectError::Unavailable(
+                "credential not configured".into(),
+            ))])),
+            provider: fixed.provider.clone(),
+        });
+        let mut server = declaration(
+            McpTransportV1::Stdio {
+                program: "bin/banana-mcp".into(),
+                args: vec![],
+            },
+            McpLifecycleV1::Initialize,
+        );
+        server.model_contract_digest = None;
+        server.tools.clear();
+        server.tool_discovery = Some(centaeris_core::extension::McpToolDiscoveryV1 {
+            name_prefix: "banana".into(),
+            concurrency_safe: false,
+            scopes: vec!["banana:read".into()],
+        });
+        let binding = lazy_mcp_server_binding("legal", &server, connector.clone()).unwrap();
+        assert!(binding
+            .provider
+            .refresh_catalog()
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        let stale = declaration(
+            McpTransportV1::Stdio {
+                program: "bin/banana-mcp".into(),
+                args: vec![],
+            },
+            McpLifecycleV1::Initialize,
+        )
+        .dynamic_tool_contracts("legal")
+        .unwrap();
+        assert!(binding
+            .provider
+            .execute(fake_request(&stale[0], 1))
+            .await
+            .is_err());
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            connector.connects.load(Ordering::SeqCst),
+            1,
+            "existing connection cooldown is reused"
+        );
+    }
+
+    #[derive(Clone)]
+    struct ChangingDirectoryServer {
+        tools: Arc<StdMutex<Vec<Tool>>>,
+        lists: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ServerHandler for ChangingDirectoryServer {
+        fn get_info(&self) -> rmcp::model::ServerInfo {
+            let mut info = rmcp::model::ServerInfo::default();
+            info.capabilities = rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build();
+            info
+        }
+
+        async fn list_tools(
+            &self,
+            _: Option<rmcp::model::PaginatedRequestParams>,
+            _: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+            self.lists.fetch_add(1, Ordering::SeqCst);
+            Ok(rmcp::model::ListToolsResult::with_all_items(
+                self.tools.lock().unwrap().clone(),
+            ))
+        }
+
+        async fn call_tool(
+            &self,
+            _: CallToolRequestParams,
+            _: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<CallToolResponse, rmcp::ErrorData> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CallToolResponse::Complete(CallToolResult::success(vec![
+                ContentBlock::text("current result"),
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_directory_refreshes_on_notification_and_rejects_stale_calls() {
+        let tools = Arc::new(StdMutex::new(vec![matching_tool()]));
+        let lists = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = ChangingDirectoryServer {
+            tools: tools.clone(),
+            lists: lists.clone(),
+            calls: calls.clone(),
+        };
+        let (server_transport, client_transport) = tokio::io::duplex(16_384);
+        let serving = tokio::spawn(async move { server.serve(server_transport).await.unwrap() });
+        let mut declaration = declaration(
+            McpTransportV1::Stdio {
+                program: "bin/banana-mcp".into(),
+                args: vec![],
+            },
+            McpLifecycleV1::Initialize,
+        );
+        declaration.model_contract_digest = None;
+        declaration.tools.clear();
+        declaration.tool_discovery = Some(centaeris_core::extension::McpToolDiscoveryV1 {
+            name_prefix: "banana".into(),
+            concurrency_safe: true,
+            scopes: vec!["banana:read".into()],
+        });
+        let provider = connect_mcp_server_transport("banana", declaration, client_transport)
+            .await
+            .unwrap();
+        let server = serving.await.unwrap();
+        let frozen = provider.refresh_catalog().await.unwrap().unwrap()[0].clone();
+        assert_eq!(frozen.name, "banana_search_laws");
+        assert_eq!(
+            provider
+                .execute(fake_request(&frozen, 1))
+                .await
+                .unwrap()
+                .content,
+            "current result"
+        );
+        provider.refresh_catalog().await.unwrap();
+        assert_eq!(
+            lists.load(Ordering::SeqCst),
+            1,
+            "cached requests do not rediscover"
+        );
+
+        *tools.lock().unwrap() = vec![Tool::new(
+            "search_articles",
+            "Search articles.",
+            Map::from_iter([("type".into(), json!("object"))]),
+        )];
+        server.peer().notify_tool_list_changed().await.unwrap();
+        let current = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let contracts = provider.refresh_catalog().await.unwrap().unwrap();
+                if contracts[0].name == "banana_search_articles" {
+                    break contracts[0].clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(provider
+            .execute(fake_request(&frozen, 2))
+            .await
+            .unwrap_err()
+            .starts_with("mcp_tool_directory_changed:"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "stale call did not dispatch or replay"
+        );
+        assert_eq!(
+            provider
+                .execute(fake_request(&current, 3))
+                .await
+                .unwrap()
+                .content,
+            "current result"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(lists.load(Ordering::SeqCst), 2);
+
+        *tools.lock().unwrap() = vec![Tool::new(
+            "InvalidToolName",
+            "Invalid contract.",
+            Map::new(),
+        )];
+        server.peer().notify_tool_list_changed().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if provider.refresh_catalog().await.is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            provider.refresh_catalog().await.is_err(),
+            "failed refresh remains invalidated"
+        );
+        assert!(provider.execute(fake_request(&current, 4)).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        drop(provider);
+        server.cancel().await.unwrap();
     }
 
     #[test]

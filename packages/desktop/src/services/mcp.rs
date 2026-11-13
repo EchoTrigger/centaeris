@@ -250,7 +250,24 @@ pub(crate) async fn configure(
 
 pub(crate) async fn connect_enabled_plugins() -> Result<NativePluginActivation, String> {
     let descriptors = plugins::list(PluginListRequestV1::default())?;
-    activation_from_descriptors(descriptors)
+    let mut activation = activation_from_descriptors(descriptors)?;
+    let directories = futures::future::try_join_all(
+        activation
+            .providers
+            .iter()
+            .filter(|provider| provider.has_dynamic_catalog())
+            .map(|provider| async move {
+                provider
+                    .refresh_catalog()
+                    .await?
+                    .ok_or_else(|| "dynamic MCP connector did not return a directory".to_string())
+            }),
+    )
+    .await?;
+    let mut contracts = activation.dynamic_tool_registry.list_dynamic_contracts();
+    contracts.extend(directories.into_iter().flatten());
+    activation.dynamic_tool_registry = Arc::new(DynamicToolRegistry::from_contracts(contracts)?);
+    Ok(activation)
 }
 
 fn activation_from_descriptors(
@@ -760,12 +777,12 @@ mod tests {
             serde_json::to_vec_pretty(&McpServersFileV1 {
                 schema: MCP_SERVERS_SCHEMA_V1.to_string(),
                 servers: vec![McpServerDeclarationV1 {
+                    tool_discovery: None,
                     id: "demo-server".to_string(),
-                    model_contract_digest: mcp_model_contract_digest(
-                        "demo-server",
-                        tools.as_slice(),
-                    )
-                    .expect("model contract digest"),
+                    model_contract_digest: Some(
+                        mcp_model_contract_digest("demo-server", tools.as_slice())
+                            .expect("model contract digest"),
+                    ),
                     transport: McpTransportV1::StreamableHttp {
                         url: "https://example.com/mcp".to_string(),
                         bearer_credential_ref: Some("demo-token".to_string()),
@@ -902,12 +919,12 @@ mod tests {
             serde_json::to_vec_pretty(&McpServersFileV1 {
                 schema: MCP_SERVERS_SCHEMA_V1.to_string(),
                 servers: vec![McpServerDeclarationV1 {
+                    tool_discovery: None,
                     id: "demo-server".to_string(),
-                    model_contract_digest: mcp_model_contract_digest(
-                        "demo-server",
-                        tools.as_slice(),
-                    )
-                    .expect("model contract digest"),
+                    model_contract_digest: Some(
+                        mcp_model_contract_digest("demo-server", tools.as_slice())
+                            .expect("model contract digest"),
+                    ),
                     transport: McpTransportV1::StreamableHttp {
                         url: "https://example.com/mcp".to_string(),
                         bearer_credential_ref: None,
