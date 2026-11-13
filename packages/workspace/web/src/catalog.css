@@ -97,8 +97,8 @@
 .workPrototype .inboxArticle .inboxByline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; color:var(--process-text); font-size:12px; }
 .inboxLead { color:var(--process-text); }
 .inboxNoSelection { display:grid; place-items:center; height:100%; min-height:240px; color:var(--process-text); font-size:13px; }
-.workHomeBody { width:min(780px,100%); margin:36px auto; padding:0 32px 48px; }
-.workPrototype .workHomeBody > h2 { margin-bottom:40px; font-size:24px; font-weight:500; }
+.workHomeBody { display:flex; flex-direction:column; gap:32px; width:min(780px,100%); margin:36px auto; padding:0 32px 48px; }
+.workPrototype .workHomeBody > h2 { margin-bottom:8px; font-size:24px; font-weight:500; }
 .workPrototype .workHomeBody h3 { margin-bottom:16px; }
 @media(min-width:761px) {
   .workspaceWorkbench .catalogPage .catalogHeader { padding-inline-start:calc(16px + 28px * (1 - var(--workspace-sidebar-progress))); }
@@ -151,7 +151,7 @@
 /* Detail headings receive reading focus on navigation, not control focus. */
 :root .catalogDetailView[tabindex="-1"]:focus, :root .catalogDetailView > h2[tabindex="-1"]:focus { outline:none; }
 
-.homeGuide { margin-bottom:32px; padding:18px; border-radius:9px; background:var(--surface-variant); }
+.homeGuide { margin-bottom:0; padding:18px; border-radius:9px; background:var(--surface-variant); }
 .homeGuide > header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
 .workPrototype .homeGuide h3 { margin:0; }
 .workPrototype .homeGuide header button, .workPrototype .homeHelp { border:0; background:transparent; color:var(--process-text); }
