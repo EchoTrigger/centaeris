@@ -67,10 +67,13 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
     return () => document.removeEventListener("pointerdown", collapseOutside, true);
   }, [hasExpandedPlugins, deleteCredential]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Switching workspace clears the previous workspace's catalog.
+  useEffect(() => { setPlugins(null); }, [workspace?.id]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Draft credentials belong to one workspace and management permission.
+  useEffect(() => { setCredentials(null); setCredentialDrafts({}); }, [canManage, apiBase]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: Package mutations explicitly refresh this workspace catalog.
   useEffect(() => {
     let active = true;
-    setPlugins(null);
     setBusyPlugin("");
     setError("");
     if (!workspace?.id) return () => { active = false; };
@@ -93,20 +96,24 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
             });
         }
       })
-      .catch((requestError) => active && setError(errorText(requestError)));
+      .catch((requestError) => { if (active) { setPlugins(null); setError(errorText(requestError)); } });
     return () => { active = false; };
   }, [workspace?.id, pluginRevision]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: The revision is the retry button's explicit credential refresh signal.
   useEffect(() => {
     let active = true;
-    setCredentials(null);
     setCredentialError("");
-    setCredentialDrafts({});
     if (!canManage) return () => { active = false; };
     apiJson(`${apiBase}/mcp-bearer-credentials`)
       .then((result) => active && setCredentials(result.credentials))
-      .catch((requestError) => active && setCredentialError(errorText(requestError)));
+      .catch((requestError) => {
+        if (active) {
+          setCredentials(null);
+          if ([401, 403, 404].includes(requestError.status)) setCredentialDrafts({});
+          setCredentialError(errorText(requestError));
+        }
+      });
     return () => { active = false; };
   }, [canManage, apiBase, credentialRevision]);
 
