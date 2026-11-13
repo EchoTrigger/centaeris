@@ -724,6 +724,15 @@ domain `workspace:agent-run-authorization:v2`, signing `environmentProfile` and
 records are preserved by explicit migrations. Administrators configure defaults through
 `GET/PATCH /api/workspaces/{workspaceId}/environment-settings`; see
 [environment network policy](../architecture/EnvironmentNetwork.md).
+GET returns, for example,
+`{"network":"disabled","cpuMilli":2000,"memoryBytes":4294967296,"workspaceBytes":10737418240,"revision":2}`.
+PATCH accepts any nonempty subset of the four policy fields; `revision` is not
+writable. CPU uses positive integer milli-cores through `4294967295`. Memory
+and workspace space use positive integer bytes through `9007199254740991`.
+Nulls, booleans, fractional values and unknown fields are rejected. Only an
+actual policy change advances the revision. Workspace space is a data budget,
+not a live filesystem quota. Existing environment and authorization snapshots
+remain unchanged.
 Knowledge processing
 specifications use the immutable Centaeris processor version `1.0.0`.
 

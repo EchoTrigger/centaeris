@@ -310,12 +310,34 @@ override; it does not change this 12-GiB deployment default.
 ### Sandbox execution profile
 
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
-`SANDBOX_WORKSPACE_BYTES` define the authorized AgentRun profile.
+`SANDBOX_WORKSPACE_BYTES` initialize resource defaults for a Workspace. Owners
+and administrators can change CPU, memory and workspace-space defaults in
+Settings → Environment without restarting the API or Runtime. PID limits retain
+their deployment default.
+
+The saved defaults and their revision are snapshotted when a SessionEnvironment
+is created. Its first Run freezes those resources into the existing signed
+`runtime.environment_profile.v1`; later Runs reuse that profile. Changing
+defaults does not resize a running container, change an existing environment or
+rewrite a signed grant. A new Session or an existing lifecycle operation that
+creates a new SessionEnvironment uses the latest settings. An explicitly bound
+maintenance profile retains its independently authorized resource values.
+
 `workspaceBytes` is a workspace data budget for admission, inputs and expanded
 snapshots; it does not select a tmpfs or impose a live OverlayFS disk quota.
+The settings page calls this value workspace space. Its ordinary profile uses
+the same value for `storageBytes`; the default does not introduce a physical
+disk quota. CPU and memory still use the existing container limits and host
+resource admission.
 The deployment example sets new environments to 4 GiB of memory and 2000 CPU
 milli (two cores). These are upper bounds. Existing signed environment profiles
 keep their original resource limits.
+
+The forward resource-settings migration initializes Workspace values from the
+deployment defaults. For historical environments it preserves resources from
+an already bound profile, or uses the deployment defaults for an unused
+environment. Historical rows have no resource-settings revision because none
+was recorded. Profiles, their digests and existing authorizations are unchanged.
 
 Before upgrading the resource contract, stop application writes and drain Runs,
 cleanup Jobs, maintenance operations and resident instances using the existing

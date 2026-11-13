@@ -242,14 +242,16 @@ class EnvironmentNetworkMigrationTests(TransactionTestCase):
             connections[writer.alias] = writer
             changed = False
             insertion = f'INSERT INTO {database.ops.quote_name(SessionEnvironment._meta.db_table)}'
+            resources = {"cpuMilli": 2000, "memoryBytes": 4 * 1024**3, "pidsLimit": 512,
+                "workspaceBytes": 10 * 1024**3, "storageBytes": 10 * 1024**3}
 
             def change_policy_before_environment_insert(execute, sql, params, many, context):
                 nonlocal changed
                 if not changed and sql.startswith(insertion):
                     changed = True
                     with writer.cursor() as cursor:
-                        cursor.execute("UPDATE app_core_workspace SET execution_network=%s WHERE id=%s",
-                                       ["publicInternet", workspace.pk])
+                        cursor.execute("UPDATE app_core_workspace SET execution_network=%s, execution_resources=%s::jsonb, "
+                            "execution_settings_revision=2 WHERE id=%s", ["publicInternet", json.dumps(resources), workspace.pk])
                 return execute(sql, params, many, context)
 
             try:
@@ -265,3 +267,7 @@ class EnvironmentNetworkMigrationTests(TransactionTestCase):
             stored = SessionEnvironment.objects.using(database.alias).get(pk=session.current_environment_id)
             self.assertEqual(stored.network, "publicInternet")
             self.assertEqual(session.current_environment.network, stored.network)
+            self.assertEqual(stored.resource_defaults, resources)
+            self.assertEqual(stored.resource_defaults_revision, 2)
+            self.assertEqual(session.current_environment.resource_defaults, stored.resource_defaults)
+            self.assertEqual(session.current_environment.resource_defaults_revision, stored.resource_defaults_revision)

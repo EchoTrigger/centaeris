@@ -7,12 +7,12 @@ import unicodedata
 
 from django.db import transaction
 from django.utils import timezone
+from .environment_resources import RESOURCE_FIELDS, validate_environment_resources
 
 PROFILE_SCHEMA = 'runtime.environment_profile.v1'
 BIND_SCHEMA = 'workspace.environment_profile.bind.v1'
 BOUND_SCHEMA = 'workspace.environment_profile.bound.v1'
 PROFILE_FIELDS = {'schema', 'imageDigest', 'workspaceRoot', 'user', 'network', 'resources'}
-RESOURCE_FIELDS = {'cpuMilli', 'memoryBytes', 'pidsLimit', 'workspaceBytes', 'storageBytes'}
 
 
 class EnvironmentProfileError(ValueError):
@@ -42,15 +42,7 @@ def validate_environment_profile(value):
         raise ValueError('environment_profile_user_invalid')
     if value['network'] not in ('publicInternet', 'disabled'):
         raise ValueError('environment_profile_network_invalid')
-    resources = value['resources']
-    if not isinstance(resources, dict) or set(resources) != RESOURCE_FIELDS:
-        raise ValueError('environment profile resources fields mismatch')
-    for field, number in resources.items():
-        maximum = 2**32 - 1 if field in ('cpuMilli', 'pidsLimit') else 2**64 - 1
-        if type(number) is not int or number <= 0:
-            raise ValueError('environment profile resources must be positive integers')
-        if number > maximum:
-            raise ValueError(f'environment profile resources.{field} exceeds transport range')
+    validate_environment_resources(value['resources'])
 
 
 def environment_profile_digest(value):
@@ -67,7 +59,6 @@ def _receipt(environment):
 
 def freeze_run_environment_profile(agent_run, image_digest):
     """First use freezes a new environment; history is never guessed from defaults."""
-    from django.conf import settings
     from .models import AgentRun, Session, SessionEnvironment
     with transaction.atomic():
         session = Session.objects.select_for_update().get(pk=agent_run.session_id)
@@ -82,10 +73,7 @@ def freeze_run_environment_profile(agent_run, image_digest):
             environment.environment_profile = {
                 'schema': PROFILE_SCHEMA, 'imageDigest': image_digest, 'workspaceRoot': '/mnt/data',
                 'user': '10001:10001', 'network': environment.network,
-                'resources': {'memoryBytes': settings.SANDBOX_MEMORY_BYTES,
-                    'cpuMilli': settings.SANDBOX_CPU_MILLI, 'pidsLimit': settings.SANDBOX_PIDS_LIMIT,
-                    'workspaceBytes': settings.SANDBOX_WORKSPACE_BYTES,
-                    'storageBytes': settings.SANDBOX_WORKSPACE_BYTES}}
+                'resources': dict(environment.resource_defaults)}
             environment.environment_profile_digest = environment_profile_digest(environment.environment_profile)
             environment.environment_profile_operation_id = f'first_run:{agent_run.pk}'
             environment.environment_profile_bound_at = timezone.now()

@@ -2,8 +2,10 @@
 
 Workspace owners and administrators set the default in Settings → Execution
 environment. The authenticated, CSRF-protected GET/PATCH endpoint is
-`/api/workspaces/{workspaceId}/environment-settings`, with body
-`{"network":"disabled"}` or `{"network":"publicInternet"}`. Other members
+`/api/workspaces/{workspaceId}/environment-settings`. GET returns `network`,
+`cpuMilli`, `memoryBytes`, `workspaceBytes` and the saved `revision`. PATCH accepts
+one or more of the four policy values, such as `{"network":"publicInternet"}`;
+the revision is read-only. Other members
 cannot read or change this administrative setting.
 
 The default is disabled. Each new Session snapshots the workspace default.
@@ -11,6 +13,10 @@ Updating the setting affects new Sessions; existing environments and signed
 grants retain their snapshot. A maintenance-authorized profile binding may set
 the same network field before that environment has been used. Once the complete
 profile is bound, PostgreSQL protects it against model, bulk and raw updates.
+CPU, memory and workspace-space defaults use the same environment-creation
+boundary and revision. See [sandbox execution profile](../reference/Configuration.md#sandbox-execution-profile)
+for resource units and the distinction between workspace-space budget and a
+physical disk quota.
 
 The current `workspace.agent_run_authorization.v2` signs the network value inside
 `environmentProfile` and binds the complete `environmentProfileDigest`. Ordinary

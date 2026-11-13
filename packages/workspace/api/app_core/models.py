@@ -11,6 +11,7 @@ from django.core.validators import validate_email
 from django.db import IntegrityError, models, router, transaction
 from django.db.models.functions import Lower
 from .session_payload import SessionPayloadField
+from .environment_resources import default_environment_resources, validate_environment_resources
 
 from .agent_identity import (
     normalize_agent_description,
@@ -322,6 +323,8 @@ class Workspace(models.Model):
     description = models.TextField(blank=True, default="")
     execution_network = models.CharField(max_length=14, default="disabled",
         choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
+    execution_resources = models.JSONField(default=default_environment_resources)
+    execution_settings_revision = models.PositiveBigIntegerField(default=1, editable=False)
     status = models.CharField(max_length=32, default="active")
     createdBy = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -340,6 +343,11 @@ class Workspace(models.Model):
     class Meta:
         constraints = [models.CheckConstraint(condition=models.Q(execution_network__in=["disabled", "publicInternet"]),
             name="workspace_execution_network_valid"),
+            models.CheckConstraint(condition=models.Func("execution_resources",
+                function="public.workspace_environment_resources_valid_v1", output_field=models.BooleanField()),
+                name="workspace_execution_resources_valid"),
+            models.CheckConstraint(condition=models.Q(execution_settings_revision__gt=0),
+                name="workspace_execution_settings_revision_positive"),
             models.CheckConstraint(
                 condition=(models.Q(avatar_image__isnull=True, avatar_digest="")
                     | models.Q(avatar_image__isnull=False, avatar_digest__regex=r"^[0-9a-f]{64}$")),
@@ -349,6 +357,9 @@ class Workspace(models.Model):
     def save(self, *args, **kwargs):
         require_enum("Workspace.status", self.status, {"active", "archived"})
         require_enum("Workspace.execution_network", self.execution_network, {"disabled", "publicInternet"})
+        validate_environment_resources(self.execution_resources)
+        if type(self.execution_settings_revision) is not int or self.execution_settings_revision <= 0:
+            raise ValueError("workspace_execution_settings_revision_invalid")
         return super().save(*args, **kwargs)
 
 
@@ -1185,6 +1196,8 @@ class SessionEnvironment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     network = models.CharField(max_length=14, default="disabled", editable=False,
         choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
+    resource_defaults = models.JSONField(default=default_environment_resources, editable=False)
+    resource_defaults_revision = models.PositiveBigIntegerField(null=True, default=None, editable=False)
     environment_profile = models.JSONField(null=True, default=None, blank=True, editable=False)
     environment_profile_digest = models.CharField(max_length=71, default="", blank=True, editable=False)
     environment_profile_operation_id = models.CharField(max_length=128, default="", blank=True, editable=False)
@@ -1208,7 +1221,13 @@ class SessionEnvironment(models.Model):
 
     class Meta:
         constraints = [models.CheckConstraint(condition=models.Q(network__in=["disabled", "publicInternet"]),
-            name="environment_network_valid"), models.CheckConstraint(
+            name="environment_network_valid"),
+            models.CheckConstraint(condition=models.Func("resource_defaults",
+                function="public.workspace_environment_resources_valid_v1", output_field=models.BooleanField()),
+                name="environment_resource_defaults_valid"),
+            models.CheckConstraint(condition=(models.Q(resource_defaults_revision__isnull=True)
+                | models.Q(resource_defaults_revision__gt=0)), name="environment_resource_defaults_revision_positive"),
+            models.CheckConstraint(
             condition=(models.Q(controller_run__isnull=True, controller_maintenance_operation__isnull=True,
                                controller_lease_owner="", controller_released=True, controller_purpose="")
                 | (((models.Q(controller_run__isnull=False, controller_maintenance_operation__isnull=True)
@@ -1234,16 +1253,23 @@ class SessionEnvironment(models.Model):
             raise ValueError("environment_profile_requires_binding")
         using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
         if self._state.adding:
-            self.network = Workspace.objects.using(using).get(sessions__pk=self.session_id).execution_network
+            workspace = Workspace.objects.using(using).get(sessions__pk=self.session_id)
+            self.network = workspace.execution_network
+            self.resource_defaults = dict(workspace.execution_resources)
+            self.resource_defaults_revision = workspace.execution_settings_revision
         require_enum("SessionEnvironment.network", self.network, {"disabled", "publicInternet"})
+        validate_environment_resources(self.resource_defaults)
         if not self._state.adding:
             using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
-            stored = type(self).objects.using(using).values("session_id", "network", "environment_profile",
+            stored = type(self).objects.using(using).values("session_id", "network", "resource_defaults",
+                "resource_defaults_revision", "environment_profile",
                 "environment_profile_digest", "environment_profile_operation_id", "environment_profile_bound_at", "historical_profile",
                 "benchmark_setup_operation_id", "benchmark_setup_run_id", "benchmark_setup_instance_id",
                 "benchmark_setup_container_id", "benchmark_setup_completed_at").get(pk=self.pk)
             if stored["session_id"] != self.session_id:
                 raise ValueError("session_environment_identity_immutable")
+            if any(stored[field] != getattr(self, field) for field in ("resource_defaults", "resource_defaults_revision")):
+                raise ValueError("environment_resource_defaults_immutable")
             if stored["historical_profile"] != self.historical_profile:
                 raise ValueError("environment_profile_history_immutable")
             binding_profile = stored["environment_profile"] is None and self.environment_profile is not None
@@ -1270,7 +1296,7 @@ class SessionEnvironment(models.Model):
         if created:
             # PostgreSQL snapshots the authoritative default at INSERT time.
             # A concurrent settings update may have superseded our earlier read.
-            self.refresh_from_db(using=using, fields=["network"])
+            self.refresh_from_db(using=using, fields=["network", "resource_defaults", "resource_defaults_revision"])
         return result
 
 

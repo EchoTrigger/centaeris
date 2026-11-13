@@ -1,0 +1,13 @@
+.environmentSettingsForm { display: grid; gap: 12px; }
+.environmentSettingsResource { display: flex; min-height: 44px; align-items: baseline; justify-content: space-between; gap: 24px; }
+.environmentSettingsResource > label { min-width: 0; color: var(--on-surface); font-size: 14px; font-weight: 500; }
+.environmentSettingsResource > div { display: grid; width: min(180px, 45%); flex: none; gap: 5px; }
+.environmentSettingsResource input { min-width: 0; width: 100%; min-height: var(--control-height-compact); border: 0; border-radius: var(--control-radius); background: color-mix(in srgb, var(--surface-color) 80%, white); color: var(--on-surface); padding: 6px 10px; }
+.environmentSettingsResource input:disabled { opacity: .5; }
+.environmentSettingsResource small { color: var(--danger); font-size: 12px; line-height: 1.5; }
+.environmentSettingsForm > button { justify-self: start; margin-top: 4px; }
+.environmentSettings .environmentSettingsForm :is(input, button):focus-visible,
+.environmentSettings > button:focus-visible { outline: 0; box-shadow: none; text-decoration: underline; text-underline-offset: 3px; }
+.environmentSettingsResource:has(input:focus-visible) > label,
+.environmentSettings .preferenceRow:has(input:focus-visible) strong { text-decoration: underline; text-underline-offset: 3px; }
+.preferenceSettings:has(.environmentSettings) .settingsPageHeading h1 { white-space: nowrap; }
