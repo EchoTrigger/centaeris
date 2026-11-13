@@ -146,3 +146,50 @@ test("execution results load on expansion and retain the full conversation and a
   expect(screen.getByRole("link", { name: "Report.pdf" }).getAttribute("href")).toBe("/report");
   expect(screen.getByRole("link", { name: /Continue conversation/ }).getAttribute("href")).toContain("session");
 });
+
+test("changing status retains the open activity and submission draft during the authoritative refresh", async () => {
+  executions = [{ id: "execution", sessionId: "session", title: "Research", status: "completed" }];
+  const user = userEvent.setup();
+  const router = mount("/w/one/work/mine/issue-one?execution=execution");
+  await screen.findByText("Delivered analysis");
+  await user.click(screen.getByRole("button", { name: "Submit work" }));
+  const draft = await screen.findByRole("textbox", { name: "Summary" });
+  await user.clear(draft);
+  await user.type(draft, "Keep these unsaved review notes");
+  const activity = screen.getByText("Activity").closest("details") as HTMLDetailsElement;
+  await user.click(screen.getByText("Activity"));
+  expect(activity.open).toBe(true);
+  const originalFetch = vi.mocked(apiJson).getMockImplementation()!;
+  let releaseRefresh: (() => void) | undefined;
+  vi.mocked(apiJson).mockImplementation(async (path, options = {}) => {
+    if (path === "/api/workspaces/one/issues/issue-one" && !options.method) {
+      return new Promise(resolve => { releaseRefresh = () => resolve({ issue }); });
+    }
+    return originalFetch(path, options);
+  });
+  await user.click(screen.getByRole("button", { name: "Status: Todo" }));
+  await user.click(await screen.findByRole("menuitemradio", { name: /In progress/i }));
+  await waitFor(() => expect(releaseRefresh).toBeTypeOf("function"));
+  expect((screen.getByRole("textbox", { name: "Summary" }) as HTMLTextAreaElement).value).toBe("Keep these unsaved review notes");
+  expect(activity.open).toBe(true);
+  await act(async () => { releaseRefresh?.(); });
+  expect((await screen.findByRole("textbox", { name: "Summary" }) as HTMLTextAreaElement).value).toBe("Keep these unsaved review notes");
+  expect(activity.open).toBe(true);
+  expect(router.state.location.search).toBe("?execution=execution");
+  expect(screen.getByRole("button", { name: "Status: In progress" })).toBeTruthy();
+});
+
+test("a denied authoritative refresh removes previously visible issue content", async () => {
+  const user = userEvent.setup(); mount("/w/one/work/mine/issue-one");
+  await screen.findByRole("heading", { name: "First issue" });
+  const originalFetch = vi.mocked(apiJson).getMockImplementation()!;
+  vi.mocked(apiJson).mockImplementation(async (path, options = {}) => {
+    if (path === "/api/workspaces/one/issues/issue-one" && !options.method) throw new ApiError("issue_not_found", 404);
+    return originalFetch(path, options);
+  });
+  await user.click(screen.getByRole("button", { name: "Status: Todo" }));
+  await user.click(await screen.findByRole("menuitemradio", { name: /In progress/i }));
+  await screen.findByRole("alert");
+  expect(screen.queryByRole("heading", { name: "First issue" })).toBeNull();
+  expect(screen.queryByText("Real description")).toBeNull();
+});

@@ -41,11 +41,15 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
   const creating = issueId === "new";
   const detail = Boolean(issueId) && !creating;
   const title = t(mine ? "work.myIssues" : "work.issues");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Navigation changes reset the view; background revisions retain local state.
+  useEffect(() => {
+    setData(null); setEvents({ events: [], total: 0 }); setEditing(false);
+  }, [root, issueId, mine, archived, offset]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: Revision explicitly reloads authoritative records after a mutation or user retry.
   useEffect(() => {
     const controller = new AbortController();
     const options = { signal: controller.signal };
-    setData(null); setError(null); setEditing(false); setEvents({ events: [], total: 0 });
+    setError(null); setEditing(false);
     const load = async () => {
       try {
         const [result, people, activity, catalog] = await Promise.all([
@@ -56,7 +60,11 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
         ]);
         if (controller.signal.aborted) return;
         setTemplates(catalog.templates); setData(result); setAssignees(people.assignees); setEvents(activity);
-      } catch (failure) { if (!controller.signal.aborted) setError(failure); }
+      } catch (failure) {
+        if (!controller.signal.aborted) {
+          setData(null); setEvents({ events: [], total: 0 }); setError(failure);
+        }
+      }
     };
     void load();
     return () => controller.abort();
