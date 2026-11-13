@@ -17,8 +17,8 @@ const hit = (id: string, kind = "final", snippet = "权限核对完成") => ({
 
 beforeEach(() => {
   request.mockReset();
-  request.mockImplementation(async (path: string) => path === "/api/library"
-    ? { objects: [] } : { matches: [], nextCursor: null });
+  request.mockImplementation(async (path: string) => !path.includes("sessions/search")
+    ? { matches: [], nextCursor: null } : { matches: [], nextCursor: null });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
@@ -26,6 +26,7 @@ function openSearch() {
   const router = createMemoryRouter([
     { path: "/", element: <WorkspaceSearch workspaceId="research" onClose={() => {}} /> },
     { path: "/w/research/sessions/:id", element: <div>Selected conversation</div> },
+    { path: "/w/research/library", element: <div>Material page</div> },
   ]);
   render(<RouterProvider router={router} />);
   return router;
@@ -33,7 +34,7 @@ function openSearch() {
 
 test("body hits show their type and snippet and open the selected conversation by keyboard", async () => {
   const user = userEvent.setup();
-  request.mockImplementation(async (path: string) => path === "/api/library" ? { objects: [] }
+  request.mockImplementation(async (path: string) => !path.includes("sessions/search") ? { matches: [], nextCursor: null }
     : { matches: [hit("input", "user"), hit("phase", "stage"), hit("answer")], nextCursor: null });
   const router = openSearch();
   expect(request.mock.calls.filter(([path]) => path.includes("sessions/search"))).toHaveLength(0);
@@ -52,7 +53,7 @@ test("a late result from an earlier query cannot replace the current results", a
   const user = userEvent.setup();
   let completeOld!: (response: unknown) => void;
   request.mockImplementation(async (path: string) => {
-    if (path === "/api/library") return { objects: [] };
+    if (!path.includes("sessions/search")) return { matches: [], nextCursor: null };
     const query = new URL(path, "http://localhost").searchParams.get("query");
     if (query === "old") return new Promise(resolve => { completeOld = resolve; });
     return { matches: [hit("new", "final", "new answer")], nextCursor: null };
@@ -72,7 +73,7 @@ test("more results use the same query cursor and errors retain the query for ret
   const user = userEvent.setup();
   let failed = false;
   request.mockImplementation(async (path: string) => {
-    if (path === "/api/library") return { objects: [] };
+    if (!path.includes("sessions/search")) return { matches: [], nextCursor: null };
     if (path.includes("cursor=")) {
       if (!failed) { failed = true; throw new Error("offline"); }
       return { matches: [hit("second")], nextCursor: null };
@@ -98,7 +99,7 @@ test("browser history restores the query, loaded pages, selection and scroll pos
   const user = userEvent.setup();
   let failFirst = true;
   request.mockImplementation(async (path: string) => {
-    if (path === "/api/library") return { objects: [] };
+    if (!path.includes("sessions/search")) return { matches: [], nextCursor: null };
     if (failFirst) { failFirst = false; throw new Error("offline"); }
     return path.includes("cursor=") ? { matches: [hit("second")], nextCursor: null }
       : { matches: [hit("first")], nextCursor: "next" };
@@ -127,10 +128,11 @@ test("browser history restores the query, loaded pages, selection and scroll pos
   const requestCount = request.mock.calls.length;
   await act(async () => { await router.navigate(-1); });
   expect((await screen.findByRole("combobox")) as HTMLInputElement).toHaveProperty("value", "权限");
+  await screen.findByRole("option", { name: /Conversation second/ });
   expect(screen.getAllByRole("option")).toHaveLength(2);
   expect(screen.getByRole("option", { name: /Conversation second/ }).getAttribute("aria-selected")).toBe("true");
   expect(screen.getByRole("listbox").scrollTop).toBe(137);
-  expect(request.mock.calls).toHaveLength(requestCount);
+  expect(request.mock.calls.length).toBeGreaterThan(requestCount);
   await act(async () => { await router.navigate(1); });
   expect(new URLSearchParams(router.state.location.search).get("at")).toBe("event-second");
   await act(async () => { await router.navigate(-1); await router.navigate(-1); });
@@ -143,7 +145,7 @@ test("leaving during pagination cancels the request and Back restores usable res
   let pageSignal!: AbortSignal;
   let finishPage!: (value: unknown) => void;
   request.mockImplementation(async (path: string, options: { signal: AbortSignal }) => {
-    if (path === "/api/library") return { objects: [] };
+    if (!path.includes("sessions/search")) return { matches: [], nextCursor: null };
     if (path.includes("cursor=")) { pageSignal = options.signal; return new Promise(resolve => { finishPage = resolve; }); }
     return { matches: [hit("first")], nextCursor: "next" };
   });
@@ -158,8 +160,45 @@ test("leaving during pagination cancels the request and Back restores usable res
   await user.click(screen.getByRole("option", { name: /Conversation first/ }));
   expect(pageSignal.aborted).toBe(true);
   await act(async () => { await router.navigate(-1); });
-  expect(screen.getByRole("button", { name: "searchOverlay.loadMoreConversations" }).hasAttribute("disabled")).toBe(false);
+  expect((await screen.findByRole("button", { name: "searchOverlay.loadMoreConversations" })).hasAttribute("disabled")).toBe(false);
   await act(async () => { finishPage({ matches: [hit("late")], nextCursor: null }); });
   expect(screen.queryByRole("option", { name: /Conversation late/ })).toBeNull();
   expect(screen.getAllByRole("option")).toHaveLength(1);
+});
+
+
+test("authorized material and submitted-result body hits use the server's original-content links", async () => {
+  const user = userEvent.setup();
+  request.mockImplementation(async (path: string) => path.includes("sessions/search") ? { matches: [], nextCursor: null } : {
+    matches: [
+      { id: "sourceObject:rules", kind: "material", title: "Rules.pdf", snippet: "差旅权限材料", href: "/w/research/library?view=knowledge&source=rules&object=source&offset=10" },
+      { id: "deliverable:report", kind: "deliverable", title: "Submitted report", snippet: "权限核查结论", href: "/w/research/work/tasks/issue?deliverable=report" },
+    ], nextCursor: null,
+  });
+  const router = openSearch();
+  await user.type(screen.getByRole("combobox"), "权限");
+  const material = await screen.findByRole("option", { name: /Rules.pdf/ });
+  expect(material.textContent).toContain("searchOverlay.match.material");
+  expect(screen.getByRole("option", { name: /Submitted report/ }).textContent).toContain("searchOverlay.match.deliverable");
+  await user.click(material);
+  expect(router.state.location.pathname).toBe("/w/research/library");
+  expect(router.state.location.search).toContain("offset=10");
+});
+
+test("returning to search reauthorizes results before showing revoked content", async () => {
+  const user = userEvent.setup(); let allowed = true;
+  request.mockImplementation(async (path: string) => ({ matches: !path.includes("sessions/search") && allowed
+    ? [{ id: "sourceObject:private", kind: "material", title: "Restricted material", snippet: "private rule", href: "/w/research/library/private" }] : [], nextCursor: null }));
+  const router = createMemoryRouter([{ element: <WorkspaceSearchHistory><Outlet /></WorkspaceSearchHistory>, children: [
+    { path: "/", element: <WorkspaceSearch workspaceId="research" onClose={() => {}} /> },
+    { path: "/w/research/library/private", element: <div>Material page</div> },
+  ] }]);
+  render(<RouterProvider router={router} />);
+  await user.type(screen.getByRole("combobox"), "private");
+  await user.click(await screen.findByRole("option", { name: /Restricted material/ }));
+  allowed = false;
+  await act(async () => { await router.navigate(-1); });
+  expect(screen.queryByRole("option", { name: /Restricted material/ })).toBeNull();
+  await waitFor(() => expect(screen.queryByText("agentChat.loading")).toBeNull());
+  expect(screen.queryByRole("option", { name: /Restricted material/ })).toBeNull();
 });

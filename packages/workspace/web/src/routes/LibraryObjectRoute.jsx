@@ -12,6 +12,7 @@ import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
 import SpreadsheetPreview from "../components/SpreadsheetPreview";
 import { createNoteDraftStore } from "../library/noteDraftStore";
 import { NoteSaveController } from "../library/noteSaveController";
+import { SpaceMaterialView } from "./SpaceMaterialView";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
 function isImage(item) {
@@ -304,5 +305,9 @@ function LibraryPreviewPageContent({ inline = false } = {}) {
 
 export default function LibraryPreviewPage({ embedded = false, inline = false } = {}) {
   useTranslation();
-  return embedded ? <LibraryPreviewPageContent inline={inline} /> : <ShellPage><LibraryPreviewPageContent inline={inline} /></ShellPage>;
+  const { workspace } = useRouteLoaderData("workspace");
+  const params = useParams();
+  const [search] = useSearchParams();
+  const content = search.has("representationId") ? <section className="catalogPage"><div className="catalogWorkspace hasDetail"><SpaceMaterialView workspaceId={workspace.id} kind="userLibraryObject" objectId={params.libraryObjectId} representationId={search.get("representationId")} offset={Number(search.get("offset") || 0)} highlight={search.get("highlight")} /></div></section> : <LibraryPreviewPageContent inline={inline} />;
+  return embedded ? content : <ShellPage>{content}</ShellPage>;
 }

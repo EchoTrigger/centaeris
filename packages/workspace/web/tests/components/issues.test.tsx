@@ -20,6 +20,8 @@ beforeEach(async () => {
   vi.mocked(apiJson).mockImplementation(async (path, options = {}) => {
     const body = options.body ? JSON.parse(String(options.body)) : null;
     requests.push({ path, body });
+    if (path.endsWith("/issue-templates")) return { templates: [] };
+    if (path.endsWith("/deliverables")) return { version: issue.version, deliverables: [] };
     if (path.endsWith("/materials")) {
       if (options.method === "POST") { materials = [...materials, { id: "attached", ...body, displayName: "Brief.pdf", available: true }]; issue.version = Number(issue.version) + 1; }
       return { materials, version: issue.version };

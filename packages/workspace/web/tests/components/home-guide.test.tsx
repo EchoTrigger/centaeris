@@ -18,6 +18,7 @@ beforeEach(async () => {
   steps = [{ id: "materials", completed: false }, { id: "conversation", completed: false }, { id: "issue", completed: true }];
   clearCsrfToken(); configureApi({ apiBaseUrl: "http://localhost" }); await i18n.changeLanguage("en");
   vi.stubGlobal("fetch", vi.fn(async (input, options) => {
+    if (String(input).endsWith("/issue-templates")) return Response.json({ templates: [] });
     if (String(input).endsWith("/api/csrf")) return Response.json({ csrfToken: "token" });
     if (options?.method === "PATCH") {
       if (delaySave) await new Promise<void>(resolve => { releaseSave = resolve; });

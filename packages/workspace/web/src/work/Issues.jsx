@@ -8,12 +8,15 @@ import { WorkBreadcrumb } from "./WorkBreadcrumb";
 import { IssueForm, IssueStatus } from "./IssueForm";
 import { IssueMaterials } from "./IssueMaterials";
 import { IssueExecutions } from "./IssueExecutions";
+import { IssueTemplateValues } from "./IssueTemplateFields";
+import { IssueDeliverables } from "./IssueDeliverables";
 import "./issues.css";
 
 const pageSize = 50;
 export function Issues({ workspaceId, userId, mine, issueId }) {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
+  const [templates, setTemplates] = useState([]);
   const [params, setParams] = useSearchParams();
   const archived = params.get("archived") === "true";
   const offset = Math.max(0, Number.parseInt(params.get("offset") || "0", 10) || 0);
@@ -43,13 +46,14 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
     setData(null); setError(null); setEditing(false); setEvents({ events: [], total: 0 });
     const load = async () => {
       try {
-        const [result, people, activity] = await Promise.all([
+        const [result, people, activity, catalog] = await Promise.all([
           creating ? Promise.resolve({}) : apiJson(detail ? `${root}/${encodeURIComponent(issueId)}` : `${root}?mine=${mine}&archived=${archived}&limit=${pageSize}&offset=${offset}`, options),
           apiJson(`${root}/assignees`, options),
           detail ? apiJson(`${root}/${encodeURIComponent(issueId)}/events?limit=${pageSize}&offset=0`, options) : Promise.resolve({ events: [], total: 0 }),
+          creating ? apiJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/issue-templates`, options) : Promise.resolve({ templates: [] }),
         ]);
         if (controller.signal.aborted) return;
-        setData(result); setAssignees(people.assignees); setEvents(activity);
+        setTemplates(catalog.templates); setData(result); setAssignees(people.assignees); setEvents(activity);
       } catch (failure) { if (!controller.signal.aborted) setError(failure); }
     };
     void load();
@@ -81,14 +85,16 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
         {data.total > pageSize ? <nav className="issuePagination" aria-label={t("issues.pages")}><Button variant="ghost" disabled={!offset} onClick={() => setParams({ ...(archived ? { archived: "true" } : {}), offset: String(Math.max(0, offset - pageSize)) })}>{t("issues.previous")}</Button><Button variant="ghost" disabled={offset + pageSize >= data.total} onClick={() => setParams({ ...(archived ? { archived: "true" } : {}), offset: String(offset + pageSize) })}>{t("issues.next")}</Button></nav> : null}
       </div> : null}
     </> : data ? <div className="issueDetail">
-      {creating || editing ? <IssueForm key={issue?.version || "new"} issue={issue} assignees={assignees} defaultAssigneeId={mine ? userId : null} pending={pending} onSave={mutate} onCancel={() => creating ? navigate(listUrl) : setEditing(false)} /> : issue ? <>
+      {creating || editing ? <IssueForm key={issue?.version || "new"} issue={issue} assignees={assignees} defaultAssigneeId={mine ? userId : null} templates={templates} initialTemplateKey={params.get("template") || ""} pending={pending} onSave={mutate} onCancel={() => creating ? navigate(listUrl) : setEditing(false)} /> : issue ? <>
         <h1>{issue.title}</h1><div className="issueMetadata"><IssueStatus status={issue.status} /><span>{t(`issues.status.${issue.status}`)}</span><span>{personName(issue.assigneeId)}</span>{issue.archivedAt ? <span>{t("issues.archived")}</span> : null}</div>
         {issue.description ? <p className="issueDescription">{issue.description}</p> : null}
+        {issue.templateKey ? <IssueTemplateValues definition={issue.templateSnapshot.definition} values={issue.properties} /> : null}
         <div className="issueActions"><Button variant="ghost" onClick={() => setEditing(true)}>{t("issues.edit")}</Button><Button variant="ghost" disabled={pending} onClick={() => mutate({ archived: !issue.archivedAt })}>{t(issue.archivedAt ? "issues.restore" : "issues.archive")}</Button></div>
         <IssueMaterials workspaceId={workspaceId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
         <IssueExecutions key={issue.id} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
+        <IssueDeliverables workspaceId={workspaceId} userId={userId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
       </> : null}
-      {issue ? <section className="issueActivity"><h2>{t("issues.activity")}</h2><ol>{events.events.map(event => <li key={event.id}><div><span>{event.actor.name}</span><span>{t(`issues.event.${event.type}`)}</span><time dateTime={event.createdAt}>{time(event.createdAt)}</time></div>{Object.entries(event.changes).map(([field, change]) => <p key={field}>{t(`issues.field.${field}`)}: <span>{fieldValue(field, change.before)}</span> → <span>{fieldValue(field, change.after)}</span></p>)}</li>)}</ol>{events.events.length < events.total ? <Button variant="ghost" disabled={pending} onClick={async () => { setPending(true); setError(null); try { const next = await apiJson(`${root}/${encodeURIComponent(issueId)}/events?limit=${pageSize}&offset=${events.events.length}`); if (mounted.current) setEvents(previous => ({ ...next, events: [...previous.events, ...next.events] })); } catch (failure) { if (mounted.current) setError(failure); } finally { if (mounted.current) setPending(false); } }}>{t("issues.moreActivity")}</Button> : null}</section> : null}
+      {issue ? <section className="issueActivity"><h2>{t("issues.activity")}</h2><ol>{events.events.map(event => <li key={event.id}><div><span>{event.actor.name}</span><span>{t(`issues.event.${event.type}`)}</span><time dateTime={event.createdAt}>{time(event.createdAt)}</time></div>{Object.entries(event.changes).filter(([field]) => field !== "deliverableId").map(([field, change]) => <p key={field}>{t(`issues.field.${field}`)}: <span>{fieldValue(field, change.before)}</span> → <span>{fieldValue(field, change.after)}</span></p>)}</li>)}</ol>{events.events.length < events.total ? <Button variant="ghost" disabled={pending} onClick={async () => { setPending(true); setError(null); try { const next = await apiJson(`${root}/${encodeURIComponent(issueId)}/events?limit=${pageSize}&offset=${events.events.length}`); if (mounted.current) setEvents(previous => ({ ...next, events: [...previous.events, ...next.events] })); } catch (failure) { if (mounted.current) setError(failure); } finally { if (mounted.current) setPending(false); } }}>{t("issues.moreActivity")}</Button> : null}</section> : null}
     </div> : null}
   </section>;
 }

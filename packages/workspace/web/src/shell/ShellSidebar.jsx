@@ -18,6 +18,7 @@ import {
   House,
   Copy,
   Layers2,
+  Infinity,
   MousePointer2,
 } from "lucide-react";
 import { apiResponse, clearCsrfToken } from "../api";
@@ -166,6 +167,7 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
           <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><Copy aria-hidden="true" /><span>{t("work.issues")}</span></Link>
           <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Box aria-hidden="true" /><span>{t("work.projects")}</span></Link>
           <Link className="shRow" to={`${base}/work/views`} aria-current={location.pathname === `${base}/work/views` ? "page" : undefined}><Layers2 aria-hidden="true" /><span>{t("work.views")}</span></Link>
+          <Link className="shRow" to={`${base}/work/loops`} aria-current={location.pathname === `${base}/work/loops` ? "page" : undefined}><Infinity aria-hidden="true" /><span>{t("work.loops")}</span></Link>
           </SidebarGroup>
         </section>
       </nav>

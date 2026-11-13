@@ -7,6 +7,7 @@ import { MarkdownContent } from "../chat/MarkdownContent";
 import { readModelThinkingMode, readPreferredModelIdentity } from "../preferences";
 import { sessionChatPath } from "../shell/sessionNavigation.mjs";
 import { useTranslation } from "../i18n";
+import { DeliverableSubmit } from "./IssueDeliverables";
 
 export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
   const { t } = useTranslation();
@@ -84,7 +85,7 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
       catch (failure) { if (mounted.current) setError(["issue_material_unavailable", "issue_material_version_changed"].includes(failure.message) ? t("issues.materialsChanged") : failure.message); }
       finally { if (mounted.current) setPending(false); }
     }}>{t("agentChat.retry")}</Button></div> : null}
-    {executions.length ? <><h2>{t("issues.conversations")}</h2><ul className="issueExecutionList">{executions.map(execution => <li key={execution.id}><Button variant="ghost" aria-expanded={activeExecution === execution.id} onClick={() => setActiveExecution(value => value === execution.id ? "" : execution.id)}>{execution.title}</Button><Link to={sessionChatPath(workspaceId, execution.sessionId)}><span>{t("issues.openConversation")}</span><small>{t(`issues.execution.${execution.status}`)}</small></Link>{activeExecution === execution.id ? <ExecutionResults key={`${execution.id}:${revision}`} endpoint={`${endpoint}/${encodeURIComponent(execution.id)}`} /> : null}</li>)}</ul>
+    {executions.length ? <><h2>{t("issues.conversations")}</h2><ul className="issueExecutionList">{executions.map(execution => <li key={execution.id}><Button variant="ghost" aria-expanded={activeExecution === execution.id} onClick={() => setActiveExecution(value => value === execution.id ? "" : execution.id)}>{execution.title}</Button><Link to={sessionChatPath(workspaceId, execution.sessionId)}><span>{t("issues.openConversation")}</span><small>{t(`issues.execution.${execution.status}`)}</small></Link>{activeExecution === execution.id ? <ExecutionResults key={`${execution.id}:${revision}`} endpoint={`${endpoint}/${encodeURIComponent(execution.id)}`} executionId={execution.id} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={onChanged} /> : null}</li>)}</ul>
       {executions.length < total ? <Button variant="ghost" disabled={pending} onClick={async () => {
         setPending(true); setError(null);
         try { const result = await apiJson(`${endpoint}?limit=20&offset=${executions.length}`); if (mounted.current) { setExecutions(items => [...items, ...result.executions]); setTotal(result.total); } }
@@ -94,9 +95,10 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
   </section>;
 }
 
-function ExecutionResults({ endpoint }) {
+function ExecutionResults({ endpoint, executionId, workspaceId, userId, issue, onChanged }) {
   const { t } = useTranslation();
   const [data, setData] = useState({ runs: [], total: 0 });
+  const [submittingRun, setSubmittingRun] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -118,6 +120,8 @@ function ExecutionResults({ endpoint }) {
       {run.summary ? <MarkdownContent text={`${run.summary}${run.summaryTruncated ? "…" : ""}`} /> : null}
       <ol>{run.activity.map(activity => <li key={activity.id}><p>{activity.text}{activity.textTruncated ? "…" : ""}</p><time dateTime={activity.createdAt}>{new Date(activity.createdAt).toLocaleString()}</time></li>)}</ol>
       {run.artifacts.length ? <ul>{run.artifacts.map(artifact => <li key={artifact.id}><a href={artifact.downloadUrl} download>{artifact.displayName}</a></li>)}</ul> : null}
+      {!issue.archivedAt && (run.summary || run.artifacts.length) ? <Button variant="ghost" aria-expanded={submittingRun === run.id} onClick={() => setSubmittingRun(value => value === run.id ? "" : run.id)}>{t("deliverables.submit")}</Button> : null}
+      {submittingRun === run.id ? <DeliverableSubmit key={run.id} workspaceId={workspaceId} userId={userId} issue={issue} executionId={executionId} run={run} onChanged={onChanged} onCancel={() => setSubmittingRun("")} /> : null}
     </article>)}
     {data.runs.length < data.total ? <Button variant="ghost" disabled={loading} onClick={() => void more()}>{t("issues.moreResults")}</Button> : null}
   </div>;

@@ -4,6 +4,7 @@ import { Check, Circle, X } from "lucide-react";
 import { Menu } from "@centaeris/ui/primitives/menu";
 import { apiJson, jsonOptions } from "../api";
 import { useTranslation } from "../i18n";
+import { WorkTemplateLinks } from "./WorkTemplateLinks";
 import { WorkBreadcrumb } from "./WorkBreadcrumb";
 
 export function WorkHome({ workspace }) {
@@ -78,6 +79,7 @@ export function WorkHome({ workspace }) {
           </Link>
         </li>)}</ul>
       </section> : null}
+      <WorkTemplateLinks workspaceId={workspace.id} />
       <section aria-labelledby="home-resources"><h3 id="home-resources">{t("home.resources")}</h3>
         <ul className="catalogRows">{resources.map(([id, href, label]) => <li key={id}><Link to={href}><span><strong>{t(label)}</strong></span><span aria-hidden="true">↗</span></Link></li>)}</ul>
       </section>

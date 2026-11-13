@@ -6,8 +6,8 @@ import { Inbox, type InboxItem, type InboxView } from "./Inbox";
 
 type Notification = {
   id: string; workspaceId: string; issueId: string; issueTitle: string;
-  kind: "assigned" | "statusChanged";
-  event: { actor: { id: string; name: string }; changes: Record<string, { before: unknown; after: unknown }> };
+  kind: "assigned" | "statusChanged" | "deliverable";
+  event: { type: "created" | "updated" | "archived" | "restored" | "deliverableSubmitted" | "deliverableFeedback" | "deliverableAccepted"; actor: { id: string; name: string }; changes: Record<string, { before: unknown; after: unknown }> };
   readAt: string | null; archivedAt: string | null; createdAt: string;
 };
 type Page = { notifications: Notification[]; total: number; unreadCount: number };
@@ -81,9 +81,13 @@ export function WorkspaceInbox({ workspaceId, userId }: { workspaceId: string; u
     setParams(previous => { const next = new URLSearchParams(previous); if (id) next.set("notification", id); else next.delete("notification"); return next; });
   }
   function item(notification: Notification): InboxItem {
-    const summary = notification.kind === "assigned" ? t("inbox.assigned", { actor: notification.event.actor.name }) : t("inbox.statusChanged", { actor: notification.event.actor.name, before: t(`issues.status.${notification.event.changes.status.before}`), after: t(`issues.status.${notification.event.changes.status.after}`) });
+    const summary = notification.kind === "deliverable" ? t(`inbox.${notification.event.type}`, { actor: notification.event.actor.name })
+      : notification.kind === "assigned" ? t("inbox.assigned", { actor: notification.event.actor.name }) : t("inbox.statusChanged", { actor: notification.event.actor.name, before: t(`issues.status.${notification.event.changes.status.before}`), after: t(`issues.status.${notification.event.changes.status.after}`) });
     const returnTo = `${location.pathname}${location.search}`;
-    return { ...notification, title: notification.issueTitle, actor: notification.event.actor.name, occurredAt: notification.createdAt, summary, body: "", target: { label: t("work.issues"), href: `/w/${encodeURIComponent(workspaceId)}/work/tasks/${encodeURIComponent(notification.issueId)}?returnTo=${encodeURIComponent(returnTo)}` } };
+    const targetParams = new URLSearchParams({ returnTo });
+    const deliverableId = notification.kind === "deliverable" ? notification.event.changes.deliverableId?.after : null;
+    if (typeof deliverableId === "string") targetParams.set("deliverable", deliverableId);
+    return { ...notification, title: notification.issueTitle, actor: notification.event.actor.name, occurredAt: notification.createdAt, summary, body: "", target: { label: t("work.issues"), href: `/w/${encodeURIComponent(workspaceId)}/work/tasks/${encodeURIComponent(notification.issueId)}?${targetParams}` } };
   }
   return <Inbox scrollKey={`centaeris:inbox-scroll:${JSON.stringify([userId, workspaceId, view, offset])}`} items={page?.notifications.map(item) || []} selectedItem={selected ? item(selected) : null} view={view as InboxView} selectedId={selectedId} loading={!page} pending={pending} error={error} onSelect={select} onChange={(id, values) => { void change(id, values); }} onViewChange={next => setParams(next === "inbox" ? {} : { view: next })} pagination={{ offset, total: page?.total || 0, onPage: nextOffset => setParams(previous => { const next = new URLSearchParams(previous); next.set("offset", String(nextOffset)); next.delete("notification"); return next; }) }} />;
 }

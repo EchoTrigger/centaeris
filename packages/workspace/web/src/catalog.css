@@ -170,3 +170,5 @@
 .homeGuide small { font-size:12px; line-height:1.6; color:var(--process-text); }
 .homeGuideError { display:flex; align-items:center; gap:12px; margin-bottom:16px; color:var(--error); }
 .workHomeBody .catalogRows a { min-height:52px; padding:12px 14px; }
+
+.spaceMaterialText { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.7; margin:20px 0; }

@@ -14,7 +14,7 @@ export default function WorkPrototypeRoute() {
   const location = useLocation();
   const base = `/w/${encodeURIComponent(workspace.id)}/work`;
   const [page = "mine", detail] = location.pathname.slice(base.length).split("/").filter(Boolean);
-  const labels = { mine: "work.myIssues", tasks: "work.issues", projects: "work.projects", reviews: "work.reviews", views: "work.views" };
+  const labels = { mine: "work.myIssues", tasks: "work.issues", projects: "work.projects", reviews: "work.reviews", views: "work.views", loops: "work.loops" };
   if (detail && page === "projects") return <Navigate to={`${base}/${page}`} replace />;
   return <div className="workPrototype">
     {page === "inbox" ? <WorkspaceInbox key={`${user.id}:${workspace.id}`} userId={user.id} workspaceId={workspace.id} />

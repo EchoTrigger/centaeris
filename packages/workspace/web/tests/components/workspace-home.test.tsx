@@ -153,10 +153,10 @@ test("workspace search reports a failed source and can retry the same query", as
   const user = userEvent.setup();
   let libraryRequests = 0;
   vi.stubGlobal("fetch", async (url: string) => {
-    if (url.endsWith("/api/library")) {
+    if (url.includes("/workspaces/research/search?")) {
       libraryRequests += 1;
       if (libraryRequests === 1) return new Response(null, { status: 503 });
-      return Response.json({ objects: [{ id: "guide", objectKind: "note", displayName: "Field guide" }] });
+      return Response.json({ matches: [{ id: "userLibraryObject:guide", kind: "material", title: "Field guide", snippet: "", href: "/w/research/library/guide" }], nextCursor: null });
     }
     return Response.json({ matches: [], nextCursor: null });
   });
