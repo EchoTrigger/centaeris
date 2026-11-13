@@ -28,10 +28,24 @@
 .issueExecutions h2 { margin-top: 24px; font-size: 14px; font-weight: 500; }
 .issueExecutionForm { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding-block: 12px; }
 .issueExecutionForm label { display: grid; gap: 6px; color: var(--process-text); }
-.issueExecutionForm select { color: var(--on-surface); background: var(--surface); border: 0; border-radius: 6px; padding: 8px; font: inherit; max-width: 100%; }
+.issueExecutionForm select { color: var(--on-surface); background: var(--surface-input); border: 0; border-radius: 6px; padding: 8px; font: inherit; max-width: 100%; }
 .issueExecutionError { display: flex; align-items: center; gap: 8px; color: var(--error); }
 .issueExecutionList { display: grid; gap: 6px; list-style: none; padding: 0; }
-.issueExecutionList a { display: flex; gap: 16px; padding: 10px 12px; border-radius: 8px; background: var(--surface-container); }
-.issueExecutionList a > span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
+.issueExecutionList > li > a { display: flex; gap: 16px; padding: 10px 12px; border-radius: 8px; background: var(--surface-container); }
+.issueExecutionList > li > a > span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
 .issueExecutionList small { flex: none; color: var(--process-text); }
 @media(max-width:600px) { .issueDetail { padding-inline:12px; } .issueRow small { max-width:90px; overflow:hidden; text-overflow:ellipsis; } }
+.issueMaterials { margin-block:24px; }
+.issueMaterials > header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.issueMaterials h2 { font-size:14px; font-weight:500; margin-right:auto; }
+.issueMaterialList { padding:0; list-style:none; }
+.issueMaterialList li { display:flex; align-items:center; gap:12px; padding-block:6px; }
+.issueMaterialList li > span { flex:1; overflow-wrap:anywhere; }
+.issueMaterialChooser { display:grid; gap:12px; padding-block:12px; }
+.issueMaterialChooser label { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.issueMaterialChooser select,.issueUpload input { max-width:100%; font:inherit; }
+.issueExecutionResults { padding:12px; }
+.issueExecutionResults p { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.6; }
+.issueExecutionResults ol { padding-left:20px; }
+.issueExecutionResults time { font-size:12px; color:var(--process-text); }
+.issueExecutionResults article + article { margin-top:20px; }
