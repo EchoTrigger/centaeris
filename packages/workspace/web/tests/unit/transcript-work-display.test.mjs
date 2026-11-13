@@ -26,12 +26,23 @@ const user = { blockId: "user", body: { kind: "userText" }, orderKey: { sourceSe
 const pending = { text: "same input", startedAtMs: 1000, sessionId: "session", agentRunId: "current-run" };
 const committedUser = (run, id = "committed") => ({ ...user, blockId: id, presentation: { agentRunId: run } });
 
-test("the work separator is present before and after the first final answer", async () => {
+test("the work clock stays visible without an empty disclosure before and after the final answer", async () => {
   const { WorkProgress } = await import(await loader(fileURLToPath(new URL("../../src/chat/WorkProgress.tsx", import.meta.url))));
   for (const finalStarted of [false, true]) {
-    const markup = renderToStaticMarkup(createElement(WorkProgress, { running: !finalStarted, finalStarted, startedAtMs: 1000 }));
+    const markup = renderToStaticMarkup(createElement(WorkProgress, { running: !finalStarted, finalStarted, hasProcess: false, startedAtMs: 1000 }));
     assert.equal((markup.match(/workProgressHeader/g) || []).length, 1);
+    assert.doesNotMatch(markup, /aria-expanded=/);
   }
+});
+
+test("final-only turns keep their answer and duration without an expansion control", () => {
+  const answer = { blockId: "final-answer", body: { kind: "assistantText" }, orderKey: { sourceSequence: "3" } };
+  const markup = render([user, answer], { startedAtMs: 1000, completedAtMs: 10000 });
+  assert.ok(markup.includes("final-answer"));
+  assert.ok(markup.includes("workProgress.worked"));
+  assert.doesNotMatch(markup, /aria-expanded=/);
+  const tool = { blockId: "tool", body: { kind: "tool" }, orderKey: { sourceSequence: "3" } };
+  assert.match(render([user, tool, answer]), /aria-expanded="false"/);
 });
 
 test("the pending input reserves the metadata row without displaying fake copy controls", () => {

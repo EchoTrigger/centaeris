@@ -627,7 +627,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                 <div className="workspaceUserMessage">{pendingUserMessage?.text}</div>
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
               </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} searchQuery={turn.userBlockId === targetBlockId ? targetQuery : undefined} /> : null}
-              {hasWork ? <WorkProgress key="work" revealKey={turn.processIds.includes(targetBlockId) ? targetBlockId : undefined} running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
+              {hasWork ? <WorkProgress key="work" hasProcess={turn.processIds.length > 0 || Boolean(turnLive?.reasoning?.text)} revealKey={turn.processIds.includes(targetBlockId) ? targetBlockId : undefined} running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
                 startedAtMs={isPending || (runKey && runKey === pendingRunKey) ? pendingStartedAt : submitted?.startedAtMs ?? time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : turnCompletedAt}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"

@@ -716,7 +716,6 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .filePreviewState.isError { color: var(--danger); }
 .filePreviewLayout { display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr); }
 .workProgressSummary svg { transition: transform 140ms ease; }
-.workProgressHeader { border-bottom: 1px solid var(--outline-variant); }
 .workspaceUserMessageMetaPlaceholder { min-height: 24px; }
 :is(.workspaceCitationSources button,.workProgressSummary,.workspaceActivityGroup,.filePreviewActions button,.filePreviewActions a) { transition: color 140ms ease, background-color 140ms ease; }
 .filePreviewBody { min-width: 0; min-height: 0; overflow: auto; background: var(--surface-variant); }

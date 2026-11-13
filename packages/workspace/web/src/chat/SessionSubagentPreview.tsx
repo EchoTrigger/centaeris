@@ -101,7 +101,9 @@ export function SessionSubagentPreview({ sessionId, agent, revision }: {
     <div className="workspaceTranscriptBlocks">
       <SessionSubagentStatus agent={currentAgent} />
       <UserMessage text={currentAgent.prompt} createdAtMs={currentAgent.createdAtMs} />
-      <WorkProgress running={running} finalStarted={answer !== null} startedAtMs={currentAgent.createdAtMs}
+      <WorkProgress running={running} finalStarted={answer !== null}
+        hasProcess={initialUser >= 0 || messages.some(message => message !== answer && (Boolean(message.content || message.reasoningContent) || message.toolCalls.length > 0))}
+        startedAtMs={currentAgent.createdAtMs}
         completedAtMs={running ? undefined : currentAgent.updatedAtMs}
         response={answer ? <ChildMessage message={answer} toolResults={toolResults} running={false} answer /> : undefined}>
         {initialUser >= 0 ? <details className="sessionSubagentTaskContext"><summary>{t("sessionSubagent.taskContext")}</summary>

@@ -50,6 +50,11 @@ again. The user can still close it manually. A new turn or Session has its own
 state; reopening a historical turn defaults to folded. This is local presentation
 state, not a persisted Runtime or transport field.
 
+Only turns with process content expose the completed work disclosure. A final-only
+response retains its elapsed-time label as static text, with no disclosure body,
+arrow or divider. Live reasoning also counts as process content. Work headers use
+no divider in either state.
+
 ## Focused verification
 
 From the repository root:
