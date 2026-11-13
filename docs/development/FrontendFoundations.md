@@ -53,8 +53,13 @@ scope. Storage restrictions retain usable state in the current document.
 
 ## Web interface roles
 
-This document defines the intended roles and host boundaries. Exact color values
-come from `packages/ui/src/theme.css`. Web control geometry comes from
+This document defines the intended roles and host boundaries. Shared color defaults
+come from `packages/ui/src/theme.css`. Web overrides surface roles in its own
+`styles/theme.css`: rail, reading canvas, static cards, and raised/input surfaces
+form distinct luminance layers. Cards use fill and spacing without perimeter
+outlines; keyboard focus retains a thin neutral outline. Catalog and Home entries
+use full-width single-column cards, including on wide screens. Selected and hovered
+navigation retains text/icon emphasis without a background fill. Web control geometry comes from
 `packages/workspace/web/src/styles/theme.css`; conversation type values come from
 `styles/chat-typography.css` and map to elements in `styles/transcript-theme.css`.
 `docs/workspace/reference/WebChatPresentation.md` describes those reading roles

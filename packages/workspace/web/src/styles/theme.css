@@ -12,6 +12,46 @@
   --navigation-icon-stroke: 1.8;
   --navigation-row-height: 30px;
 }
+/* Web owns luminance layers independently of the shared Desktop palette. */
+:root[data-theme] {
+  --workspace-rail: #ededed;
+  --surface-color: #f7f7f7;
+  --surface-variant: #ffffff;
+  --surface-container: #e6e6e6;
+  --surface-raised: #ffffff;
+  --surface-input: #eeeeee;
+  --outline: #898989;
+  --outline-variant: #dedede;
+  --workspace-frame-edge: transparent;
+  --background: 0 0% 97%;
+  --secondary: 0 0% 100%;
+  --accent: 0 0% 90%;
+  --input: 0 0% 87%;
+  --ring: 0 0% 54%;
+}
+:root[data-theme="dark"] {
+  --workspace-rail: #090909;
+  --surface-color: #111111;
+  --surface-variant: #191919;
+  --surface-container: #272727;
+  --surface-raised: #1e1e1e;
+  --surface-input: #1e1e1e;
+  --surface-hover: #292929;
+  --surface-active: #303030;
+  --on-surface: #ededed;
+  --process-text: #a0a0a0;
+  --outline: #707070;
+  --outline-variant: #292929;
+  --workspace-frame-edge: transparent;
+  --background: 0 0% 7%;
+  --secondary: 0 0% 10%;
+  --accent: 0 0% 15%;
+  --input: 0 0% 16%;
+  --ring: 0 0% 44%;
+}
+@media (forced-colors: active) {
+  :root[data-theme] { --workspace-rail: Canvas; --surface-raised: Canvas; --surface-input: Canvas; --workspace-frame-edge: ButtonBorder; }
+}
 @media (pointer: coarse) {
   :root {
     --control-height-compact: 44px;

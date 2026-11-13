@@ -26,3 +26,14 @@
 :root :is([data-slot="input"], [data-slot="textarea"], [data-slot="select-trigger"]):focus-visible {
   border-color: var(--outline);
 }
+
+/* Floating controls use a static raised plane; keyboard focus stays neutral. */
+:root :is([data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="dropdown-menu-content"], [data-slot="popover-content"], [data-slot="select-content"]) {
+  background-color: var(--surface-raised);
+  border-color: transparent;
+}
+:root :is([data-slot="input"], [data-slot="textarea"]) {
+  background-color: var(--surface-input);
+  border-color: transparent;
+}
+:root :is([data-slot="input"], [data-slot="textarea"]):focus-visible { border-color: var(--outline); }

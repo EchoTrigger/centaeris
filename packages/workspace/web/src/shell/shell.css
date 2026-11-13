@@ -39,7 +39,7 @@
 .shWsName, .shAccountMail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shAccountMail { flex: 1; }
 .shWsMenuPositioner { z-index: 65; }
-.shWsMenuPopover { width: min(calc(var(--workspace-sidebar-width) - 20px), calc(100vw - 20px)); padding: 4px; border: 1px solid var(--workspace-frame-edge); border-radius: 7px; background: var(--surface-color); box-shadow: 0 6px 18px rgba(0, 0, 0, .14); font-size: 14px; outline: none; }
+.shWsMenuPopover { width: min(calc(var(--workspace-sidebar-width) - 20px), calc(100vw - 20px)); padding: 4px; border:0; border-radius: 7px; background:var(--surface-raised); box-shadow: 0 6px 18px rgba(0, 0, 0, .14); font-size: 14px; outline: none; }
 .shWsMenuItem { display: flex; width: 100%; min-height: 30px; align-items: center; gap: 9px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--on-surface); font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
 .shWsMenuItem[data-highlighted], .shWsMenuItem[data-popup-open] { outline: 1px solid var(--outline); font-weight: 500; }
 .shWsMenuItem[data-disabled] { opacity: .55; cursor: default; }
@@ -159,12 +159,12 @@
 .shProjectAction svg { width: 13px; height: 13px; }
 .shProject .workspaceSessionList.isProject { padding-left: 22px; }
 
-.shProjectCreateDialog { position: relative; display: grid; width: min(360px, calc(100vw - 32px)); gap: 14px; border: 1px solid var(--outline-variant); border-radius: 14px; background: var(--surface-color); padding: 18px 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, .24); }
+.shProjectCreateDialog { position: relative; display: grid; width: min(360px, calc(100vw - 32px)); gap: 14px; border:0; border-radius: 14px; background:var(--surface-raised); padding: 18px 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, .24); }
 .shProjectCreateDialog > header { display: flex; min-height: 24px; align-items: center; justify-content: center; }
 .shProjectCreateDialog > header > .quietCloseButton { position: absolute; top: 10px; left: 10px; }
 .shProjectCreateDialog h2 { margin: 0; color: var(--on-surface); font-size: 18px; line-height: 1.2; }
 .shProjectCreateDialog > label { display: grid; gap: 6px; color: var(--on-surface); font-size: 12px; font-weight: 600; }
-.shProjectNameInput { min-width: 0; width: 100%; height: 40px; border: 1px solid var(--outline-variant); border-radius: 9px; outline: 0; background: var(--surface-color); color: var(--on-surface); padding: 0 11px; font-size: 13px; }
+.shProjectNameInput { min-width: 0; width: 100%; height: 40px; border:1px solid transparent; border-radius: 9px; outline: 0; background:var(--surface-input); color: var(--on-surface); padding: 0 11px; font-size: 13px; }
 .shProjectNameInput:focus-visible { outline: 0; }
 .shProjectNameInput:focus { border-color: var(--outline); box-shadow: none; }
 .shProjectCreateDialog > p { margin: -5px 0 0; color: var(--error); font-size: 11px; }
@@ -218,13 +218,13 @@
 .shSidebar .workspaceSessionButton:hover, .shSidebar .workspaceSessionButton.isActive { color: var(--on-surface); }
 
 .shPrivateCreateBackdrop { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(20, 20, 20, .56); }
-.shPrivateCreateDialog { display: flex; width: min(1000px, calc(100vw - 48px)); height: min(650px, calc(100vh - 48px)); flex-direction: column; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 13px; background: var(--surface-color); box-shadow: 0 28px 90px rgba(0, 0, 0, .3); }
+.shPrivateCreateDialog { display: flex; width: min(1000px, calc(100vw - 48px)); height: min(650px, calc(100vh - 48px)); flex-direction: column; overflow: hidden; border:0; border-radius: 13px; background:var(--surface-raised); box-shadow: 0 28px 90px rgba(0, 0, 0, .3); }
 .shPrivateCreateHeader { display: grid; height: 68px; flex: none; grid-template-columns: 1fr minmax(260px, 300px) 1fr; align-items: center; padding: 0 22px; }
 .shPrivateCreateHeader > div { display: flex; align-items: center; gap: 7px; color: var(--process-text); font-size: 12px; }
 .shPrivateCreateHeader > div > button { margin-right: 5px; }
 .shPrivateCreateHeader > div > strong { display: inline-flex; align-items: center; gap: 4px; color: var(--on-surface); font-weight: 550; }
 .shPrivateCreateHeader > div > strong svg { width: 12px; }
-.shPrivateCreateHeader > label { grid-column: 2; display: flex; height: 38px; align-items: center; gap: 8px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-color); padding: 0 12px; }
+.shPrivateCreateHeader > label { grid-column: 2; display: flex; height: 38px; align-items: center; gap: 8px; border:1px solid transparent; border-radius: 8px; background:var(--surface-input); padding: 0 12px; }
 .shPrivateCreateHeader > label:focus-within { border-color: var(--outline); box-shadow: none; }
 .shPrivateCreateHeader > label svg { width: 15px; color: var(--process-text); }
 .shPrivateCreateHeader > label input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--on-surface); font: inherit; }
@@ -289,9 +289,9 @@
 .workspaceCatalog { grid-area: 1 / 2 / -1 / -1; min-width: 0; min-height: 0; overflow: auto; border-radius: var(--workspace-frame-radius); background: var(--surface-color); }
 .workspaceCatalog > .libraryWorkspace,
 .workspaceCatalog .libraryWorkspace > .libraryMain { height: 100%; }
-.workspaceWorkbench > .workspaceSearchPanel { z-index: 2; grid-area: 1 / 2 / -1 / -1; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); }
+.workspaceWorkbench > .workspaceSearchPanel { z-index: 2; grid-area: 1 / 2 / -1 / -1; border: 0; border-radius: var(--workspace-frame-radius); }
 .shMain.isSearching { visibility: hidden; }
-.shShellPage > .workspaceSearchPanel { z-index: 2; grid-area: 1 / 2 / -1 / -1; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); }
+.shShellPage > .workspaceSearchPanel { z-index: 2; grid-area: 1 / 2 / -1 / -1; border: 0; border-radius: var(--workspace-frame-radius); }
 .shSearchInputRow { display: flex; min-height: var(--workspace-header-height); flex: none; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-frame-edge); padding: 0 14px; }
 .shSearchInputRow input { min-width: 0; align-self: stretch; flex: 1; border: 0; outline: 0; background: transparent; color: var(--on-surface); font: inherit; font-size: 14px; }
 .shSearchInputRow input::placeholder { color: var(--process-text); }
@@ -325,7 +325,7 @@
 .shShellPage > .shSidebar { grid-column: 1; width: var(--workspace-sidebar-width); min-width: 0; max-width: 100%; height: 100%; overflow: hidden; visibility: visible; transition: visibility 0s linear 0s; }
 .shShellPage.isSidebarClosed > .shSidebar { overflow: hidden; visibility: hidden; pointer-events: none; transition-delay: var(--shell-sidebar-duration); }
 @media (prefers-reduced-motion: reduce) { .shShellPage { --shell-sidebar-duration: 0ms; } }
-.shMain { position: relative; grid-column: 2; min-width: 0; min-height: 0; overflow-y: auto; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); background: var(--surface-color); }
+.shMain { position: relative; grid-column: 2; min-width: 0; min-height: 0; overflow-y: auto; border: 0; border-radius: var(--workspace-frame-radius); background: var(--surface-color); }
 .shSidebarOpen { position: sticky; z-index: 20; top: 2px; left: 4px; display: grid; width: 40px; height: 40px; place-items: center; margin-bottom: -40px; border: 0; border-radius: 0; background: transparent; color: var(--process-text); box-shadow: none; }
 .shSidebarOpen:hover { color: var(--on-surface); }
 .shSidebarOpen svg { width: 16px; }
@@ -344,7 +344,7 @@
 .shTabsLine button.isActive { border-bottom-color: var(--on-surface); color: var(--on-surface); font-weight: 600; }
 .shLibraryTools { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 12px; }
 .shLibraryTools .shTabsLine { min-width: 0; flex: 1; }
-.shLibrarySearch { display: flex; width: 210px; height: 31px; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--outline-variant); border-radius: 7px; }
+.shLibrarySearch { display: flex; width: 210px; height: 31px; align-items: center; gap: 7px; padding: 0 9px; border:1px solid transparent; border-radius: 7px;  background:var(--surface-input); }
 .shLibrarySearch svg { width: 14px; color: var(--process-text); }
 .shLibrarySearch input { min-width: 0; flex: 1; border: 0; outline: 0; font-size: 12px; }
 .shLibraryTable { display: grid; }
@@ -379,7 +379,7 @@
 .shAgentSection p { margin: 0; color: var(--on-surface); font-size: 14px; line-height: 1.8; }
 .shAgentSection textarea { width: 100%; min-height: 96px; resize: vertical; border: 1px solid var(--outline-variant); border-radius: 8px; outline: 0; padding: 11px; font: inherit; line-height: 1.7; }
 .shModalBackdrop { position: fixed; z-index: 90; inset: 0; display: grid; min-height: 0; place-items: center; padding: 28px; background: rgba(15, 15, 15, .56); }
-.shAgentCreate { position: relative; display: grid; width: min(720px, calc(100vw - 40px)); max-height: min(880px, calc(100vh - 40px)); gap: 18px; overflow-y: auto; overscroll-behavior: contain; padding: 42px 46px 28px; border-radius: 18px; background: var(--surface-color); box-shadow: 0 28px 80px rgba(0, 0, 0, .26); }
+.shAgentCreate { position: relative; display: grid; width: min(720px, calc(100vw - 40px)); max-height: min(880px, calc(100vh - 40px)); gap: 18px; overflow-y: auto; overscroll-behavior: contain; padding: 42px 46px 28px; border-radius: 18px; background:var(--surface-raised); box-shadow: 0 28px 80px rgba(0, 0, 0, .26); }
 .shAgentCreate h1 { margin: 0 0 4px; color: var(--on-surface); font-size: 27px; line-height: 1.2; text-align: center; text-wrap: balance; }
 .shModalClose { position: absolute; z-index: 1; top: 14px; left: 14px; }
 .shAgentCreate button:focus-visible, .shAgentCreate input:focus-visible, .shAgentCreate textarea:focus-visible { outline: 1px solid var(--outline); outline-offset: 2px; }
@@ -408,7 +408,7 @@
 .shAvatarChoices .shAgentMark { width: 42px; height: 42px; border-radius: 10px !important; }
 .shCreateLabel, .shInstructionsSection > small { color: var(--process-text); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
 .shCreateLabel { margin: 4px 0 -12px; }
-.shAgentDescriptionInput { width: 100%; height: 44px; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); color: var(--on-surface); padding: 0 13px; font: inherit; }
+.shAgentDescriptionInput { width: 100%; height: 44px; border:1px solid transparent; border-radius: 10px; background:var(--surface-input); color: var(--on-surface); padding: 0 13px; font: inherit; }
 .shAgentDescriptionInput::placeholder { color: var(--process-text); }
 .shInstructionsSection { display: grid; gap: 8px; }
 .shSoulCard { display: grid; width: 100%; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 0; border-radius: 12px; background: var(--surface-variant); color: var(--on-surface); padding: 12px; text-align: left; }
@@ -475,7 +475,7 @@
 .shQuietButton.isDanger:hover:not(:disabled) { background: var(--danger-button-hover); }
 
 .shWorkspaceChooser { display: grid; min-height: 100vh; place-items: center; padding: 16px; background: var(--surface-variant); }
-.shWorkspaceChooser > section { width: min(340px, 100%); padding: 18px; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .07); }
+.shWorkspaceChooser > section { width: min(340px, 100%); padding: 18px; border:0; border-radius: 10px; background:var(--surface-raised); box-shadow: 0 12px 32px rgba(0, 0, 0, .07); }
 .shWorkspaceChooser h1 { margin: 0; font-size: 18px; }
 .shWorkspaceChooser p { margin: 5px 0 13px; color: var(--process-text); font-size: 12px; }
 .shWorkspaceChooser nav { display: grid; gap: 2px; }
@@ -511,13 +511,13 @@
 .shWorkspaceMemberIdentity strong, .shWorkspaceMemberIdentity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shWorkspaceMemberIdentity strong { color: var(--on-surface); font-size: 13px; font-weight: 600; }
 .shWorkspaceMemberIdentity small { color: var(--process-text); font-size: 12px; line-height: 18px; }
-.shWorkspaceMemberRow > select { width: 100%; height: var(--control-height-compact); border: 1px solid var(--outline-variant); border-radius: var(--control-radius); background: var(--surface-color); color: var(--on-surface); padding: 0 8px; font-size: 13px; }
+.shWorkspaceMemberRow > select { width: 100%; height: var(--control-height-compact); border:1px solid transparent; border-radius: var(--control-radius); background:var(--surface-input); color: var(--on-surface); padding: 0 8px; font-size: 13px; }
 .shWorkspaceRoleLabel { color: var(--process-text); font-size: 12px; }
 .shWorkspaceRowMenu { position: relative; }
 .shWorkspaceRowMenu > summary { display: grid; width: var(--control-height-compact); height: var(--control-height-compact); place-items: center; list-style: none; border-radius: var(--control-radius); color: var(--process-text); cursor: pointer; }
 .shWorkspaceRowMenu > summary::-webkit-details-marker { display: none; }
 .shWorkspaceRowMenu > summary svg { width: 15px; }
-.shWorkspaceRowMenu > div { position: absolute; z-index: 10; top: calc(var(--control-height-compact) + 2px); right: 0; width: 150px; padding: 5px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-color); box-shadow: 0 10px 28px rgba(0, 0, 0, .14); }
+.shWorkspaceRowMenu > div { position: absolute; z-index: 10; top: calc(var(--control-height-compact) + 2px); right: 0; width: 150px; padding: 5px; border:0; border-radius: 8px; background:var(--surface-raised); box-shadow: 0 10px 28px rgba(0, 0, 0, .14); }
 .shWorkspaceRowMenu button { display: block; width: 100%; min-height: var(--control-height-compact); border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 8px; font-size: 13px; text-align: left; }
 .shWorkspaceRowMenu button.isDanger { color: var(--danger); }
 .shWorkspaceInvitationRow { display: grid; min-height: 62px; grid-template-columns: minmax(0, 1fr) 86px 132px auto; align-items: center; gap: 12px; padding: 8px 0; color: var(--process-text); font-size: 12px; }
@@ -539,7 +539,7 @@
 .shWorkspaceDialog > header > button svg { width: 15px; }
 .shWorkspaceDialog form { display: grid; gap: 13px; }
 .shWorkspaceDialog form label { display: grid; gap: 6px; color: var(--on-surface); font-size: 13px; line-height: 20px; }
-.shWorkspaceDialog form input, .shWorkspaceDialog form select { width: 100%; height: var(--control-height); border: 1px solid var(--outline-variant); border-radius: var(--control-radius); background: var(--surface-color); color: var(--on-surface); padding: 0 10px; font-size: 13px; }
+.shWorkspaceDialog form input, .shWorkspaceDialog form select { width: 100%; height: var(--control-height); border:1px solid transparent; border-radius: var(--control-radius); background:var(--surface-input); color: var(--on-surface); padding: 0 10px; font-size: 13px; }
 .shWorkspaceDialog form footer, .shWorkspaceInviteResult footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .shWorkspaceDialog button.isPrimary { background: var(--solid-surface); color: var(--solid-text); }
 .shWorkspaceInviteResult { display: grid; gap: 11px; }
@@ -549,8 +549,8 @@
 @media (pointer: coarse) {
   .shWorkspaceDialog form input, .shWorkspaceDialog form select, .shWorkspaceMemberRow > select { font-size: 16px; }
 }
-.shWorkspaceGroupLayout { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-height: 440px; border-top: 1px solid var(--outline-variant); }
-.shWorkspaceGroupLayout > aside { padding: 16px 15px 0 0; border-right: 1px solid var(--outline-variant); }
+.shWorkspaceGroupLayout { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-height: 440px;  }
+.shWorkspaceGroupLayout > aside { padding: 16px 15px 0 0;  }
 .shWorkspaceGroupLayout > aside > header { display: flex; align-items: center; justify-content: space-between; padding: 0 5px 10px; font-size: 12px; }
 .shWorkspaceGroupLayout > aside > header button { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 6px; background: transparent; }
 .shWorkspaceGroupLayout > aside > header svg { width: 14px; }
@@ -583,7 +583,7 @@
 .shWorkspaceHome .shHome { min-height: 180px; }
 .shWorkspaceHome > section > p { margin: 0 0 12px; color: var(--process-text); text-align: center; }
 .shWorkspaceAgentGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
-.shWorkspaceAgentGrid > a { display: flex; min-width: 0; align-items: center; gap: 12px; padding: 13px; border: 1px solid var(--outline-variant); border-radius: 12px; color: var(--on-surface); text-decoration: none; }
+.shWorkspaceAgentGrid > a { display: flex; min-width: 0; align-items: center; gap: 12px; padding: 13px; border:0; border-radius: 12px; color: var(--on-surface); text-decoration: none;  background:var(--surface-variant); }
 .shWorkspaceAgentMark { width: 42px; height: 42px; flex: none; }
 .shWorkspaceAgentGrid span:last-child { display: grid; min-width: 0; }
 .shWorkspaceAgentGrid small { overflow: hidden; color: var(--process-text); text-overflow: ellipsis; white-space: nowrap; }
@@ -591,7 +591,7 @@
 .shWorkspaceAgentEmpty > svg { width: 32px; height: 32px; }
 .shWorkspaceAgentEmpty > div { display: flex; gap: 8px; }
 .shTrashPage { min-width: 0; color: var(--on-surface); font-size: 14px; }
-.shTrashTools { display: grid; flex: none; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--outline-variant); }
+.shTrashTools { display: grid; flex: none; gap: 12px; padding-bottom: 12px;  }
 .shTrashSearch { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 9px; border: 1px solid transparent; border-radius: 7px; background: var(--surface-variant); }
 .shTrashSearch > svg { width: 14px; height: 14px; flex: none; color: var(--process-text); }
 .shTrashSearch > input { min-width: 0; width: 100%; height: 32px; border: 0; outline: 0; background: transparent; color: var(--on-surface); padding: 0; font: inherit; }
@@ -685,10 +685,10 @@
   .shPageHead { padding-top: 28px; }
   .shLibraryTools { align-items: stretch; flex-direction: column; }
   .shTabsLine { overflow-x: auto; }
-  .shLibrarySearch { width: 100%; }
+  .shLibrarySearch { width: 100%;  background:var(--surface-input); }
   .shLibraryRow { grid-template-columns: minmax(0, 1fr) 76px; }
   .shLibraryRow > :nth-child(n+3) { display: none; }
-  .shAgentCreate { width: calc(100vw - 20px); max-height: calc(100vh - 20px); padding: 48px 22px 22px; }
+  .shAgentCreate { width: calc(100vw - 20px); max-height: calc(100vh - 20px); padding: 48px 22px 22px;  background:var(--surface-raised); }
   .shAgentHeroMark { width: 92px; height: 92px; border-radius: 20px !important; }
   .shSoulCardAction { width: 28px; overflow: hidden; white-space: nowrap; }
   .workspaceWorkbench.isSearching > :is(.workspaceTopbar, .workspaceChatColumn, .workspaceContextPanel, .workspaceCatalog) { display: none; }
@@ -698,9 +698,9 @@
   .shShellPage > .workspaceSearchPanel { height: calc(100dvh - 91px); border: 0; border-radius: 0; }
   .shShellPage.isSidebarClosed > .workspaceSearchPanel { height: 100dvh; }
   .shPrivateCreateBackdrop { padding: 10px; }
-  .shPrivateCreateDialog { width: calc(100vw - 20px); height: calc(100vh - 20px); }
+  .shPrivateCreateDialog { width: calc(100vw - 20px); height: calc(100vh - 20px);  background:var(--surface-raised); }
   .shPrivateCreateHeader { grid-template-columns: minmax(0, 1fr); height: auto; gap: 10px; padding: 12px; }
-  .shPrivateCreateHeader > label { grid-column: 1; width: 100%; }
+  .shPrivateCreateHeader > label { grid-column: 1; width: 100%;  background:var(--surface-input); }
   .shPrivateCreateContent { width: calc(100% - 24px); }
   .shPrivateCreateQuick, .shPrivateTemplateGrid { grid-template-columns: 1fr; }
   .shDeletedPage { width: calc(100% - 32px); padding-top: 44px; }
@@ -716,7 +716,7 @@
   .shWorkspaceInvitationRow > :nth-child(2), .shWorkspaceInvitationRow > :nth-child(3) { grid-column: 1; }
   .shWorkspaceInvitationActions { grid-column: 2; grid-row: 1 / span 3; flex-direction: column; }
   .shWorkspaceGroupLayout { grid-template-columns: 1fr; }
-  .shWorkspaceGroupLayout > aside { padding-right: 0; padding-bottom: 14px; border-right: 0; border-bottom: 1px solid var(--outline-variant); }
+  .shWorkspaceGroupLayout > aside { padding-right: 0; padding-bottom: 14px; border-right: 0;  }
   .shWorkspaceGroupDetail { padding-left: 0; }
   .shAgentBanner { justify-content: flex-start; overflow-x: auto; }
   .shPluginPage, .shSoulDocumentPage { left: 0; }
