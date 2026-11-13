@@ -1,6 +1,7 @@
 //! Recover a stopped original's writable-root workspace without starting a guest.
 use super::*;
 use crate::postgres_store::execution_instances::RetainedInstanceAllocation;
+use hosted_execution::protocol::SandboxWorkspaceSnapshotSymlink;
 use std::collections::BTreeSet;
 
 const INPUT_INVENTORY_PATH: &str = "/run/centaeris/inputs.json";
@@ -271,10 +272,10 @@ fn preflight_tar(raw: &mut fs::File, input_limit: u64) -> Result<(), String> {
             if end > length.saturating_sub(1024) {
                 return Err("stopped_workspace_archive_truncated".into());
             }
-            if kind.is_dir() && size != 0 {
+            if (kind.is_dir() || kind.is_symlink()) && size != 0 {
                 return Err("stopped_workspace_directory_invalid".into());
             }
-            if kind.is_pax_local_extensions() || kind.is_gnu_longname() {
+            if kind.is_pax_local_extensions() || kind.is_gnu_longname() || kind.is_gnu_longlink() {
                 metadata_bytes = metadata_bytes
                     .checked_add(size)
                     .ok_or("stopped_workspace_metadata_budget_exceeded")?;
@@ -294,14 +295,13 @@ fn preflight_tar(raw: &mut fs::File, input_limit: u64) -> Result<(), String> {
                             .map_err(|_| "stopped_workspace_metadata_invalid")?;
                         if !keys.insert(key.to_string())
                             || key == "size"
-                            || key == "linkpath"
                             || key.starts_with("GNU.sparse.")
                         {
                             return Err("stopped_workspace_metadata_unsupported".into());
                         }
                     }
                 }
-            } else if !kind.is_file() && !kind.is_dir() {
+            } else if !kind.is_file() && !kind.is_dir() && !kind.is_symlink() {
                 return Err("stopped_workspace_node_unsupported".into());
             }
         }
@@ -369,6 +369,8 @@ fn snapshot_from_tar(
         .ok_or("stopped_workspace_root_unsupported")?;
     let mut nodes = BTreeMap::new();
     let mut files = BTreeMap::new();
+    let mut directories = Vec::new();
+    let mut symlinks = Vec::new();
     let mut root_seen = false;
     let mut expanded = 0_u64;
     let mut manifest_budget = 0_usize;
@@ -379,8 +381,9 @@ fn snapshot_from_tar(
             .map_err(|_| "stopped_workspace_archive_invalid")?
         {
             let mut entry = item.map_err(|_| "stopped_workspace_archive_invalid")?;
-            let directory = entry.header().entry_type().is_dir();
-            if !directory && !entry.header().entry_type().is_file() {
+            let kind = entry.header().entry_type();
+            let directory = kind.is_dir();
+            if !directory && !kind.is_file() && !kind.is_symlink() {
                 return Err("stopped_workspace_node_unsupported".into());
             }
             let bytes = entry.path_bytes();
@@ -396,7 +399,36 @@ fn snapshot_from_tar(
             if nodes.insert(path.clone(), directory).is_some() {
                 return Err("stopped_workspace_duplicate_path".into());
             }
+            let symlink = if kind.is_symlink() {
+                let target = entry
+                    .link_name_bytes()
+                    .ok_or("stopped_workspace_symlink_invalid")?;
+                let target = std::str::from_utf8(&target)
+                    .map_err(|_| "stopped_workspace_symlink_invalid")?;
+                if target.is_empty() || target.len() > 4096 || target.contains('\0') {
+                    return Err("stopped_workspace_symlink_invalid".into());
+                }
+                Some(SandboxWorkspaceSnapshotSymlink {
+                    path: path.clone(),
+                    target: target.into(),
+                })
+            } else {
+                None
+            };
+            if protected_paths.contains(&path) {
+                if !kind.is_file() {
+                    return Err("stopped_workspace_protected_input_node_rejected".into());
+                }
+                continue;
+            }
             if directory {
+                charge_manifest_node(&mut manifest_budget, &path)?;
+                directories.push(path);
+                continue;
+            }
+            if let Some(symlink) = symlink {
+                charge_manifest_node(&mut manifest_budget, &symlink)?;
+                symlinks.push(symlink);
                 continue;
             }
             let executable = entry
@@ -405,9 +437,6 @@ fn snapshot_from_tar(
                 .map_err(|_| "stopped_workspace_mode_invalid")?
                 & 0o111
                 != 0;
-            if protected_paths.contains(&path) {
-                continue;
-            }
             expanded = expanded
                 .checked_add(entry.size())
                 .ok_or("stopped_workspace_logical_budget_exceeded")?;
@@ -437,17 +466,7 @@ fn snapshot_from_tar(
                 sha256: format!("sha256:{:x}", digest.finalize()),
                 executable,
             };
-            manifest_budget = manifest_budget
-                .checked_add(
-                    serde_json::to_vec(&file)
-                        .map_err(|_| "stopped_workspace_manifest_invalid")?
-                        .len()
-                        + 1,
-                )
-                .ok_or("stopped_workspace_manifest_budget_exceeded")?;
-            if manifest_budget > SESSION_WORKSPACE_MANIFEST_LIMIT {
-                return Err("stopped_workspace_manifest_budget_exceeded".into());
-            }
+            charge_manifest_node(&mut manifest_budget, &file)?;
             files.insert(path, (file, offset));
         }
     }
@@ -461,12 +480,16 @@ fn snapshot_from_tar(
             }
         }
     }
+    directories.sort();
+    symlinks.sort_by(|left, right| left.path.cmp(&right.path));
     let manifest = SandboxWorkspaceSnapshotManifest {
         schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
         files: files.values().map(|(file, _)| file.clone()).collect(),
+        directories,
+        symlinks,
     };
     let mut frame = tempfile::tempfile().map_err(|_| "stopped_workspace_spool_unavailable")?;
-    if !manifest.files.is_empty() {
+    if !manifest.is_empty() {
         validate_workspace_snapshot_manifest(&manifest)?;
         let bytes =
             serde_json::to_vec(&manifest).map_err(|_| "stopped_workspace_manifest_invalid")?;
@@ -503,6 +526,21 @@ fn snapshot_from_tar(
         output_consumers: Vec::new(),
         observation: WorkspaceProtection::new(),
     })
+}
+
+fn charge_manifest_node(budget: &mut usize, node: &impl serde::Serialize) -> Result<(), String> {
+    *budget = budget
+        .checked_add(
+            serde_json::to_vec(node)
+                .map_err(|_| "stopped_workspace_manifest_invalid")?
+                .len()
+                + 1,
+        )
+        .ok_or("stopped_workspace_manifest_budget_exceeded")?;
+    if *budget > SESSION_WORKSPACE_MANIFEST_LIMIT {
+        return Err("stopped_workspace_manifest_budget_exceeded".into());
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -780,6 +818,69 @@ mod tests {
         assert_eq!(
             inspect_workspace_snapshot(&mut artifact.file).unwrap(),
             artifact.descriptor
+        );
+    }
+    #[test]
+    fn stopped_capture_preserves_literal_links_and_empty_directories_without_target_bytes() {
+        let (allocation, profile, facts) = fixture();
+        let mut builder = tar::Builder::new(Vec::new());
+        for path in ["app/", "app/empty/", "app/_t/"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Directory);
+            builder
+                .append_data(&mut header, path, std::io::empty())
+                .unwrap();
+        }
+        let targets = [
+            ("app/_t/cycle", "cycle".to_string()),
+            ("app/_t/escape.docx", "/etc/hostname".to_string()),
+            ("app/_t/leak.txt", "/etc/passwd".to_string()),
+            ("app/_t/missing", "../../missing".to_string()),
+            ("app/_t/長い", format!("../{}", "先".repeat(100))),
+        ];
+        for (path, target) in &targets {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_entry_type(tar::EntryType::Symlink);
+            builder.append_link(&mut header, path, target).unwrap();
+        }
+        let bytes = builder.into_inner().unwrap();
+        let artifact =
+            capture_with(&mut io(&facts, &bytes), &allocation, &profile, 100_000).unwrap();
+        let manifest = artifact.manifest.unwrap();
+        assert!(manifest.files.is_empty());
+        assert_eq!(manifest.directories, ["_t", "empty"]);
+        assert_eq!(artifact.descriptor.expanded_size_bytes, 0);
+        assert_eq!(artifact.descriptor.file_count, 7);
+        assert_eq!(
+            manifest
+                .symlinks
+                .iter()
+                .map(|node| (node.path.as_str(), node.target.as_str()))
+                .collect::<Vec<_>>(),
+            targets
+                .iter()
+                .map(|(path, target)| (path.strip_prefix("app/").unwrap(), target.as_str()))
+                .collect::<Vec<_>>()
+        );
+
+        let mut conflicting = tar::Builder::new(bytes[..bytes.len() - 1024].to_vec());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        conflicting
+            .append_data(&mut header, "app/_t/leak.txt/child", b"x".as_slice())
+            .unwrap();
+        let bytes = conflicting.into_inner().unwrap();
+        assert_eq!(
+            capture_with(&mut io(&facts, &bytes), &allocation, &profile, 100_000)
+                .err()
+                .as_deref(),
+            Some("stopped_workspace_path_conflict")
         );
     }
     #[test]

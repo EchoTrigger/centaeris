@@ -15,7 +15,8 @@ pub const SANDBOX_INPUT_INVENTORY_SCHEMA: &str = "sandbox.input_inventory.v1";
 pub const SANDBOX_ARTIFACT_STREAM_SCHEMA: &str = "sandbox.artifact.stream.v1";
 pub const SANDBOX_ARTIFACT_STREAM_HEADER_LIMIT: usize = 1024 * 1024;
 pub const SANDBOX_ARTIFACT_STREAM_DIGEST_BYTES: usize = 32;
-pub const SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA: &str = "workspace.snapshot.v1";
+pub const SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1: &str = "workspace.snapshot.v1";
+pub const SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA: &str = "workspace.snapshot.v2";
 pub const SANDBOX_SNAPSHOT_CAPTURE_SCHEMA: &str = "workspace.snapshot.capture.v1";
 pub const SANDBOX_WORKSPACE_GENERATION_SCHEMA: &str = "workspace.generation.v1";
 pub const SANDBOX_WORKSPACE_GENERATION_QUERY_LINE: &[u8] =
@@ -144,11 +145,94 @@ pub struct SandboxArtifactMetadata {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxWorkspaceSnapshotManifest {
     pub schema: String,
     pub files: Vec<SandboxWorkspaceSnapshotFile>,
+    pub directories: Vec<String>,
+    pub symlinks: Vec<SandboxWorkspaceSnapshotSymlink>,
+}
+
+impl SandboxWorkspaceSnapshotManifest {
+    pub fn node_count(&self) -> usize {
+        self.files.len() + self.directories.len() + self.symlinks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.node_count() == 0
+    }
+}
+
+impl Serialize for SandboxWorkspaceSnapshotManifest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeStruct};
+
+        let legacy = match self.schema.as_str() {
+            SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1
+                if self.directories.is_empty() && self.symlinks.is_empty() =>
+            {
+                true
+            }
+            SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA => false,
+            _ => return Err(S::Error::custom("unsupported workspace snapshot schema")),
+        };
+        // Released v1 manifests retain their canonical bytes and stored identities.
+        let mut state = serializer.serialize_struct(
+            "SandboxWorkspaceSnapshotManifest",
+            if legacy { 2 } else { 4 },
+        )?;
+        state.serialize_field("schema", &self.schema)?;
+        state.serialize_field("files", &self.files)?;
+        if !legacy {
+            state.serialize_field("directories", &self.directories)?;
+            state.serialize_field("symlinks", &self.symlinks)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SandboxWorkspaceSnapshotManifest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "schema", deny_unknown_fields)]
+        enum Version {
+            #[serde(rename = "workspace.snapshot.v1")]
+            V1 {
+                files: Vec<SandboxWorkspaceSnapshotFile>,
+            },
+            #[serde(rename = "workspace.snapshot.v2")]
+            V2 {
+                files: Vec<SandboxWorkspaceSnapshotFile>,
+                directories: Vec<String>,
+                symlinks: Vec<SandboxWorkspaceSnapshotSymlink>,
+            },
+        }
+        Ok(match Version::deserialize(deserializer)? {
+            Version::V1 { files } => Self {
+                schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1.into(),
+                files,
+                directories: Vec::new(),
+                symlinks: Vec::new(),
+            },
+            Version::V2 {
+                files,
+                directories,
+                symlinks,
+            } => Self {
+                schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+                files,
+                directories,
+                symlinks,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxWorkspaceSnapshotSymlink {
+    pub path: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -190,4 +274,42 @@ pub struct SandboxSnapshotCaptureResponse {
 pub enum SnapshotCaptureDisposition {
     Snapshot,
     Unchanged,
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_snapshot_upgrade_retains_original_canonical_bytes() {
+        let original = br#"{"schema":"workspace.snapshot.v1","files":[{"path":"result.txt","sizeBytes":0,"sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","executable":false}]}"#;
+        let decoded: SandboxWorkspaceSnapshotManifest = serde_json::from_slice(original).unwrap();
+        assert!(decoded.directories.is_empty());
+        assert!(decoded.symlinks.is_empty());
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), original);
+        let upgraded = SandboxWorkspaceSnapshotManifest {
+            schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            ..decoded
+        };
+        let value = serde_json::to_value(upgraded).unwrap();
+        assert_eq!(value["schema"], SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA);
+        assert_eq!(value["directories"], serde_json::json!([]));
+        assert_eq!(value["symlinks"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn snapshot_versions_reject_unknown_or_missing_fields() {
+        for json in [
+            r#"{"schema":"workspace.snapshot.v1","files":[],"directories":[]}"#,
+            r#"{"schema":"workspace.snapshot.v2","files":[],"directories":[]}"#,
+            r#"{"schema":"workspace.snapshot.v2","files":[],"directories":[],"symlinks":[],"unknown":0}"#,
+            r#"{"schema":"workspace.snapshot.v3","files":[],"directories":[],"symlinks":[]}"#,
+            r#"{"schema":"workspace.snapshot.v2","files":[],"directories":[],"symlinks":[{"path":"link","target":"/etc/passwd","unknown":0}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<SandboxWorkspaceSnapshotManifest>(json).is_err(),
+                "accepted {json}"
+            );
+        }
+    }
 }

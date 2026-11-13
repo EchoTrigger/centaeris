@@ -112,9 +112,6 @@ EXECUTION_WORKSPACE_DOWNLOAD_FIELDS = SESSION_WORKSPACE_LEASE_FIELDS | {
 MAX_SESSION_WORKSPACE_METADATA_BYTES = 64 * 1024
 MAX_SESSION_WORKSPACE_FILE_COUNT = 2_147_483_647
 MAX_SESSION_WORKSPACE_MANIFEST_BYTES = 1024 * 1024
-MAX_SESSION_WORKSPACE_PATH_BYTES = 4 * 1024
-MAX_SESSION_WORKSPACE_PATH_DEPTH = 64
-SESSION_WORKSPACE_SNAPSHOT_SCHEMA = "workspace.snapshot.v1"
 SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES = 64 * 1024
 
 
@@ -552,59 +549,11 @@ def _verify_workspace_snapshot(candidate: dict, storage_key: str) -> None:
 
 
 def _workspace_snapshot_manifest(manifest_bytes: bytes, candidate: dict) -> list[dict]:
+    from app_core.workspace_snapshot import SnapshotValidationError, manifest_files
     try:
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-        canonical = json.dumps(
-            manifest, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        return manifest_files(manifest_bytes, candidate)
+    except SnapshotValidationError:
         raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400) from None
-    if canonical != manifest_bytes or not isinstance(manifest, dict) or set(manifest) != {
-        "schema",
-        "files",
-    }:
-        raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-    files = manifest["files"]
-    if manifest["schema"] != SESSION_WORKSPACE_SNAPSHOT_SCHEMA or not isinstance(files, list):
-        raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-    if len(files) != candidate["fileCount"] or not files:
-        raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-    previous = None
-    expanded_size_bytes = 0
-    for file in files:
-        if not isinstance(file, dict) or set(file) != {
-            "path",
-            "sizeBytes",
-            "sha256",
-            "executable",
-        }:
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-        try:
-            validate_virtual_path(file["path"])
-            require_sha256("workspace snapshot file sha256", file["sha256"])
-        except ValueError:
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400) from None
-        if (
-            len(file["path"].encode("utf-8")) > MAX_SESSION_WORKSPACE_PATH_BYTES
-            or len(file["path"].split("/")) > MAX_SESSION_WORKSPACE_PATH_DEPTH
-            or not isinstance(file["sizeBytes"], int)
-            or isinstance(file["sizeBytes"], bool)
-            or file["sizeBytes"] < 0
-            or not isinstance(file["executable"], bool)
-            or previous is not None
-            and (
-                previous >= file["path"]
-                or file["path"].startswith(f"{previous}/")
-            )
-        ):
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-        expanded_size_bytes += file["sizeBytes"]
-        if expanded_size_bytes > candidate["expandedSizeBytes"]:
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-        previous = file["path"]
-    if expanded_size_bytes != candidate["expandedSizeBytes"]:
-        raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-    return files
 
 
 def _require_workspace_eof(request) -> None:

@@ -371,6 +371,8 @@ mod tests {
         }
         let manifest = SandboxWorkspaceSnapshotManifest {
             schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            directories: Vec::new(),
+            symlinks: Vec::new(),
             files: vec![SandboxWorkspaceSnapshotFile {
                 path: "recovered.bin".into(),
                 size_bytes: payload.len() as u64,

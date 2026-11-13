@@ -77,7 +77,7 @@ use hosted_execution::protocol::{
     SandboxFileSystemRequest, SandboxInputInventory, SandboxInputRevokeRequest,
     SandboxMaterializedInput, SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile,
     SandboxWorkspaceSnapshotManifest, SANDBOX_INPUT_INVENTORY_SCHEMA,
-    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -4002,7 +4002,7 @@ fn inspect_workspace_snapshot_with_manifest(
             sha256: format!("sha256:{:x}", digest.finalize()),
             size_bytes,
             expanded_size_bytes,
-            file_count: u32::try_from(manifest.files.len())
+            file_count: u32::try_from(manifest.node_count())
                 .map_err(|_| "snapshot file count overflow".to_string())?,
         },
         Some(manifest),
@@ -4051,42 +4051,78 @@ fn read_snapshot_exact(
 pub(crate) fn validate_workspace_snapshot_manifest(
     manifest: &SandboxWorkspaceSnapshotManifest,
 ) -> Result<u64, String> {
-    if manifest.schema != SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA || manifest.files.is_empty() {
+    if !matches!(
+        manifest.schema.as_str(),
+        SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA | SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1
+    ) || manifest.is_empty()
+        || (manifest.schema == SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1
+            && (!manifest.directories.is_empty() || !manifest.symlinks.is_empty()))
+    {
         return Err("snapshot manifest is invalid".to_string());
     }
+    let mut paths = std::collections::BTreeMap::new();
     let mut previous = None;
     let mut expanded_size_bytes = 0_u64;
-    for SandboxWorkspaceSnapshotFile {
-        path,
-        size_bytes,
-        sha256,
-        ..
-    } in &manifest.files
-    {
-        if path.is_empty()
-            || path.trim() != path
-            || path.len() > 4 * 1024
-            || path.split('/').count() > 64
-            || path.contains('\\')
-            || path.starts_with('/')
-            || path.chars().any(char::is_control)
-            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
-            || path.nfc().collect::<String>() != *path
-            || !is_workspace_sha256(sha256)
-            || previous.is_some_and(|value: &str| value >= path.as_str())
-            || previous.is_some_and(|value: &str| {
-                path.strip_prefix(value)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-            })
+    for file in &manifest.files {
+        validate_workspace_snapshot_path(&file.path)?;
+        if !is_workspace_sha256(&file.sha256)
+            || previous.is_some_and(|value: &str| value >= file.path.as_str())
         {
             return Err("snapshot manifest paths or hashes are invalid".to_string());
         }
         expanded_size_bytes = expanded_size_bytes
-            .checked_add(*size_bytes)
+            .checked_add(file.size_bytes)
             .ok_or_else(|| "snapshot expanded size overflow".to_string())?;
-        previous = Some(path.as_str());
+        paths.insert(file.path.as_str(), false);
+        previous = Some(file.path.as_str());
+    }
+    let mut previous = None;
+    for directory in &manifest.directories {
+        validate_workspace_snapshot_path(directory)?;
+        if previous.is_some_and(|value: &str| value >= directory.as_str())
+            || paths.insert(directory.as_str(), true).is_some()
+        {
+            return Err("snapshot manifest paths are not sorted and unique".into());
+        }
+        previous = Some(directory.as_str());
+    }
+    let mut previous = None;
+    for link in &manifest.symlinks {
+        validate_workspace_snapshot_path(&link.path)?;
+        if link.target.is_empty()
+            || link.target.len() > 4096
+            || link.target.contains('\0')
+            || previous.is_some_and(|value: &str| value >= link.path.as_str())
+            || paths.insert(link.path.as_str(), false).is_some()
+        {
+            return Err("snapshot manifest link metadata is invalid".into());
+        }
+        previous = Some(link.path.as_str());
+    }
+    for path in paths.keys() {
+        for (index, _) in path.match_indices('/') {
+            if paths.get(&path[..index]) == Some(&false) {
+                return Err("snapshot manifest parent is not a directory".into());
+            }
+        }
     }
     Ok(expanded_size_bytes)
+}
+
+fn validate_workspace_snapshot_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.trim() != path
+        || path.len() > 4 * 1024
+        || path.split('/').count() > 64
+        || path.contains('\\')
+        || path.starts_with('/')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+        || path.nfc().collect::<String>() != path
+    {
+        return Err("snapshot manifest path is invalid".into());
+    }
+    Ok(())
 }
 
 fn is_workspace_sha256(value: &str) -> bool {
@@ -5430,6 +5466,8 @@ mod tests {
                 sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
                 executable: false,
             }],
+            directories: Vec::new(),
+            symlinks: Vec::new(),
         };
         let manifest = serde_json::to_vec(&manifest).unwrap();
         let mut frame = (manifest.len() as u32).to_be_bytes().to_vec();
@@ -5679,6 +5717,8 @@ mod tests {
                 sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
                 executable: false,
             }],
+            directories: Vec::new(),
+            symlinks: Vec::new(),
         };
         let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest");
         let mut frame = Vec::new();
@@ -5712,6 +5752,8 @@ mod tests {
                 sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
                 executable: false,
             }],
+            directories: Vec::new(),
+            symlinks: Vec::new(),
         };
         let frame = encode_frame(&manifest, bytes).unwrap();
         let snapshot = RecoveryWorkspaceSnapshotV1 {

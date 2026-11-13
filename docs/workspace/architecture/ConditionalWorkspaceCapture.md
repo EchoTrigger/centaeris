@@ -3,8 +3,9 @@
 Hosted recovery preparation and final workspace collection use
 `execution_agent snapshot-capture`. A repeated capture can return a small
 unchanged receipt instead of sending file content through Docker and writing
-another Runtime spool. Persisted snapshots remain exact `workspace.snapshot.v1`
-frames; restore, API publication, object references and authorization retain
+another Runtime spool. New manifests use `workspace.snapshot.v2` inside the
+existing frame or file-manifest transport. Released v1 manifests retain their
+canonical bytes and remain readable. Object references and authorization retain
 their existing contracts.
 
 ## When this saves I/O
@@ -17,7 +18,7 @@ by a revert can require capture while still matching the cached content.
 
 The runner retains one manifest, bounded by the existing 1 MiB manifest limit.
 It binds the manifest to all four descriptor fields: frame SHA-256, frame byte
-size, expanded byte size and file count. A missing or mismatched baseline causes
+size, expanded byte size and node count (`fileCount`). A missing or mismatched baseline causes
 a full capture. Creating a runner, replacing an execution or beginning streamed restore
 leaves the cache empty. Restore does not seed it; the first subsequent capture
 still transfers and spools a full frame. Capture failure discards the cache.
@@ -53,13 +54,15 @@ The root helper receives bounded JSON on stdin and requires EOF:
   "baseline": {
     "snapshotSha256": "sha256:<64 lowercase hex digits>",
     "manifest": {
-      "schema": "workspace.snapshot.v1",
+      "schema": "workspace.snapshot.v2",
       "files": [{
         "path": "note.txt",
         "sizeBytes": 3,
         "sha256": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         "executable": false
-      }]
+      }],
+      "directories": [],
+      "symlinks": []
     }
   }
 }
@@ -86,8 +89,11 @@ Stdout begins with a four-byte big-endian JSON length and a response of at most
 
 An unchanged receipt must match this invocation's capture ID, baseline frame
 digest and canonical manifest digest, and must be followed by EOF. A `snapshot`
-response has `baselineSnapshotSha256: null` and is followed by an ordinary v1
-frame, or EOF for an empty workspace. Runtime independently validates every
+response has `baselineSnapshotSha256: null` and is followed by an ordinary
+manifest-and-content frame, or EOF for an empty workspace. Directory and symlink
+metadata is part of the canonical manifest; only regular files have content
+bodies. Targets are preserved literally, including external, broken and cyclic
+links, without reading them. Runtime independently validates every
 file hash, the canonical manifest, trailing EOF and the response's manifest
 digest. Only successful helper exit makes either result usable. A malformed
 frame or nonzero exit cannot seed the cache, even if the helper emitted a

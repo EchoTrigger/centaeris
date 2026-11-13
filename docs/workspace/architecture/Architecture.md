@@ -552,9 +552,14 @@ Physical removal must independently revalidate current cleanup authority and
 the exact stopped target against the durable proof.
 
 New nonempty Session commits, execution checkpoints and stopped-instance
-preservation publish `fileManifestV1`: canonical `workspace.snapshot.v1` manifest
+preservation publish `fileManifestV1`: canonical `workspace.snapshot.v2` manifest
 JSON whose file bodies are immutable, Session-scoped SHA-256 content objects.
-A snapshot stores the complete file listing; unchanged bodies are shared across
+The manifest also records directories, including empty ones, and literal symlink
+targets. Capture never follows symlinks; restore rejects a file or symlink as a
+parent and cannot replace protected inputs. `fileCount` counts all manifest nodes,
+while expanded byte size counts only regular file bodies. Released v1 manifests
+remain readable with their original canonical bytes and identities.
+A snapshot stores the complete node listing; unchanged bodies are shared across
 snapshots, and removed paths are absent from the next manifest. Restoration
 requires one manifest and its content objects rather than a chain of deltas.
 Empty workspaces retain the explicit `frameV1` no-object representation.
