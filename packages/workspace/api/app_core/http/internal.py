@@ -45,6 +45,8 @@ from app_core.runtime_contract import (
     _verify_authorization_digest_signature,
 )
 from app_core.runtime_client import (
+    AGENT_RUN_LIFECYCLE_JOB_KIND,
+    _validate_agent_run_binding,
     build_agent_run_start,
     build_agent_run_cleanup,
     get_agent_run_cleanup_receipt,
@@ -1708,18 +1710,36 @@ def reconcile_agent_run_lifecycle(request):
                     )
                 terminalized += 1
                 continue
-            if agent_run.session.purpose == "agentRunApi":
-                schedule_agent_run_lifecycle(agent_run, require_current_authority=False)
-                _cancel_agent_run_api_run_if_required(agent_run)
+            agent_run_api = agent_run.session.purpose == "agentRunApi"
+            if job is None:
+                if agent_run_api:
+                    schedule_agent_run_lifecycle(agent_run, require_current_authority=False)
+                else:
+                    schedule_agent_run_lifecycle(agent_run)
             else:
-                schedule_agent_run_lifecycle(agent_run)
-            if agent_run.status == "queued" and agent_run.session.purpose != "agentRunApi":
+                # Existing jobs already own their Runtime wakeups. Keep the
+                # same authority and binding checks without a no-op schedule RPC.
+                authorization = _validate_agent_run_binding(
+                    agent_run, require_current_authority=not agent_run_api)
+                if (
+                    job.get("jobId") != agent_run_lifecycle_job_id(agent_run.id)
+                    or job.get("jobKind") != AGENT_RUN_LIFECYCLE_JOB_KIND
+                    or job.get("idempotencyKey") != f"agent_run.lifecycle:{agent_run.id}:{authorization.digest}"
+                    or job.get("sessionId") != agent_run.session_id
+                    or job.get("payloadRef") != f"record:agent_run:{agent_run.id}"
+                    or job.get("status") not in {"queued", "leased", "running"}
+                ):
+                    raise RuntimeError("agent_run_lifecycle_job_binding_invalid")
+            if agent_run_api:
+                _cancel_agent_run_api_run_if_required(agent_run)
+            if agent_run.status == "queued" and not agent_run_api:
                 with transaction.atomic():
                     current = (AgentRun.objects.select_for_update(of=("self",))
                                .select_related("authorization", "modelConfig", "session", "environment")
                                .get(id=agent_run.id))
                     _expire_queued_run_locked(current)
-            scheduled += 1
+            if job is None:
+                scheduled += 1
         except Exception:
             pending += 1
             logger.exception(
