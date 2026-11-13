@@ -23,6 +23,8 @@ const fixture = vi.hoisted(() => ({
   selectedSession: null as SessionSummary | null,
   user: { id: "user" }, workspace: { id: "workspace", name: "Synthetic workspace", avatarUrl: null as string | null },
   activeRun: null as { agentRunId: string; status: string; streamCursor: string } | null,
+  pendingSupplements: [] as { supplementId: string; message: string }[],
+  activeRead: null as Promise<{ agentRun: { agentRunId: string; status: string; streamCursor: string }; pendingSupplements: { supplementId: string; message: string }[] }> | null,
 }));
 
 vi.mock("../../src/api", async original => ({
@@ -47,7 +49,7 @@ vi.mock("../../src/preferences", () => ({
   writeModelThinkingMode: () => {}, writePreferredModelIdentity: () => {},
 }));
 vi.mock("../../src/chat/transcriptTransport", () => ({
-  createWorkspaceTranscriptTransport: () => ({ loadActiveAgentRun: async () => ({ agentRun: fixture.activeRun }) }),
+  createWorkspaceTranscriptTransport: () => ({ loadActiveAgentRun: async ({ sessionId }: { sessionId: string }) => (sessionId === "session" ? fixture.activeRead : null) ?? ({ agentRun: fixture.activeRun, pendingSupplements: fixture.pendingSupplements }) }),
 }));
 vi.mock("../../src/chat/workspacePresentationTransport", () => ({
   streamWorkspacePresentation: (options: Subscription) => {
@@ -122,7 +124,7 @@ async function chooseModel() {
 }
 
 beforeEach(() => {
-  sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null;
+  sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null; fixture.pendingSupplements = []; fixture.activeRead = null;
   fixture.workspace = { id: "workspace", name: "Synthetic workspace", avatarUrl: null };
   vi.stubGlobal("crypto", webcrypto);
   window.history.replaceState({}, "", "/w/workspace/sessions/session");
@@ -257,6 +259,49 @@ test("Steer appears immediately and is replaced once by its durable input identi
   expect(screen.getAllByText("直接给结果")).toHaveLength(1);
   expect(screen.getAllByText("chat.steer")).toHaveLength(1);
   expect(callsFor("/messages")).toHaveLength(1);
+});
+
+test("refresh restores accepted Steer before Core consumes it, then reconciles the same identity", async () => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "restored-steer", message: "立即给出结果" }];
+  const props = { initialSession: row, workspaceDraft: false, location: { search: "", state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
+  const firstView = render(<MemoryRouter><AppPageContent {...props} /></MemoryRouter>);
+  await screen.findByText("立即给出结果");
+  firstView.unmount();
+  render(<MemoryRouter><AppPageContent {...props} /></MemoryRouter>);
+  await screen.findByText("立即给出结果");
+  expect(screen.getAllByText("chat.steer")).toHaveLength(1);
+  const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
+  await act(async () => subscription.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: "workspace.presentation.v1", workspaceId: "workspace", sessionId: "session", kind: "snapshot",
+    page: { ...page, sourceHighWater: "2", resumeCursors: [{ streamId: "workspace-transcript.v1", cursor: "2" }], blocks: [{ blockId: "message:turn:supplement:restored-steer", blockRevision: "1", orderKey: { sourceSequence: "2", ordinal: 0 },
+      body: { kind: "notice", noticeType: "turn_supplement", content: { inlineContent: "立即给出结果", sourceRef: null }, status: "completed" } }] },
+  } }));
+  expect(screen.getAllByText("立即给出结果")).toHaveLength(1);
+  expect(callsFor("/messages")).toHaveLength(0);
+  expect(callsFor("/supplements")).toHaveLength(0);
+});
+
+test.each([false, true])("a late Steer restore survives a checkpoint but respects Session changes: %s", async changeSession => {
+  const read = deferred<Awaited<NonNullable<typeof fixture.activeRead>>>();
+  fixture.activeRead = read.promise;
+  const props = { workspaceDraft: false, location: { search: "", state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
+  const view = render(<MemoryRouter><AppPageContent {...props} initialSession={row} /></MemoryRouter>);
+  await waitFor(() => expect(fixture.subscriptions.some(item => !item.signal.aborted)).toBe(true));
+  const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
+  await act(async () => subscription.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: "workspace.presentation.v1", workspaceId: "workspace", sessionId: "session", kind: "checkpoint",
+    projectionGeneration: null, sourceHighWater: "0", agentRun: {
+      agentRunId: "original-run", status: "running", startedAt: null, completedAt: null,
+    },
+  } }));
+  if (changeSession) {
+    view.rerender(<MemoryRouter><AppPageContent {...props} initialSession={{ ...row, id: "other", title: "Other Session" }} /></MemoryRouter>);
+  }
+  await act(async () => read.resolve({ agentRun: { agentRunId: "original-run", status: "running", streamCursor: "0" },
+    pendingSupplements: [{ supplementId: "delayed-steer", message: "迟到的追加" }] }));
+  if (changeSession) expect(screen.queryByText("迟到的追加")).toBeNull();
+  else expect(await screen.findByText("迟到的追加")).toBeTruthy();
 });
 
 test("rejected Steer preserves its draft and does not leave a sent message behind", async () => {

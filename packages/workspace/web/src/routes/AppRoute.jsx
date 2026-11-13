@@ -808,11 +808,22 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
     const controller = new AbortController();
     const scope = requestScopeRef.current;
     const revision = runControlRevisionRef.current;
-    const isCurrentRead = () => !controller.signal.aborted && scope.active && requestScopeRef.current === scope
-      && activeSessionIdRef.current === sessionId && runControlRevisionRef.current === revision;
+    const isCurrentScope = () => !controller.signal.aborted && scope.active && requestScopeRef.current === scope
+      && activeSessionIdRef.current === sessionId;
+    const isCurrentRead = () => isCurrentScope() && runControlRevisionRef.current === revision;
     // Zero is a valid source waterline; this endpoint reads current Run state.
     transcriptTransport.loadActiveAgentRun({ sessionId, sourceHighWater: "0" }, controller.signal)
-      .then(({ agentRun }) => {
+      .then(({ agentRun, pendingSupplements: restored }) => {
+        // Presentation checkpoints can arrive while this read is in flight.
+        // They fence Run control, but do not invalidate accepted input identities.
+        if (!isCurrentScope()) return;
+        if (agentRun) setPendingSupplements(items => {
+          const received = restored.map(item => ({ supplementId: item.supplementId, text: item.message,
+            sessionId, agentRunId: agentRun.agentRunId }));
+          return [...received, ...items.filter(item => !received.some(other => other.sessionId === item.sessionId
+            && other.agentRunId === item.agentRunId && other.supplementId === item.supplementId))]
+            .filter(item => !hasCommittedSupplement(item, sessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot));
+        });
         if (!isCurrentRead()) return;
         const currentRun = agentRun && !terminalRunIdsRef.current.has(agentRun.agentRunId) ? agentRun : null;
         currentRunIdentityRef.current = currentRun?.agentRunId || null;
@@ -824,7 +835,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
         // A failed supplementary read cannot retire its current Run or scope.
       });
     return () => controller.abort();
-  }, [sessionId, requestScopeKey, presentationAttempt, runControlAttempt, transcriptTransport, updateActiveTranscriptRun]);
+  }, [sessionId, requestScopeKey, presentationAttempt, runControlAttempt, transcriptTransport, transcriptStore, updateActiveTranscriptRun]);
 
   function retryTranscriptStream() {
     if (streamIssue?.reconnecting) return;

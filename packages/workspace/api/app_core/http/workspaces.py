@@ -47,6 +47,7 @@ from app_core.agent_run_authorization_factory import create_agent_run_authorizat
 from app_core.session_model_settings import selected_session_model, SessionModelSettingsError
 from app_core.session_deletion import purge_session_runtime, record_session_purge_intent
 from app_core.agent_run_stream import encode_stream_cursor
+from app_core.presentation_activity import pending_agent_run_supplements
 from app_core.runtime_client import (
     TranscriptRuntimeError,
     request_agent_run_cancellation,
@@ -89,6 +90,7 @@ from .response_schema import (
     AgentRunCancellationResponse,
     AgentRunEnvironmentResponse,
     AgentRunSupplementResponse,
+    ActiveTranscriptAgentRunEnvelope,
     SessionsEnvelope,
     SessionSearchEnvelope,
     WorkspacesEnvelope,
@@ -1120,7 +1122,7 @@ def session_transcript_turn_metadata(request, session_id: str):
 @router.get(
     "/sessions/{session_id}/transcript/active-agent-run",
     auth=usage_auth("sessions:read"),
-    response=None,
+    response={200: ActiveTranscriptAgentRunEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def session_transcript_active_agent_run(request, session_id: str):
     session = _authorized_transcript_session(request.user, session_id)
@@ -1136,7 +1138,7 @@ def session_transcript_active_agent_run(request, session_id: str):
             {"error": "transcript_active_agent_run_query_invalid"}, status=400
         )
     candidates = list(
-        session.agent_runs.filter(status__in={"queued", "running"})
+        session.agent_runs.select_related("authorization").filter(status__in={"queued", "running"})
         .order_by("-createdAt", "-id")[:2]
     )
     active_runs = []
@@ -1155,6 +1157,7 @@ def session_transcript_active_agent_run(request, session_id: str):
         {
             "schema": "workspace.transcript.active_agent_run.v1",
             "sessionId": session.id,
+            "pendingSupplements": pending_agent_run_supplements(active_run),
             "agentRun": (
                 {
                     "agentRunId": active_run.id,

@@ -50,7 +50,7 @@ window.fetch = async (input, options) => {
   if (url.pathname.endsWith('/session-projects')) return Response.json({ projects: [{ id: 'project', name: 'Persistent group' }] });
   if (url.pathname === '/api/workspaces/workspace/sessions') return Response.json({ sessions: rows });
   if (url.pathname.endsWith('/assets')) return Response.json({ assets: [] });
-  if (url.pathname.endsWith('/active-agent-run')) return Response.json({ schema: 'workspace.transcript.active_agent_run.v1', sessionId: url.pathname.split('/')[3], agentRun: null });
+  if (url.pathname.endsWith('/active-agent-run')) return Response.json({ schema: 'workspace.transcript.active_agent_run.v1', sessionId: url.pathname.split('/')[3], agentRun: null, pendingSupplements: [] });
   if (url.pathname.endsWith('/turn-metadata')) return Response.json({ turns: [] });
   if (url.pathname.endsWith('/context-usage')) return Response.json({ schema: 'session.context_usage.v1', sessionId: url.pathname.split('/')[3], contextUsage: null });
   if (url.pathname === '/api/workspaces/workspace/trash') return Response.json({ items: [{ id: 'material', title: 'Deleted material',

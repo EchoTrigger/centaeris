@@ -773,6 +773,24 @@ class AgentRunSupplementResponse(StrictSchema):
     queued_count: int = Field(ge=0, le=8)
 
 
+class PendingTranscriptSupplement(StrictSchema):
+    supplement_id: str
+    message: str
+
+
+class ActiveTranscriptAgentRun(StrictSchema):
+    agent_run_id: str
+    status: Literal["queued", "running"]
+    stream_cursor: str
+
+
+class ActiveTranscriptAgentRunEnvelope(StrictSchema):
+    schema_id: Literal["workspace.transcript.active_agent_run.v1"] = Field(alias="schema")
+    session_id: str
+    agent_run: ActiveTranscriptAgentRun | None
+    pending_supplements: list[PendingTranscriptSupplement] = Field(max_length=8)
+
+
 class TranscriptPublishedArtifact(StrictSchema):
     artifact_ref: str
     filename: str

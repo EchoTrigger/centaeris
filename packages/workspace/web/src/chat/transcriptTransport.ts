@@ -38,6 +38,7 @@ export type ActiveTranscriptAgentRunEnvelope = Readonly<{
   schema: "workspace.transcript.active_agent_run.v1";
   sessionId: string;
   agentRun: ActiveTranscriptAgentRun | null;
+  pendingSupplements: readonly Readonly<{ supplementId: string; message: string }>[];
 }>;
 
 function abortableWait(delayMs: number, signal: AbortSignal) {
@@ -86,10 +87,21 @@ function validateActiveAgentRun(value: unknown, sessionId: string): ActiveTransc
     throw new Error("invalid active transcript AgentRun");
   }
   const envelope = value as Record<string, unknown>;
-  if (Object.keys(envelope).sort().join("|") !== "agentRun|schema|sessionId"
+  if (Object.keys(envelope).sort().join("|") !== "agentRun|pendingSupplements|schema|sessionId"
     || envelope.schema !== "workspace.transcript.active_agent_run.v1"
     || envelope.sessionId !== sessionId) throw new Error("invalid active transcript AgentRun");
-  if (envelope.agentRun === null) return envelope as ActiveTranscriptAgentRunEnvelope;
+  if (!Array.isArray(envelope.pendingSupplements) || envelope.pendingSupplements.length > 8
+    || envelope.pendingSupplements.some(item => typeof item !== "object" || item === null || Array.isArray(item)
+      || Object.keys(item).sort().join("|") !== "message|supplementId"
+      || typeof item.supplementId !== "string" || !item.supplementId
+      || typeof item.message !== "string" || !item.message.trim())
+    || new Set(envelope.pendingSupplements.map(item => item.supplementId)).size !== envelope.pendingSupplements.length) {
+    throw new Error("invalid pending transcript supplements");
+  }
+  if (envelope.agentRun === null) {
+    if (envelope.pendingSupplements.length) throw new Error("pending supplements require an active AgentRun");
+    return envelope as ActiveTranscriptAgentRunEnvelope;
+  }
   if (typeof envelope.agentRun !== "object" || Array.isArray(envelope.agentRun)) {
     throw new Error("invalid active transcript AgentRun");
   }

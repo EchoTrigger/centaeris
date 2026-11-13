@@ -15,6 +15,30 @@ QUESTION_FIELDS = {
 }
 
 
+def pending_agent_run_supplements(run):
+    """Project accepted inputs without claiming or acknowledging Runtime's queue."""
+    if run is None:
+        return []
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT entries_json FROM runtime.runtime_turn_supplement_queues "
+            "WHERE agent_run_id=%s AND session_id=%s AND authorization_digest=%s",
+            [run.id, run.session_id, run.authorization.digest],
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return []
+    entries = json.loads(row[0])
+    fields = {"supplementId", "sequence", "message", "createdAtMs", "claimToken", "claimLeaseOwner"}
+    if (not isinstance(entries, list) or len(entries) > 8
+            or any(not isinstance(item, dict) or set(item) != fields
+                or not isinstance(item["supplementId"], str) or not item["supplementId"]
+                or not isinstance(item["message"], str) or not item["message"].strip()
+                for item in entries)):
+        raise RuntimeError("presentation_supplement_queue_invalid")
+    return [{"supplementId": item["supplementId"], "message": item["message"]} for item in entries]
+
+
 def presentation_question(run):
     if run is None or run.status != "running":
         return None, False

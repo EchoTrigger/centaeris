@@ -60,6 +60,9 @@ with a small Steer label and icon. They remain visible when surrounding process
 details fold. The accepted supplement and its durable transcript record reconcile
 by input identity, with no delivery or model-processing state labels. A rejected
 send retains the composer draft and uses the existing composer error feedback.
+Opening or refreshing a Session restores accepted supplements from Runtime's
+durable queue through the existing active-Run read. Restoration does not consume
+the input and reconciles by supplement identity when its transcript record arrives.
 
 ## Focused verification
 

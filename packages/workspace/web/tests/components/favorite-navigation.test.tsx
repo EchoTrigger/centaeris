@@ -44,7 +44,7 @@ beforeEach(async () => {
     if (path.endsWith("/session-projects")) return Response.json({ projects: [] });
     if (path === "/api/workspaces/demo/sessions") return Response.json({ sessions });
     if (path.endsWith("/assets")) return Response.json({ assets: [] });
-    if (path.endsWith("/active-agent-run")) return Response.json({ schema: "workspace.transcript.active_agent_run.v1", sessionId: path.split("/")[3], agentRun: null });
+    if (path.endsWith("/active-agent-run")) return Response.json({ schema: "workspace.transcript.active_agent_run.v1", sessionId: path.split("/")[3], agentRun: null, pendingSupplements: [] });
     if (path.endsWith("/context-usage")) return Response.json({ schema: "session.context_usage.v1", sessionId: path.split("/")[3], contextUsage: null });
     if (path === "/api/csrf") return Response.json({ csrfToken: "test-token" });
     const session = sessions.find(item => path === `/api/sessions/${item.id}`);
