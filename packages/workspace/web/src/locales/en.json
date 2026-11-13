@@ -1002,7 +1002,7 @@
   "environmentSettings.internet": "Allow internet access",
   "environmentSettings.cpu": "CPU (cores)",
   "environmentSettings.memory": "Memory (GiB)",
-  "environmentSettings.workspaceSpace": "Workspace space (GiB)",
+  "environmentSettings.workspaceSpace": "Environment disk (GiB)",
   "environmentSettings.save": "Save",
   "environmentSettings.invalidResource": "Enter a positive value within the supported range and precision.",
   "environmentSettings.newEnvironmentsOnly": "Applies to new conversations. Existing environments keep their current network access.",

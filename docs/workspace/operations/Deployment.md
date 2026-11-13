@@ -41,17 +41,22 @@ ceiling. Host-derived memory headroom and conservative unknown-allocation charge
 remain active, so concurrency follows available resources rather than a fixed count.
 `DOCKER_CREATE_CONCURRENCY=4` bounds create calls per Runtime process.
 
-OverlayFS-backed Docker storage is required. Runtime refuses to start on `vfs`,
-a missing backend, or any unsupported storage driver. Use the matching
+Docker's classic `overlay2` image store on XFS with `ftype=1` and project quota
+enforcement (`pquota`) is required. Runtime refuses an unsupported driver,
+backing filesystem or missing directory-type support. Docker must also accept
+per-container `StorageOpt.size`; verify actual quota enforcement on the target
+host before rollout. Use the matching
 HostSupervisor with cgroup v2, automatic idle pause, and demand resume enabled. The running limit
 is optional and unset by default; idle grace remains 3000 ms.
 Pause eligibility requires released controller authority and no queued demand;
 it does not pause an active Run merely because the model is waiting. Pausing
-retains memory and all resident resource charges. Docker may report `overlayfs`
-with the containerd image store or `overlay2` with the classic image store. Check the target daemon before rollout:
+retains memory and all resident resource charges. Docker's containerd image
+store reports `overlayfs` and does not satisfy this host contract. Select the
+classic store explicitly (`features.containerd-snapshotter=false`) on Docker
+versions that default to containerd. Check the target daemon before rollout:
 
 ```sh
-docker info --format '{{.Driver}} {{.CgroupVersion}}'
+docker info --format '{{.Driver}} {{json .DriverStatus}} {{.CgroupVersion}}'
 ```
 
 In a multi-host deployment, give the API a health-checked `RUNTIME_URL` backed
@@ -94,9 +99,15 @@ parameters and a host reboot before these files become available. Runtime cannot
 start shared admission without the required host resource observations; enabling
 cgroup v2 alone does not enable PSI.
 
-The application does not select or migrate Docker storage. A host using `vfs`
-needs a separately planned storage transition; do not change its storage driver
-in place during an application rollout. Explicit runc deployments must disable
+The application does not select or migrate Docker storage. A host using another
+driver or filesystem needs a separately planned storage transition: drain work,
+stop data writers, transfer images through Docker's supported save/load or
+registry interfaces, and migrate persistent volumes with ownership and permissions
+preserved. Do not copy an incompatible image store into the new data root.
+Size the shared XFS disk for images, platform data and concurrent environments;
+the adjustable environment disk setting limits each sandbox independently.
+Keep compilation and build caches outside the target deployment filesystem.
+Explicit runc deployments must disable
 shared admission with `RUNTIME_NATIVE_SHARED_ADMISSION=0` and explicitly clear
 both `RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS` and `RUNTIME_RUNSC_IDLE_PAUSE_MS`.
 

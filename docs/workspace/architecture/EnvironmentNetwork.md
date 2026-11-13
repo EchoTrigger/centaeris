@@ -13,10 +13,10 @@ Updating the setting affects new Sessions; existing environments and signed
 grants retain their snapshot. A maintenance-authorized profile binding may set
 the same network field before that environment has been used. Once the complete
 profile is bound, PostgreSQL protects it against model, bulk and raw updates.
-CPU, memory and workspace-space defaults use the same environment-creation
+CPU, memory and environment-disk defaults use the same environment-creation
 boundary and revision. See [sandbox execution profile](../reference/Configuration.md#sandbox-execution-profile)
-for resource units and the distinction between workspace-space budget and a
-physical disk quota.
+for resource units. The disk setting populates the workspace data budget and
+the per-sandbox writable-layer quota; the host's shared XFS capacity is separate.
 
 The current `workspace.agent_run_authorization.v2` signs the network value inside
 `environmentProfile` and binds the complete `environmentProfileDigest`. Ordinary

@@ -1002,7 +1002,7 @@
   "environmentSettings.internet": "允许访问互联网",
   "environmentSettings.cpu": "CPU (核)",
   "environmentSettings.memory": "内存 (GiB)",
-  "environmentSettings.workspaceSpace": "工作区空间 (GiB)",
+  "environmentSettings.workspaceSpace": "环境磁盘 (GiB)",
   "environmentSettings.save": "保存",
   "environmentSettings.invalidResource": "请输入在支持范围及精度内的正数。",
   "environmentSettings.newEnvironmentsOnly": "仅对新建会话生效，已有环境保持当前网络权限。",

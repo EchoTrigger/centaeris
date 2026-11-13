@@ -311,7 +311,7 @@ override; it does not change this 12-GiB deployment default.
 
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
 `SANDBOX_WORKSPACE_BYTES` initialize resource defaults for a Workspace. Owners
-and administrators can change CPU, memory and workspace-space defaults in
+and administrators can change CPU, memory and per-environment disk defaults in
 Settings → Environment without restarting the API or Runtime. PID limits retain
 their deployment default.
 
@@ -323,12 +323,15 @@ rewrite a signed grant. A new Session or an existing lifecycle operation that
 creates a new SessionEnvironment uses the latest settings. An explicitly bound
 maintenance profile retains its independently authorized resource values.
 
-`workspaceBytes` is a workspace data budget for admission, inputs and expanded
-snapshots; it does not select a tmpfs or impose a live OverlayFS disk quota.
-The settings page calls this value workspace space. Its ordinary profile uses
-the same value for `storageBytes`; the default does not introduce a physical
-disk quota. CPU and memory still use the existing container limits and host
-resource admission.
+`workspaceBytes` remains the workspace data budget for admission, inputs and
+expanded snapshots. The settings page's environment disk value also sets
+`storageBytes` in an ordinary profile. Docker enforces `storageBytes` as the
+hard limit of each environment's writable container layer, shared by workspace
+files, disk-backed temporary files, caches and installed dependencies. Read-only
+image layers and plugin mounts are outside that limit; system memory filesystems
+remain subject to the environment's memory limit. The shared host disk must have
+capacity for all environments, images and platform data; it is not the per-sandbox
+limit. CPU, memory and resource admission retain their existing contracts.
 The deployment example sets new environments to 4 GiB of memory and 2000 CPU
 milli (two cores). These are upper bounds. Existing signed environment profiles
 keep their original resource limits.

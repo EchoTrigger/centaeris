@@ -1,10 +1,22 @@
 //! Required Docker storage semantics for managed execution instances.
 
-pub(crate) fn require_overlayfs(driver: Option<&str>) -> Result<(), &'static str> {
-    match driver {
-        Some("overlay2" | "overlayfs") => Ok(()),
-        _ => Err("docker_overlayfs_required"),
+pub(crate) fn require_quota_backing(info: &serde_json::Value) -> Result<(), &'static str> {
+    let status = info["DriverStatus"].as_array();
+    let reports = |name: &str, expected: &str| {
+        status.is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row[0].as_str() == Some(name) && row[1].as_str() == Some(expected))
+        })
+    };
+    if info["Driver"].as_str() != Some("overlay2")
+        || !reports("Backing Filesystem", "xfs")
+        || !reports("Supports d_type", "true")
+    {
+        return Err(
+            "sandbox disk quotas require Docker classic overlay2 on XFS with d_type support",
+        );
     }
+    Ok(())
 }
 
 /// A guest-private root overlay is not the Docker writable layer. Require an
@@ -44,28 +56,29 @@ pub(crate) fn require_workspace_backing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn classic_and_containerd_overlayfs_backends_are_supported() {
-        for driver in ["overlay2", "overlayfs"] {
-            assert_eq!(require_overlayfs(Some(driver)), Ok(()), "{driver}");
-        }
+    fn classic_overlay2_on_xfs_with_dtype_support_passes_host_preflight() {
+        require_quota_backing(&json!({
+            "Driver":"overlay2",
+            "DriverStatus":[["Backing Filesystem","xfs"],["Supports d_type","true"]]
+        }))
+        .unwrap();
     }
 
     #[test]
-    fn non_overlayfs_and_missing_backend_never_pass_host_preflight() {
-        for driver in [
-            None,
-            Some(""),
-            Some("vfs"),
-            Some("btrfs"),
-            Some("zfs"),
-            Some("OVERLAYFS"),
+    fn missing_or_unsupported_quota_backend_never_passes_host_preflight() {
+        for unsupported in [
+            json!({}),
+            json!({"Driver":"overlay2"}),
+            json!({"Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]]}),
+            json!({"Driver":"overlay2","DriverStatus":[["Backing Filesystem","extfs"],["Supports d_type","true"]]}),
+            json!({"Driver":"overlay2","DriverStatus":[["Backing Filesystem","xfs"],["Supports d_type","false"]]}),
         ] {
-            assert_eq!(
-                require_overlayfs(driver),
-                Err("docker_overlayfs_required"),
-                "{driver:?}"
+            assert!(
+                require_quota_backing(&unsupported).is_err(),
+                "{unsupported}"
             );
         }
     }

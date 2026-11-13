@@ -827,8 +827,7 @@ impl DockerExecutionHostRunner {
         docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?;
         let oci_runtime = OciRuntime::from_environment()?;
         let runtime_name = oci_runtime.docker_runtime_name();
-        let info = crate::docker_engine::info()?;
-        crate::docker_storage::require_overlayfs(info["Driver"].as_str())?;
+        let info = crate::docker_engine::sandbox_info()?;
         let runtimes = &info["Runtimes"];
         if runtimes.get(runtime_name).is_none() {
             return Err(format!(
@@ -2794,6 +2793,7 @@ fn ensure_container_inner(
 ) -> Result<(), crate::postgres_store::execution_instances::InstancePreparationFailure> {
     use crate::postgres_store::execution_instances::InstancePreparationFailure;
     let body = container_create_body(expected)?;
+    crate::docker_engine::sandbox_info()?;
     if let Some(facts) = inspect_container(expected.name)? {
         require_plugin_mounts_match(
             &facts.mounts,
@@ -2862,7 +2862,7 @@ fn container_ids_for_agent_run(agent_run_id: &str) -> Result<Vec<String>, String
 }
 
 fn resident_host_id() -> Result<String, String> {
-    crate::docker_engine::info()?["ID"]
+    crate::docker_engine::sandbox_info()?["ID"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
@@ -2870,7 +2870,7 @@ fn resident_host_id() -> Result<String, String> {
 }
 
 pub(crate) fn resident_host_context() -> Result<(String, ResidentCapacity), String> {
-    let info = crate::docker_engine::info()?;
+    let info = crate::docker_engine::sandbox_info()?;
     let id = info["ID"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
@@ -6521,7 +6521,7 @@ mod tests {
         let mut config = body.clone();
         config.as_object_mut().unwrap().remove("HostConfig");
         config.as_object_mut().unwrap().remove("Image");
-        let facts = ContainerFacts {
+        let mut facts = ContainerFacts {
             id: "a".repeat(64),
             raw: serde_json::json!({"Id":"a".repeat(64), "Config":config,
                 "Image":body["Image"], "HostConfig":host, "Mounts":host["Mounts"]}),
@@ -6538,6 +6538,19 @@ mod tests {
             mounts: serde_json::from_value(host["Mounts"].clone()).unwrap(),
         };
         assert!(facts.matches(&expected), "original retained configuration");
+        let original_storage = facts.raw["HostConfig"]["StorageOpt"].clone();
+        for actual in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"size":"1"}),
+        ] {
+            facts.raw["HostConfig"]["StorageOpt"] = actual;
+            assert!(
+                !facts.matches_configuration(&expected),
+                "retained reuse requires the signed writable-layer quota"
+            );
+        }
+        facts.raw["HostConfig"]["StorageOpt"] = original_storage;
         let changed = ContainerExpectation {
             network: ExecutionNetwork::PublicInternet,
             ..expected

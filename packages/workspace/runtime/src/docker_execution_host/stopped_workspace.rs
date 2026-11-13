@@ -592,7 +592,8 @@ mod tests {
                 "centaeris.agent_run_id":"run","centaeris.allocation_owner":serde_json::to_string(&allocation.allocation_owner).unwrap(),
                 "centaeris.environment_authorization_digest":allocation.binding_digest,"centaeris.environment_profile_digest":allocation.profile_digest}},
             "HostConfig":{"Runtime":"runsc","Memory":profile.resources.memory_bytes,"CpuQuota":100000,
-                "CpuPeriod":100000,"PidsLimit":128,"NetworkMode":"none","Mounts":[],"Tmpfs":null}});
+                "CpuPeriod":100000,"PidsLimit":128,"NetworkMode":"none","Mounts":[],"Tmpfs":null,
+                "StorageOpt":{"size":profile.resources.storage_bytes.to_string()}}});
         facts["Config"]["Labels"][environment_container::WORKSPACE_BACKING_LABEL] =
             environment_container::WORKSPACE_BACKING_DOCKER_OVERLAYFS.into();
         (allocation, profile, facts)
@@ -969,12 +970,18 @@ mod tests {
     fn host_unknown_or_raced_power_identity_and_mount_changes_never_publish_a_snapshot() {
         let (a, p, facts) = fixture();
         let bytes = archive(&[("app/", tar::EntryType::Directory, b"", 0o755)]);
-        for pointer in ["/State/Running", "/Id", "/HostConfig/Mounts"] {
+        for pointer in [
+            "/State/Running",
+            "/Id",
+            "/HostConfig/Mounts",
+            "/HostConfig/StorageOpt/size",
+        ] {
             let mut changed = facts.clone();
             if let Some(v) = changed.pointer_mut(pointer) {
                 *v = match pointer {
                     "/State/Running" => true.into(),
                     "/Id" => "foreign".into(),
+                    "/HostConfig/StorageOpt/size" => "1".into(),
                     _ => serde_json::json!([{"Target":"/other","Type":"bind"}]),
                 }
             }

@@ -211,6 +211,7 @@ pub(super) fn physical_state(
         || facts["Config"]["User"].as_str() != Some(profile.user.as_str())
         || facts["Config"]["WorkingDir"].as_str() != Some("/")
         || facts["HostConfig"]["Memory"].as_u64() != Some(profile.resources.memory_bytes)
+        || !environment_container::storage_matches(facts, profile)
         || facts["HostConfig"]["CpuQuota"].as_u64()
             != Some(u64::from(profile.resources.cpu_milli) * 100)
         || facts["HostConfig"]["CpuPeriod"] != 100000

@@ -100,7 +100,8 @@ fn facts(
             "centaeris.agent_run_id":"run","centaeris.allocation_owner":serde_json::to_string(&a.allocation_owner).unwrap(),
             "centaeris.environment_authorization_digest":a.binding_digest,"centaeris.environment_profile_digest":a.profile_digest}},
         "HostConfig":{"Runtime":"runsc","Memory":p.resources.memory_bytes,"CpuQuota":100000,
-            "CpuPeriod":100000,"PidsLimit":128,"NetworkMode":"none"}})
+            "CpuPeriod":100000,"PidsLimit":128,"NetworkMode":"none",
+            "StorageOpt":{"size":p.resources.storage_bytes.to_string()}}})
 }
 fn io(values: Vec<serde_json::Value>) -> FakeIo {
     FakeIo {
@@ -252,6 +253,7 @@ fn foreign_runtime_owner_instance_profile_or_container_never_mutates() {
         "/Config/Labels/centaeris.environment_authorization_digest",
         "/Config/Labels/centaeris.environment_profile_digest",
         "/HostConfig/Runtime",
+        "/HostConfig/StorageOpt/size",
     ] {
         let mut value = facts(&a, &p, false);
         *value.pointer_mut(pointer).unwrap() = serde_json::json!("foreign");
@@ -369,6 +371,26 @@ fn stopped_original_is_observed_separately_from_identity_and_never_powered() {
         }),
         Err("runsc_power_container_stopped".into())
     );
+}
+
+#[test]
+fn recovery_rejects_missing_or_changed_disk_quota_before_observing_power() {
+    let (a, p) = fixture();
+    for actual in [
+        serde_json::Value::Null,
+        serde_json::json!({}),
+        serde_json::json!({"size":(p.resources.storage_bytes * 2).to_string()}),
+    ] {
+        let mut original = stopped(&a, &p);
+        original["HostConfig"]["StorageOpt"] = actual;
+        let mut docker = io(vec![original]);
+        assert_eq!(
+            observe_recovery_target_with(&mut docker, &a, &p),
+            Err("runsc_power_physical_identity_rejected".into())
+        );
+        assert!(docker.mutations.is_empty());
+        assert!(docker.removals.is_empty());
+    }
 }
 
 #[test]
@@ -555,6 +577,7 @@ fn stopped_cleanup_never_preserves_or_removes_a_foreign_immutable_identity() {
         "/Id",
         "/Image",
         "/HostConfig/Runtime",
+        "/HostConfig/StorageOpt/size",
         "/Config/Labels/centaeris.managed",
         "/Config/Labels/centaeris.environment_id",
         "/Config/Labels/centaeris.instance_id",

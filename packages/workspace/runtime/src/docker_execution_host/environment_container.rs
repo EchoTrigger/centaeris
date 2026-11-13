@@ -60,11 +60,17 @@ pub(super) fn create_body_with_proxy_environment(
             "ReadonlyRootfs":false,"CapDrop":["ALL"],"CapAdd":[],"SecurityOpt":["no-new-privileges"],
             "Memory":profile.resources.memory_bytes, "CpuPeriod":100000,
             "CpuQuota":u64::from(profile.resources.cpu_milli)*100,
-            "PidsLimit":profile.resources.pids_limit,"Mounts":mounts
+            "PidsLimit":profile.resources.pids_limit,"Mounts":mounts,
+            "StorageOpt":{"size":profile.resources.storage_bytes.to_string()}
         }
     });
     network::apply_proxy_environment(&mut body, expected.network, proxy_environment);
     Ok(body)
+}
+
+pub(super) fn storage_matches(facts: &serde_json::Value, profile: &EnvironmentProfile) -> bool {
+    facts["HostConfig"]["StorageOpt"]["size"].as_str()
+        == Some(profile.resources.storage_bytes.to_string().as_str())
 }
 
 pub(super) fn helper_path() -> Result<String, String> {
@@ -106,6 +112,47 @@ mod tests {
                 workspace_bytes: 64 * 1024 * 1024,
                 storage_bytes: 10 * 1024 * 1024 * 1024,
             },
+        }
+    }
+
+    #[test]
+    fn signed_storage_limit_controls_the_writable_layer_independently_of_workspace_budget() {
+        let mut runner = super::super::tests::retained_test_runner();
+        let mut profile = profile();
+        runner.image_digest.clone_from(&profile.image_digest);
+        runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
+        for storage_bytes in [128 * 1024 * 1024_u64, 23 * 1024 * 1024 * 1024_u64 + 4096] {
+            profile.resources.storage_bytes = storage_bytes;
+            let body = create_body_with_proxy_environment(
+                &runner.container_expectation(),
+                &profile,
+                "/srv/helpers/execution_agent",
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                body["HostConfig"]["StorageOpt"]["size"],
+                storage_bytes.to_string()
+            );
+            assert_eq!(
+                body["Labels"]["centaeris.data_budget"],
+                profile.resources.workspace_bytes.to_string()
+            );
+            let facts = serde_json::json!({"Id":"physical","Image":body["Image"],"Config":body,"HostConfig":body["HostConfig"]});
+            crate::docker_engine::verify_created(&facts, &body).unwrap();
+            assert!(storage_matches(&facts, &profile));
+            for actual in [
+                serde_json::Value::Null,
+                serde_json::json!({}),
+                serde_json::json!({"size":storage_bytes}),
+                serde_json::json!({"size":(storage_bytes + 4096).to_string()}),
+            ] {
+                let mut mismatched = facts.clone();
+                mismatched["HostConfig"]["StorageOpt"] = actual;
+                assert!(crate::docker_engine::verify_created(&mismatched, &body).is_err());
+                assert!(!storage_matches(&mismatched, &profile));
+            }
         }
     }
 
