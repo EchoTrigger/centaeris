@@ -5354,9 +5354,19 @@ mod tests {
             assert!(host["Binds"].is_null());
             assert!(host["Tmpfs"].is_null());
             let mounts = host["Mounts"].as_array().unwrap();
-            assert_eq!(mounts.len(), 2);
+            assert_eq!(
+                mounts.len(),
+                if runtime == OciRuntime::Runsc { 3 } else { 2 }
+            );
             assert_eq!(mounts[0]["Target"], "/opt/centaeris/plugins/banana");
             assert_eq!(mounts[1]["Target"], AGENT_BINARY);
+            if runtime == OciRuntime::Runsc {
+                assert_eq!(
+                    mounts[2]["Target"],
+                    environment_container::RUNSC_TMP_ROOTFS_MARKER
+                );
+                assert_eq!(mounts[2]["Source"], mounts[1]["Source"]);
+            }
             assert!(mounts.iter().all(|mount| mount["ReadOnly"] == true));
             assert_eq!(host["Memory"], expected.resources.memory_bytes);
             assert_eq!(host["PidsLimit"], expected.resources.pids_limit);
@@ -6619,6 +6629,16 @@ mod tests {
             facts.matches(&expected),
             "original running instance remains eligible for its fenced RPCs"
         );
+        let original_mounts = facts.raw["HostConfig"]["Mounts"].clone();
+        facts.raw["HostConfig"]["Mounts"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(
+            !facts.matches_configuration(&expected),
+            "runsc reuse requires the read-only /tmp child mount"
+        );
+        facts.raw["HostConfig"]["Mounts"] = original_mounts;
         facts.raw["State"]["Paused"] = true.into();
         assert!(
             facts.matches_configuration(&expected),

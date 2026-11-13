@@ -596,6 +596,14 @@ mod tests {
                 "StorageOpt":{"size":profile.resources.storage_bytes.to_string()}}});
         facts["Config"]["Labels"][environment_container::WORKSPACE_BACKING_LABEL] =
             environment_container::WORKSPACE_BACKING_DOCKER_OVERLAYFS.into();
+        facts["HostConfig"]["Mounts"] = serde_json::json!([{
+            "Type":"bind", "Source":"/srv/helpers/execution_agent",
+            "Target":environment_container::RUNSC_TMP_ROOTFS_MARKER,"ReadOnly":true
+        }]);
+        facts["Mounts"] = serde_json::json!([{
+            "Type":"bind", "Source":"/srv/helpers/execution_agent",
+            "Destination":environment_container::RUNSC_TMP_ROOTFS_MARKER,"RW":false
+        }]);
         (allocation, profile, facts)
     }
 

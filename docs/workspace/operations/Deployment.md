@@ -92,6 +92,12 @@ and must not be used to add the marker retroactively. Legacy recovery requires
 an independently committed Session snapshot when its guest writes cannot be read.
 Direct runc execution does not use gVisor overlay arguments.
 
+For runsc, Session environments also mount the trusted execution helper read-only
+at `/tmp/.centaeris-rootfs`. This child mount prevents runsc from replacing an
+empty `/tmp` with its own tmpfs. Other `/tmp` writes therefore share the root
+writable-layer quota. The marker does not add a writable host directory or
+volume; direct runc environments do not need it.
+
 Shared admission also requires host pressure stall information (PSI). Verify that
 `/proc/pressure/memory` and `/proc/pressure/cpu` are readable before rollout. A
 kernel built with `CONFIG_PSI_DEFAULT_DISABLED=y` requires `psi=1` in its boot

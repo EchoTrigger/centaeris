@@ -6,6 +6,7 @@ pub(super) const WORKSPACE_BACKING_LABEL: &str = "centaeris.workspace_backing";
 pub(super) const WORKSPACE_BACKING_DOCKER_OVERLAYFS: &str = "dockerOverlayfs";
 
 pub(super) const HELPER_DESTINATION: &str = super::AGENT_BINARY;
+pub(super) const RUNSC_TMP_ROOTFS_MARKER: &str = "/tmp/.centaeris-rootfs";
 
 pub(super) fn create_body(
     expected: &ContainerExpectation<'_>,
@@ -50,6 +51,10 @@ pub(super) fn create_body_with_proxy_environment(
     }
     let mut mounts=expected.plugin_mounts.iter().map(|mount|serde_json::json!({"Type":"volume","Source":expected.plugin_volume_name,"Target":mount.destination,"ReadOnly":true,"VolumeOptions":{"Subpath":mount.source_subpath}})).collect::<Vec<_>>();
     mounts.push(serde_json::json!({"Type":"bind","Source":helper_path,"Target":HELPER_DESTINATION,"ReadOnly":true}));
+    if expected.oci_runtime == OciRuntime::Runsc {
+        // A read-only child mount prevents runsc from replacing empty /tmp with tmpfs.
+        mounts.push(serde_json::json!({"Type":"bind","Source":helper_path,"Target":RUNSC_TMP_ROOTFS_MARKER,"ReadOnly":true}));
+    }
     let mut body = serde_json::json!({
         "Image":profile.image_digest, "Labels":labels, "User":profile.user,
         "WorkingDir":"/","Entrypoint":[],
@@ -304,6 +309,27 @@ mod tests {
         let mut facts = serde_json::json!({"Id":"physical","Image":body["Image"],"Config":body,"HostConfig":body["HostConfig"]});
         crate::docker_engine::verify_created(&facts, &body)
             .expect("new backing policy matches created configuration");
+        let mounts = body["HostConfig"]["Mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[1]["Type"], "bind");
+        assert_eq!(mounts[1]["Source"], mounts[0]["Source"]);
+        assert_eq!(mounts[1]["Target"], RUNSC_TMP_ROOTFS_MARKER);
+        assert_eq!(mounts[1]["ReadOnly"], true);
+        for (field, value) in [
+            ("Source", serde_json::json!("/srv/foreign")),
+            ("Target", serde_json::json!("/tmp/other")),
+            ("ReadOnly", serde_json::json!(false)),
+        ] {
+            let mut mismatched = facts.clone();
+            mismatched["HostConfig"]["Mounts"][1][field] = value;
+            assert!(crate::docker_engine::verify_created(&mismatched, &body).is_err());
+        }
+        let mut missing = facts.clone();
+        missing["HostConfig"]["Mounts"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(crate::docker_engine::verify_created(&missing, &body).is_err());
         facts["Config"]["Labels"]
             .as_object_mut()
             .unwrap()
