@@ -8,6 +8,7 @@ from app_core.hosted_operations import (
     replay_operation, request_digest, serialize_operation,
 )
 from app_core.models import Issue, IssueExecution, Session
+from app_core.issue_materials import bind_issue_materials
 from app_core.workspace_access import shared_submission_membership_for, workspace_membership_for
 from . import workspaces
 from .issues import _pagination
@@ -91,8 +92,9 @@ def create_issue_execution(request, workspace_id: str, issue_id: str, payload: I
                 "modelConfigRef": payload.model_config_ref, "thinkingMode": payload.thinking_mode,
             })
             session = Session.objects.create(workspace=workspace, owner=request.user, purpose="interactive")
+            attachment_refs = bind_issue_materials(issue, session, request.user)
             agent_run, receipt = workspaces._accept_session_message(
-                request, workspace, session, message, prompt, [], execution_profile, digest,
+                request, workspace, session, message, prompt, attachment_refs, execution_profile, digest,
                 initial_title=issue.title[:200],
             )
             IssueExecution.objects.create(issue=issue, issuer=request.user, session=session,

@@ -2815,6 +2815,28 @@ class IssueNotification(models.Model):
         ]
 
 
+class IssueMaterial(models.Model):
+    """A versioned reference; linking never changes the source object's access or retention."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="materials")
+    attachedBy = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    assetKind = models.CharField(max_length=32)
+    assetId = models.CharField(max_length=64)
+    displayName = models.CharField(max_length=255)
+    contentType = models.CharField(max_length=160)
+    contentGeneration = models.PositiveBigIntegerField()
+    sizeBytes = models.BigIntegerField()
+    sha256 = models.CharField(max_length=71)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["issue", "assetKind", "assetId"], name="issue_material_unique"),
+            models.CheckConstraint(condition=models.Q(assetKind__in=["sourceObject", "userLibraryObject"]), name="issue_material_kind_valid"),
+            models.CheckConstraint(condition=models.Q(contentGeneration__gte=1, sizeBytes__gte=0), name="issue_material_identity_valid"),
+        ]
+
+
 class IssueExecution(models.Model):
     # One accepted run has one immutable Issue origin, separate from live Issue edits.
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

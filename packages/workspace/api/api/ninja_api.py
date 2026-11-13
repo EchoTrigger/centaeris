@@ -83,5 +83,11 @@ api.add_router("/api", workspace_guide_router)
 from app_core.http.issue_executions import router as issue_executions_router
 api.add_router("/api", issue_executions_router)
 
+from app_core.http.issue_materials import router as issue_materials_router
+api.add_router("/api", issue_materials_router)
+
+from app_core.http.issue_execution_read import router as issue_execution_read_router
+api.add_router("/api", issue_execution_read_router)
+
 from app_core.http.model_defaults import router as model_defaults_router
 api.add_router("/api", model_defaults_router)
