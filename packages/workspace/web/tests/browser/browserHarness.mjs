@@ -68,7 +68,7 @@ export async function runBrowser(url, scenario, profile, inspect) {
       if (browserError) throw browserError;
       if (browser.exitCode !== null) throw new Error(`Chrome exited: ${diagnostics}`);
       try { return (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n"); }
-      catch (error) { if (error.code === "ENOENT") return null; throw error; }
+      catch (error) { if (error.code === "ENOENT" || error.code === "EBUSY") return null; throw error; }
     }, "Chrome debugging endpoint");
     client = await connect(`ws://127.0.0.1:${port[0]}${port[1]}`);
     const browserVersion = await client.send("Browser.getVersion");
