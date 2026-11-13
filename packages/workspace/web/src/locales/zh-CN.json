@@ -1373,5 +1373,19 @@
   "guide.issue": "创建 Issue",
   "guide.issueDescription": "记录要完成的事项，并指派负责人跟进。",
   "common.resultCount_one": "{{count}} 个结果",
-  "common.resultCount_other": "{{count}} 个结果"
+  "common.resultCount_other": "{{count}} 个结果",
+  "modelSettings.defaultPurpose": "默认用途",
+  "modelSettings.noDefaultPurpose": "无",
+  "modelSettings.unavailableDefault": "模型不可用",
+  "issues.runWithAgent": "交给 Agent",
+  "issues.executionModel": "模型",
+  "issues.executionThinking": "思考强度",
+  "issues.startExecution": "开始执行",
+  "issues.conversations": "会话",
+  "issues.moreConversations": "加载更多",
+  "issues.execution.queued": "排队中",
+  "issues.execution.running": "执行中",
+  "issues.execution.completed": "已完成",
+  "issues.execution.failed": "失败",
+  "issues.execution.cancelled": "已取消"
 }

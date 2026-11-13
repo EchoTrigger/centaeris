@@ -24,4 +24,14 @@
 .issueActivity time { color:var(--process-text); margin-left:auto; font-size:12px; }
 .issueActivity li p { margin-top:8px; color:var(--process-text); white-space:pre-wrap; }
 .issueError { display:flex; align-items:center; gap:12px; margin:8px 16px; color:var(--error); font-size:13px; }
+.issueExecutions { margin-block: 16px; }
+.issueExecutions h2 { margin-top: 24px; font-size: 14px; font-weight: 500; }
+.issueExecutionForm { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding-block: 12px; }
+.issueExecutionForm label { display: grid; gap: 6px; color: var(--process-text); }
+.issueExecutionForm select { color: var(--on-surface); background: var(--surface); border: 0; border-radius: 6px; padding: 8px; font: inherit; max-width: 100%; }
+.issueExecutionError { display: flex; align-items: center; gap: 8px; color: var(--error); }
+.issueExecutionList { display: grid; gap: 6px; list-style: none; padding: 0; }
+.issueExecutionList a { display: flex; gap: 16px; padding: 10px 12px; border-radius: 8px; background: var(--surface-container); }
+.issueExecutionList a > span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
+.issueExecutionList small { flex: none; color: var(--process-text); }
 @media(max-width:600px) { .issueDetail { padding-inline:12px; } .issueRow small { max-width:90px; overflow:hidden; text-overflow:ellipsis; } }

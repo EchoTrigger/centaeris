@@ -6,6 +6,7 @@ import { apiJson, jsonOptions } from "../api";
 import { useTranslation } from "../i18n";
 import { WorkBreadcrumb } from "./WorkBreadcrumb";
 import { IssueForm, IssueStatus } from "./IssueForm";
+import { IssueExecutions } from "./IssueExecutions";
 import "./issues.css";
 
 const pageSize = 50;
@@ -83,6 +84,7 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
         <h1>{issue.title}</h1><div className="issueMetadata"><IssueStatus status={issue.status} /><span>{t(`issues.status.${issue.status}`)}</span><span>{personName(issue.assigneeId)}</span>{issue.archivedAt ? <span>{t("issues.archived")}</span> : null}</div>
         {issue.description ? <p className="issueDescription">{issue.description}</p> : null}
         <div className="issueActions"><Button variant="ghost" onClick={() => setEditing(true)}>{t("issues.edit")}</Button><Button variant="ghost" disabled={pending} onClick={() => mutate({ archived: !issue.archivedAt })}>{t(issue.archivedAt ? "issues.restore" : "issues.archive")}</Button></div>
+        <IssueExecutions key={issue.id} workspaceId={workspaceId} userId={userId} issue={issue} />
       </> : null}
       {issue ? <section className="issueActivity"><h2>{t("issues.activity")}</h2><ol>{events.events.map(event => <li key={event.id}><div><span>{event.actor.name}</span><span>{t(`issues.event.${event.type}`)}</span><time dateTime={event.createdAt}>{time(event.createdAt)}</time></div>{Object.entries(event.changes).map(([field, change]) => <p key={field}>{t(`issues.field.${field}`)}: <span>{fieldValue(field, change.before)}</span> → <span>{fieldValue(field, change.after)}</span></p>)}</li>)}</ol>{events.events.length < events.total ? <Button variant="ghost" disabled={pending} onClick={async () => { setPending(true); setError(null); try { const next = await apiJson(`${root}/${encodeURIComponent(issueId)}/events?limit=${pageSize}&offset=${events.events.length}`); if (mounted.current) setEvents(previous => ({ ...next, events: [...previous.events, ...next.events] })); } catch (failure) { if (mounted.current) setError(failure); } finally { if (mounted.current) setPending(false); } }}>{t("issues.moreActivity")}</Button> : null}</section> : null}
     </div> : null}

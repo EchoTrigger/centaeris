@@ -157,7 +157,13 @@
 .workPrototype .homeGuide header button, .workPrototype .homeHelp { border:0; background:transparent; color:var(--process-text); }
 .workPrototype .homeGuide header button:hover, .workPrototype .homeHelp:hover { color:var(--on-surface); }
 .homeGuide ul { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
-.homeGuide li a { display:flex; align-items:flex-start; gap:12px; padding:8px 0; }
+.homeGuide li { display:flex; align-items:flex-start; gap:12px; }
+.homeGuide li a { display:flex; flex:1; min-width:0; padding:8px 0; }
+.workPrototype .homeGuide .homeGuideCheckbox { display:flex; flex:none; padding:8px 0; border:0; background:transparent; color:var(--process-text); cursor:pointer; }
+.workPrototype .homeGuide .homeGuideCheckbox:hover, .workPrototype .homeGuide .homeGuideCheckbox:focus-visible { color:var(--on-surface); }
+.workPrototype .homeGuide .homeGuideCheckbox:focus-visible { outline:0; text-decoration:underline; }
+.workPrototype .homeGuide .homeGuideCheckbox:focus-visible svg { stroke-width:3; }
+.workPrototype .homeGuide .homeGuideCheckbox:disabled { opacity:0.5; cursor:wait; }
 .homeGuide li svg { width:14px; height:14px; margin-top:3px; flex:none; color:var(--process-text); }
 .homeGuide li span { display:grid; gap:4px; min-width:0; }
 .homeGuide strong { font-size:14px; font-weight:400; }

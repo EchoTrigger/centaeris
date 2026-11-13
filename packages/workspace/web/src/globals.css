@@ -1007,6 +1007,12 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
   padding-block: 8px;
 }
 .settingsArchiveRow .pluginEnableButton { flex: none; }
+.modelDefaults { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 16px; margin-bottom: 20px; }
+.modelDefaults > label { flex: 1; }
+.modelDefaults > select { max-width: 100%; min-width: 180px; color: var(--on-surface); background: transparent; border: 0; padding: 6px 8px; font: inherit; }
+.modelDefaults > div { flex-basis: 100%; display: flex; align-items: center; gap: 12px; }
+.settingsArchiveRow .managementRowCopy { min-width: 0; flex: 1; }
+.settingsArchiveRow .managementRowCopy > strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: clip; mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
 .settingsArchiveDelete { display: inline-grid; width: 28px; height: 28px; flex: none; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); }
 .settingsArchiveDelete svg { width: 15px; height: 15px; }
 .settingsArchiveDelete:hover:not(:disabled) { color: var(--danger); }

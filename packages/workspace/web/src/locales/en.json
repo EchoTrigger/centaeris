@@ -1373,5 +1373,19 @@
   "guide.issue": "Create an issue",
   "guide.issueDescription": "Record an outcome and assign someone to follow it through.",
   "common.resultCount_one": "{{count}} result",
-  "common.resultCount_other": "{{count}} results"
+  "common.resultCount_other": "{{count}} results",
+  "modelSettings.defaultPurpose": "Default purpose",
+  "modelSettings.noDefaultPurpose": "None",
+  "modelSettings.unavailableDefault": "Unavailable model",
+  "issues.runWithAgent": "Run with Agent",
+  "issues.executionModel": "Model",
+  "issues.executionThinking": "Reasoning",
+  "issues.startExecution": "Start",
+  "issues.conversations": "Conversations",
+  "issues.moreConversations": "Load more",
+  "issues.execution.queued": "Queued",
+  "issues.execution.running": "Running",
+  "issues.execution.completed": "Completed",
+  "issues.execution.failed": "Failed",
+  "issues.execution.cancelled": "Cancelled"
 }

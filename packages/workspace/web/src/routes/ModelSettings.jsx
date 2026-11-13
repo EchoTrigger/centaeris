@@ -5,6 +5,7 @@ import { ArrowLeft, ChevronRight, KeyRound, Plus } from "lucide-react";
 import { ApiError, apiJson as api } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ProviderLogo } from "../components/ProviderLogo";
+import { ModelDefaults } from "../components/ModelDefaults";
 import { localizedModelError, modelErrorText } from "../modelErrors";
 
 const API_OPTIONS = ["openai-completions", "openai-responses", "anthropic-messages"];
@@ -428,6 +429,7 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
       </section> : <>
       <div className="workspaceModelsEditorScroll">
         {selection.kind === "empty" ? <>
+          <ModelDefaults key={workspace.id} workspaceId={workspace.id} models={models} />
           <div className="managementToolbar workspaceModelsListToolbar"><button type="button" className="workspaceModelsAddProvider" disabled={Boolean(busyAction)} onClick={openPicker}><Plus aria-hidden="true" />{t("interface.addProvider")}</button></div>
           {busyAction === "load" ? <p role="status">{t("agentChat.loading")}</p> : null}
           {error ? <div className="workspaceModelsEmpty" role="alert">{error}</div> : null}

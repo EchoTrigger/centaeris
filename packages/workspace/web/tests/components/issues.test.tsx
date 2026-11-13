@@ -18,6 +18,7 @@ beforeEach(async () => {
   vi.mocked(apiJson).mockImplementation(async (path, options = {}) => {
     const body = options.body ? JSON.parse(String(options.body)) : null;
     requests.push({ path, body });
+    if (path.includes("/executions?")) return { executions: [], total: 0 };
     if (path.endsWith("/assignees")) return { assignees: [{ id: "user", name: "Taylor" }, { id: "other", name: "Morgan" }] };
     if (path.includes("/events?")) return { events: [{ id: "event", issueId: issue.id, actor: { id: "other", name: "Morgan" }, type: "updated", changes: { status: { before: "backlog", after: "todo" } }, createdAt: "2026-11-12T01:00:00Z" }], total: 1 };
     if (options.method === "PATCH") { if (conflict) throw new ApiError("issue_version_conflict", 409); issue = { ...issue, ...body, version: Number(issue.version) + 1, archivedAt: body.archived === true ? "2026-11-12T02:00:00Z" : body.archived === false ? null : issue.archivedAt }; return { issue }; }

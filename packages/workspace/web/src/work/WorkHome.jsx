@@ -17,6 +17,8 @@ export function WorkHome({ workspace }) {
   const saving = useRef(false);
   const reload = useRef(null);
   useEffect(() => {
+    saving.current = false;
+    setPending(false); setGuide(null); setError(null);
     async function load() {
       if (saving.current) return;
       request.current?.abort();
@@ -32,14 +34,14 @@ export function WorkHome({ workspace }) {
     window.addEventListener("focus", load);
     return () => { request.current?.abort(); window.removeEventListener("focus", load); reload.current = null; };
   }, [endpoint]);
-  async function setDismissed(dismissed) {
+  async function updateGuide(change) {
     if (saving.current) return;
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     saving.current = true; setPending(true); setError(null);
     try {
-      const result = await apiJson(endpoint, { ...jsonOptions("PATCH", { dismissed }), signal: controller.signal });
+      const result = await apiJson(endpoint, { ...jsonOptions("PATCH", change), signal: controller.signal });
       if (!controller.signal.aborted) setGuide(result.guide);
     } catch (failure) { if (!controller.signal.aborted) setError(failure.message); }
     finally { if (!controller.signal.aborted) { saving.current = false; setPending(false); } }
@@ -58,17 +60,20 @@ export function WorkHome({ workspace }) {
     <header className="workHeader"><WorkBreadcrumb current={t("work.home")} />
       <Menu.Root><Menu.Trigger className="homeHelp">{t("guide.help")}</Menu.Trigger>
         <Menu.Portal><Menu.Positioner className="workMenuPositioner" align="end" sideOffset={5}>
-          <Menu.Popup className="workMenu"><Menu.Item className="workMenuItem" disabled={pending} onClick={() => void setDismissed(false)}>{t("guide.open")}</Menu.Item></Menu.Popup>
+          <Menu.Popup className="workMenu"><Menu.Item className="workMenuItem" disabled={pending} onClick={() => void updateGuide({ dismissed: false })}>{t("guide.open")}</Menu.Item></Menu.Popup>
         </Menu.Positioner></Menu.Portal>
       </Menu.Root>
     </header>
     <div className="workHomeBody"><h2>{workspace.name}</h2>
       {error ? <div className="homeGuideError" role="alert"><span>{error}</span><button type="button" disabled={pending} onClick={() => void reload.current?.()}>{t("agentChat.retry")}</button></div> : null}
       {guide && !guide.dismissed ? <section className="homeGuide" aria-labelledby="home-guide-title" aria-busy={pending}>
-        <header><h3 id="home-guide-title">{t("guide.title")}</h3><button type="button" disabled={pending} aria-label={t("guide.remove")} onClick={() => void setDismissed(true)}><X aria-hidden="true" /></button></header>
+        <header><h3 id="home-guide-title">{t("guide.title")}</h3><button type="button" disabled={pending} aria-label={t("guide.remove")} onClick={() => void updateGuide({ dismissed: true })}><X aria-hidden="true" /></button></header>
         <ul>{guide.steps.map(step => <li key={step.id}>
+          <button type="button" role="checkbox" aria-checked={step.completed} aria-label={t(`guide.${step.id}`)} disabled={pending}
+            className="homeGuideCheckbox" onClick={() => void updateGuide({ manualSteps: { [step.id]: !step.completed } })}>
+            {step.completed ? <Check aria-hidden="true" /> : <Circle aria-hidden="true" />}
+          </button>
           <Link to={step.id === "issue" && step.completed ? `${base}/work/mine` : destinations[step.id]}>
-            {step.completed ? <Check aria-label={t("guide.completed")} /> : <Circle aria-hidden="true" />}
             <span><strong>{t(`guide.${step.id}`)}</strong><small>{t(`guide.${step.id}Description`)}</small></span>
           </Link>
         </li>)}</ul>
