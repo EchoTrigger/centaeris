@@ -49,6 +49,17 @@ class OperationFixture:
 
 
 class HostedOperationTests(OperationFixture, TestCase):
+    def test_manual_placeholder_name_survives_first_message(self):
+        receipt = self.create().json()
+        session_id = receipt["sessionId"]
+        renamed = self.client.patch(f"/api/sessions/{session_id}", json.dumps({"title": "New chat"}), content_type="application/json")
+        self.assertEqual(renamed.status_code, 200)
+        accepted = self.post(url=f"{self.create_url}/{session_id}/messages")
+        self.assertEqual(accepted.status_code, 202)
+        session = Session.objects.get(pk=session_id)
+        self.assertEqual(session.title, "New chat")
+        self.assertEqual(session.titleRevision, 1)
+
     def test_create_response_loss_replays_immutable_receipt(self):
         first = self.create()
         self.assertEqual(first.status_code, 201, first.content)

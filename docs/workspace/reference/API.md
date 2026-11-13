@@ -996,9 +996,11 @@ Owners and administrators receive steps in this order: `models`, `materials`,
 current membership in an active workspace; missing membership returns
 `404 workspace_not_found`, including for platform operators.
 
-`PATCH` on the same URL requires the strict JSON body `{ "dismissed": true }`
-(or `false`) and CSRF, and returns the same envelope. Unknown fields, query
-parameters, missing fields and non-boolean values are rejected. The user is
+`PATCH` on the same URL accepts `dismissed` and/or `manualSteps` (for example
+`{ "manualSteps": { "materials": false } }`) and requires CSRF. It returns the
+same envelope. Unknown fields or step IDs, query parameters, empty requests and
+non-boolean values are rejected. Members cannot change administrator-only steps.
+Manual values, including false, persist and override automatic completion. The user is
 always the authenticated recipient. Dismissal persists independently for each
 user/workspace and survives application updates. Repeated identical PATCHes
 preserve the dismissal timestamp. GET never creates a state record.
@@ -1022,3 +1024,48 @@ Completion is recomputed from authoritative records:
 Invalid package metadata returns `503 plugin_catalog_invalid`; an enablement
 without an installation returns `409 workspace_plugin_enablement_invalid`.
 Failed completion checks or persistence do not acknowledge a dismissal.
+
+
+## Issue executions
+
+`POST /api/workspaces/{workspaceId}/issues/{issueId}/executions` accepts strict
+`{operationId, version, modelConfigRef, thinkingMode?}` and returns the existing
+202 hosted operation receipt (`submitMessage`, `sessionId`, `agentRunId`, `turnId`).
+It requires browser authentication, CSRF and current workspace membership. Issue
+version conflicts and archived Issues reject new acceptance. Replaying accepted
+input returns its original receipt despite later Issue edits; changed input
+conflicts. The immutable Issue snapshot, caller-owned interactive Session,
+AgentRun, authorization and receipt commit together. The shared message admission
+path owns execution and lifecycle scheduling. Issue status is not completed by
+starting or finishing an AgentRun.
+
+`GET` on the same URL accepts `limit` and `offset`, returning `{executions,total}`.
+Each entry contains `id`, `sessionId`, `agentRunId`, `title`, `status`, `createdAt`.
+Only the requesting user's accessible active, unarchived linked conversations are
+returned. Issue visibility does not grant access to another member's transcript.
+
+## Workspace model defaults
+
+`GET /api/workspaces/{workspaceId}/model-defaults` returns
+`{defaults:{titleModelConfigRef:null,titleThinkingMode:"low"}}` when unconfigured.
+`PATCH` accepts those two fields and returns the same envelope. Both operations
+require current owner/admin membership and browser authentication; PATCH also
+requires CSRF. References must select an available authorized current model and
+supported reasoning mode. Stored selection follows the same model family's
+revisions, never a different model or provider. Web exposes one optional
+**Default purpose** selector, using low reasoning (or no reasoning for models
+without that capability), independently of chat preferences.
+
+Null selection creates no title job or provider call. The first accepted message
+can create one asynchronous job after commit; it reads at most 2048 characters
+from that prompt, has no tools, and preserves its language/script. Queue wait and
+model generation share the three-second deadline. Expiry or failure retains the
+initial title. Clearing the selection, losing authority or manually renaming the
+session prevents pending publication. Successful title publication updates the
+existing navigation stream without changing session ordering. Existing named
+sessions are protected by the forward migration.
+
+The title worker runs `celery -A api.title_queue:app worker -Q session_titles`,
+using `MATERIAL_BROKER_URL` and its own queue. `SESSION_TITLE_TIMEOUT_SECONDS`
+defaults to 3. It requires the same database and credential-encryption settings
+as the API; it does not start agent execution environments.

@@ -4,6 +4,7 @@ from typing import Literal
 from django.db import transaction
 from django.utils import timezone
 from ninja import Router, Status
+from pydantic import Field, model_validator
 
 from app_core.models import AgentRun, Issue, McpBearerCredential, SourceObject, UserLibraryObject, UserWorkspaceGuideState
 from app_core.plugin_catalog import load_plugin_connector_resources, load_plugin_interfaces
@@ -20,8 +21,11 @@ from .security import session_auth
 router = Router(tags=["workspace guide"], by_alias=True)
 
 
+GuideStepId = Literal["models", "materials", "plugins", "connections", "conversation", "issue"]
+
+
 class GuideStep(StrictSchema):
-    id: Literal["models", "materials", "plugins", "connections", "conversation", "issue"]
+    id: GuideStepId
     completed: bool
 
 
@@ -35,7 +39,22 @@ class GuideEnvelope(StrictSchema):
 
 
 class GuidePatch(StrictSchema):
-    dismissed: bool
+    dismissed: bool = False
+    manual_steps: dict[GuideStepId, bool] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if "dismissed" not in self.model_fields_set and not self.manual_steps:
+            raise ValueError("A guide change is required")
+        return self
+
+
+def _guide(steps, state):
+    overrides = state.manualSteps if state else {}
+    return {"guide": {
+        "dismissed": state is not None and state.dismissedAt is not None,
+        "steps": [{**step, "completed": overrides.get(step["id"], step["completed"])} for step in steps],
+    }}
 
 
 def _steps(user, membership):
@@ -94,10 +113,8 @@ def get_guide(request, workspace_id: str):
     steps = _steps(request.user, membership)
     if isinstance(steps, Status):
         return steps
-    dismissed = UserWorkspaceGuideState.objects.filter(
-        user=request.user, workspace_id=workspace_id, dismissedAt__isnull=False,
-    ).exists()
-    return {"guide": {"dismissed": dismissed, "steps": steps}}
+    state = UserWorkspaceGuideState.objects.filter(user=request.user, workspace_id=workspace_id).first()
+    return _guide(steps, state)
 
 
 @router.patch("/workspaces/{workspace_id}/guide", auth=session_auth,
@@ -109,11 +126,19 @@ def update_guide(request, workspace_id: str, payload: GuidePatch):
             return Status(404, {"error": "workspace_not_found"})
         if request.GET:
             return Status(400, {"error": "workspace_guide_query_invalid"})
+        if membership.role not in WORKSPACE_ADMIN_ROLES and payload.manual_steps.keys() & {"models", "plugins", "connections"}:
+            return Status(403, {"error": "workspace_guide_step_forbidden"})
         steps = _steps(request.user, membership)
         if isinstance(steps, Status):
             return steps
         state, _ = UserWorkspaceGuideState.objects.get_or_create(user=request.user, workspace_id=workspace_id)
-        if (state.dismissedAt is not None) != payload.dismissed:
+        changed = []
+        if "dismissed" in payload.model_fields_set and (state.dismissedAt is not None) != payload.dismissed:
             state.dismissedAt = timezone.now() if payload.dismissed else None
-            state.save(update_fields=["dismissedAt"])
-        return {"guide": {"dismissed": payload.dismissed, "steps": steps}}
+            changed.append("dismissedAt")
+        if payload.manual_steps:
+            state.manualSteps = {**state.manualSteps, **payload.manual_steps}
+            changed.append("manualSteps")
+        if changed:
+            state.save(update_fields=changed)
+        return _guide(steps, state)

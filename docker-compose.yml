@@ -420,6 +420,24 @@ services:
       - ALL
     pids_limit: 64
 
+  title-worker:
+    image: centaeris-workspace-agent-api
+    entrypoint: ["celery", "-A", "api.title_queue:app", "worker", "-Q", "session_titles", "--concurrency=2", "--loglevel=WARNING"]
+    restart: unless-stopped
+    environment:
+      <<: *api-environment
+      POSTGRES_APPLICATION_NAME: centaeris-title-worker
+    depends_on:
+      api-init:
+        condition: service_completed_successfully
+      material-broker:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+
   gc:
     image: centaeris-workspace-agent-api
     entrypoint: ["sh", "/app/packages/workspace/api/gc-entrypoint.sh"]

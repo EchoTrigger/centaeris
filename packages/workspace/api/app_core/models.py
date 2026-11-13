@@ -559,6 +559,7 @@ class UserWorkspaceGuideState(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE)
     dismissedAt = models.DateTimeField(null=True, blank=True)
+    manualSteps = models.JSONField(default=dict)
 
     class Meta:
         constraints = [models.UniqueConstraint(
@@ -628,6 +629,22 @@ class WorkspaceGroup(models.Model):
     def save(self, *args, **kwargs):
         require_enum("WorkspaceGroup.kind", self.kind, WORKSPACE_GROUP_KINDS)
         return super().save(*args, **kwargs)
+
+
+class WorkspaceModelDefaults(models.Model):
+    workspace = models.OneToOneField("Workspace", on_delete=models.CASCADE)
+    titleModelConfig = models.ForeignKey("ModelConfig", null=True, blank=True, on_delete=models.PROTECT)
+    titleThinkingMode = models.CharField(max_length=64, default="low", blank=True)
+
+
+class SessionTitleJob(models.Model):
+    session = models.OneToOneField("Session", on_delete=models.CASCADE)
+    firstRun = models.ForeignKey("AgentRun", on_delete=models.CASCADE)
+    titleRevision = models.PositiveBigIntegerField()
+    modelConfig = models.ForeignKey("ModelConfig", null=True, on_delete=models.PROTECT)
+    thinkingMode = models.CharField(max_length=64, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=16, default="pending")
 
 
 class ModelProvider(models.Model):
@@ -971,6 +988,7 @@ class Session(models.Model):
         null=True, blank=True, editable=False,
     )
     title = models.CharField(max_length=200, default="New chat")
+    titleRevision = models.PositiveBigIntegerField(default=0, db_default=0)
     origin = models.CharField(max_length=32, default="user")
     status = models.CharField(max_length=32, default="active")
     archivedAt = models.DateTimeField(null=True, blank=True)
@@ -2795,3 +2813,23 @@ class IssueNotification(models.Model):
             models.UniqueConstraint(fields=["event", "recipient"], name="notification_event_recipient_unique"),
             models.CheckConstraint(condition=models.Q(kind__in=["assigned", "statusChanged"]), name="notification_kind_valid"),
         ]
+
+
+class IssueExecution(models.Model):
+    # One accepted run has one immutable Issue origin, separate from live Issue edits.
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="executions")
+    issuer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name="issued_issue_executions")
+    session = models.OneToOneField(Session, on_delete=models.CASCADE, related_name="issue_execution")
+    agent_run = models.OneToOneField(AgentRun, on_delete=models.CASCADE, related_name="issue_execution")
+    issueVersion = models.PositiveIntegerField()
+    issueTitle = models.CharField(max_length=240)
+    issueDescription = models.TextField(blank=True, default="")
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["issue", "issuer", "-createdAt", "id"],
+            name="issue_execution_owner_created")]
+        constraints = [models.CheckConstraint(condition=models.Q(issueVersion__gte=1),
+            name="issue_execution_version_positive")]

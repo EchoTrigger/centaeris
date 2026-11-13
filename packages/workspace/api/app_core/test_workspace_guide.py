@@ -109,7 +109,55 @@ class WorkspaceGuideTests(TestCase):
             for status in (200, 400, 401, 403, 404, 503):
                 self.assertIn(status, path[method]["responses"])
         self.assertFalse(schema["components"]["schemas"]["GuidePatch"]["additionalProperties"])
-        self.assertEqual(schema["components"]["schemas"]["GuidePatch"]["required"], ["dismissed"])
+        self.assertNotIn("required", schema["components"]["schemas"]["GuidePatch"])
+        self.assertIn("manualSteps", schema["components"]["schemas"]["GuidePatch"]["properties"])
+
+    def test_manual_steps_override_real_data_and_survive_restore_and_new_client(self):
+        Issue.objects.create(workspace=self.workspace, creator=self.user, title="Existing")
+        self.assertTrue(self.steps()["issue"])
+        response = self.update({"manualSteps": {"issue": False, "materials": True}})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(self.steps()["issue"])
+        self.assertTrue(self.steps()["materials"])
+        Issue.objects.create(workspace=self.workspace, creator=self.user, title="Another")
+        self.update({"dismissed": True})
+        self.update({"manualSteps": {"conversation": True}})
+        self.assertTrue(self.guide()["dismissed"])
+        self.update({"dismissed": False})
+        fresh = Client()
+        fresh.force_login(self.user)
+        steps = {step["id"]: step["completed"] for step in fresh.get(self.url).json()["guide"]["steps"]}
+        self.assertFalse(steps["issue"])
+        self.assertTrue(steps["materials"])
+        self.assertTrue(steps["conversation"])
+        self.assertEqual(self.update({"manualSteps": {"issue": True}}).status_code, 200)
+        self.assertTrue(self.steps()["issue"])
+        self.assertEqual(Issue.objects.filter(workspace=self.workspace).count(), 2)
+        self.assertFalse(AgentRun.objects.exists())
+        self.assertFalse(UserLibraryObject.objects.exists())
+        self.client.force_login(self.other)
+        self.assertFalse(self.steps()["materials"])
+        self.client.force_login(self.user)
+        other = self.client.get(f"/api/workspaces/{self.other_workspace.pk}/guide").json()["guide"]
+        self.assertFalse(any(step["completed"] for step in other["steps"]))
+
+    def test_manual_step_schema_and_admin_authority(self):
+        for payload in ({"manualSteps": {}}, {"manualSteps": None}, {"manualSteps": []},
+                        {"manualSteps": {"unknown": True}}, {"manualSteps": {"issue": 1}},
+                        {"manualSteps": {"issue": "false"}}, {"manualSteps": {"issue": None}},
+                        {"manual_steps": {"issue": True}}):
+            self.assertEqual(self.update(payload).status_code, 400, payload)
+        self.assertFalse(UserWorkspaceGuideState.objects.exists())
+        self.assertEqual(self.update({"manualSteps": {"models": True}}).status_code, 200)
+        self.member.role = "member"
+        self.member.save()
+        self.assertNotIn("models", self.steps())
+        for step in ("models", "plugins", "connections"):
+            self.assertEqual(self.update({"dismissed": True, "manualSteps": {step: False, "issue": True}}).status_code, 403)
+        state = UserWorkspaceGuideState.objects.get(user=self.user, workspace=self.workspace)
+        self.assertEqual(state.manualSteps, {"models": True})
+        self.assertIsNone(state.dismissedAt)
+        self.assertEqual(self.update({"manualSteps": {"issue": True}}).status_code, 200)
 
     def test_models_require_real_enabled_current_workspace_provider_and_credential(self):
         ModelConfig.objects.create()

@@ -417,7 +417,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
             compose_config(API_POSTGRES_POOL_MAX_SIZE="0")["services"]["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"],
             "0",
         )
-        for service in ("api-init", "material-worker", "material-scheduler", "gc", "mail-sender"):
+        for service in ("api-init", "material-worker", "material-scheduler", "title-worker", "gc", "mail-sender"):
             with self.subTest(service=service):
                 self.assertNotIn("API_POSTGRES_POOL_MAX_SIZE", services[service]["environment"])
                 self.assertNotEqual(services[service]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")

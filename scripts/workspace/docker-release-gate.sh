@@ -154,9 +154,9 @@ values = {"ENVIRONMENT_EXECUTION_HELPER": str(root / "execution_agent"),
 path.write_text("\n".join(f"{key}={values[key]}" if (key := line.partition("=")[0]) in values else line
                           for line in path.read_text().splitlines()) + "\n")
 PY
-"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime platform-reconciler material-worker material-scheduler web
+"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime platform-reconciler material-worker material-scheduler title-worker web
 
-for service in postgres redis api runtime platform-reconciler material-broker material-worker material-scheduler web; do
+for service in postgres redis api runtime platform-reconciler material-broker material-worker material-scheduler title-worker web; do
   "${compose[@]}" ps --status running --services | grep -Fx "$service" >/dev/null
 done
 
