@@ -51,7 +51,8 @@
 .workBreadcrumb li + li { margin-left:9px; }
 .workBreadcrumb li:first-child { flex:none; }
 .workBreadcrumb a,.workHeader .workBreadcrumb h1 { font:inherit; font-weight:500; color:inherit; }
-.workBreadcrumb a:hover { text-decoration:underline; text-underline-offset:3px; }
+.workBreadcrumb a { text-decoration:none; }
+.workBreadcrumb a:hover { text-decoration:none; color:var(--on-surface); }
 .workBreadcrumb a,.workBreadcrumb [aria-current="page"] { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .workBreadcrumbSeparator { flex:none; color:var(--process-text); }
 .workBreadcrumbCurrent { font-weight:400; }
