@@ -74,7 +74,7 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
   }
   return <section className="issueExecutions" aria-busy={pending}>
     <header className="issueExecutionsHeader"><h2>{t("issues.conversations")}</h2><div className="issueExecutionActions">
-      {executions.length ? <Button variant="ghost" size="icon" aria-label={t("issues.refreshExecutions")} title={t("issues.refreshExecutions")} disabled={pending} onClick={() => { setError(null); setRevision(value => value + 1); }}><RefreshCw aria-hidden="true" /></Button> : null}
+      {executions.length ? <Button variant="ghost" size="icon" aria-label={t("issues.refreshExecutions")} disabled={pending} onClick={() => { setError(null); setRevision(value => value + 1); }}><RefreshCw aria-hidden="true" /></Button> : null}
       {!issue.archivedAt ? <Button variant="ghost" className="issueExecutionNew" aria-expanded={expanded} disabled={pending} onClick={() => setExpanded(value => !value)}><Plus aria-hidden="true" />{t(executions.length ? "issues.newExecution" : "issues.runWithAgent")}</Button> : null}
     </div></header>
     {expanded && !issue.archivedAt ? <form className="issueExecutionForm" onSubmit={event => { event.preventDefault(); void launch(); }}>
@@ -96,7 +96,7 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
       const next = new URLSearchParams(previous);
       if (activeExecution === execution.id) next.delete("execution"); else next.set("execution", execution.id);
       return next;
-    }, { replace: true })}><MessagesSquare aria-hidden="true" /><span>{execution.title}</span><ChevronDown aria-hidden="true" /></Button><Link to={sessionChatPath(workspaceId, execution.sessionId)}><span>{t(execution.waitingForInput ? "issues.answerAgent" : "issues.continueConversation")}</span><small>{t(execution.waitingForInput ? "issues.execution.waitingForInput" : `issues.execution.${execution.status}`)}</small></Link></div>{activeExecution === execution.id ? <ExecutionResults key={`${execution.id}:${revision}`} endpoint={`${endpoint}/${encodeURIComponent(execution.id)}`} execution={execution} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={onChanged} /> : null}</li>)}</ul>
+    }, { replace: true })}><MessagesSquare aria-hidden="true" /><span>{execution.title}</span><ChevronDown aria-hidden="true" /></Button><Link to={sessionChatPath(workspaceId, execution.sessionId)}><span>{t(execution.waitingForInput ? "issues.answerAgent" : "issues.continueConversation")}</span>{execution.waitingForInput || execution.status !== "completed" ? <small>{t(execution.waitingForInput ? "issues.execution.waitingForInput" : `issues.execution.${execution.status}`)}</small> : null}</Link></div>{activeExecution === execution.id ? <ExecutionResults key={`${execution.id}:${revision}`} endpoint={`${endpoint}/${encodeURIComponent(execution.id)}`} execution={execution} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={onChanged} /> : null}</li>)}</ul>
       {executions.length < total ? <Button variant="ghost" disabled={pending} onClick={async () => {
         setPending(true); setError(null);
         try { const result = await apiJson(`${endpoint}?limit=20&offset=${executions.length}`); if (mounted.current) { setExecutions(items => [...items, ...result.executions]); setTotal(result.total); } }
@@ -127,11 +127,11 @@ function ExecutionResults({ endpoint, execution, workspaceId, userId, issue, onC
     {error ? <p role="alert">{error}</p> : null}
     {loading ? <p role="status">{t("agentChat.loading")}</p> : null}
     {data.runs.map(run => <article key={run.id}>
-      <small>{t(execution.waitingForInput && execution.latestAgentRunId === run.id ? "issues.execution.waitingForInput" : `issues.execution.${run.status}`, { defaultValue: run.status })}</small>
+      {run.status !== "completed" || (execution.waitingForInput && execution.latestAgentRunId === run.id) ? <small>{t(execution.waitingForInput && execution.latestAgentRunId === run.id ? "issues.execution.waitingForInput" : `issues.execution.${run.status}`, { defaultValue: run.status })}</small> : null}
       {run.summary ? <MarkdownContent text={`${run.summary}${run.summaryTruncated ? "…" : ""}`} /> : null}
       <ol>{run.activity.map(activity => <li key={activity.id}><p>{activity.text}{activity.textTruncated ? "…" : ""}</p><time dateTime={activity.createdAt}>{new Date(activity.createdAt).toLocaleString()}</time></li>)}</ol>
       {run.artifacts.length ? <ul>{run.artifacts.map(artifact => <li key={artifact.id}><a href={artifact.downloadUrl} download>{artifact.displayName}</a></li>)}</ul> : null}
-      {!issue.archivedAt && (run.summary || run.artifacts.length) ? <Button variant="ghost" aria-expanded={submittingRun === run.id} onClick={() => setSubmittingRun(value => value === run.id ? "" : run.id)}>{t("deliverables.submit")}</Button> : null}
+      {!issue.archivedAt && (run.summary || run.artifacts.length) ? <Button variant="solid" className="issueSubmitDeliverable" aria-expanded={submittingRun === run.id} onClick={() => setSubmittingRun(value => value === run.id ? "" : run.id)}>{t("deliverables.submit")}</Button> : null}
       {submittingRun === run.id ? <DeliverableSubmit key={run.id} workspaceId={workspaceId} userId={userId} issue={issue} executionId={execution.id} run={run} onChanged={onChanged} onCancel={() => setSubmittingRun("")} /> : null}
     </article>)}
     {data.runs.length < data.total ? <Button variant="ghost" disabled={loading} onClick={() => void more()}>{t("issues.moreResults")}</Button> : null}

@@ -594,8 +594,6 @@ button.agent-operation-summary:focus-visible { outline: 1px solid var(--outline)
 .workspaceComposerControlGroup { display: flex; min-width: 0; align-items: center; gap: 2px; }
 .workspaceComposerControlGroup.isRuntime { justify-content: flex-end; margin-left: auto; }
 .workspaceComposerControl { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; }
-.workspaceComposerControl::after { position: absolute; z-index: 20; bottom: calc(100% + 7px); left: 50%; border-radius: 5px; background: var(--solid-surface); color: var(--solid-text); content: attr(data-tooltip); opacity: 0; padding: 5px 7px; font-size: 10px; line-height: 1; pointer-events: none; transform: translateX(-50%) translateY(2px); transition: opacity 100ms ease, transform 100ms ease; white-space: nowrap; }
-.workspaceComposerControl:hover::after, .workspaceComposerControl:focus-within::after { opacity: 1; transform: translateX(-50%) translateY(0); }
 .workspaceComposerControl.isPending { width: 28px; height: 28px; border-radius: 6px; color: color-mix(in srgb, var(--on-surface-variant) 54%, transparent); }
 .workspaceComposerControl.isPending:hover { color: var(--on-surface-variant); }
 .workspaceComposerControl.isPending > svg { width: 15px; height: 15px; }

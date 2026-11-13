@@ -75,7 +75,7 @@ export function DeliverableSubmit({ workspaceId, userId, issue, executionId, run
       <option value="">{t("deliverables.newSubmission")}</option>{revisions.map(item => <option key={item.id} value={item.id}>{t("deliverables.revision", { revision: item.revision })}</option>)}
     </select></label> : null}
     {error ? <div role="alert" className="issueExecutionError"><span>{failureMessage(error, t)}</span><Button type="button" variant="ghost" disabled={pending} onClick={onChanged}>{t("issues.reload")}</Button></div> : null}
-    <footer><Button type="button" variant="ghost" disabled={pending} onClick={onCancel}>{t("issues.cancel")}</Button><Button type="submit" variant="ghost" disabled={pending || loading || !selectedRecipient || (!summary.trim() && !artifactIds.length)}>{t("deliverables.submit")}</Button></footer>
+    <footer><Button type="button" variant="ghost" disabled={pending} onClick={onCancel}>{t("issues.cancel")}</Button><Button type="submit" variant="solid" className="issueSubmitDeliverable" disabled={pending || loading || !selectedRecipient || (!summary.trim() && !artifactIds.length)}>{t("deliverables.submit")}</Button></footer>
   </form>;
 }
 

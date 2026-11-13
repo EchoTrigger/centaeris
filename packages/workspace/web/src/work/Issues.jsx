@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { Button } from "@centaeris/ui/button";
-import { Archive, Ellipsis, Pencil, Plus, UserRound } from "lucide-react";
+import { Archive, ChevronRight, Ellipsis, Pencil, Plus, UserRound } from "lucide-react";
 import { Menu } from "@centaeris/ui/primitives/menu";
 import { apiJson, jsonOptions } from "../api";
 import { useTranslation } from "../i18n";
@@ -89,7 +89,7 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
     </> : data ? <div className={`issueDetail ${detail && !editing ? "isReading" : ""}`}>
       {creating || editing ? <IssueForm key={issue?.version || "new"} issue={issue} assignees={assignees} defaultAssigneeId={mine ? userId : null} templates={templates} initialTemplateKey={params.get("template") || ""} pending={pending} onSave={mutate} onCancel={() => creating ? navigate(listUrl) : setEditing(false)} /> : issue ? <>
         <div className="issueHeading"><h1>{issue.title}</h1><div className="issueActions">
-          <Button variant="ghost" size="icon" aria-label={t("issues.edit")} title={t("issues.edit")} onClick={() => setEditing(true)}><Pencil aria-hidden="true" /></Button>
+          <Button variant="ghost" size="icon" aria-label={t("issues.edit")} onClick={() => setEditing(true)}><Pencil aria-hidden="true" /></Button>
           <Menu.Root modal={false}><Menu.Trigger className="issueMoreActions" aria-label={t("issues.moreActions")}><Ellipsis aria-hidden="true" /></Menu.Trigger>
             <Menu.Portal><Menu.Positioner className="workMenuPositioner" align="end" sideOffset={5}><Menu.Popup className="workMenu">
               <Menu.Item className="workMenuItem" disabled={pending} onClick={() => void mutate({ archived: !issue.archivedAt })}><Archive aria-hidden="true" /><span>{t(issue.archivedAt ? "issues.restore" : "issues.archive")}</span></Menu.Item>
@@ -110,7 +110,7 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
           <IssueDeliverables workspaceId={workspaceId} userId={userId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
         </div>
       </> : null}
-      {issue ? <details className="issueActivity"><summary>{t("issues.activity")}</summary><ol>{events.events.map(event => <li key={event.id}><div><span>{event.actor.name}</span><span>{t(`issues.event.${event.type}`)}</span><time dateTime={event.createdAt}>{time(event.createdAt)}</time></div>{Object.entries(event.changes).filter(([field]) => field !== "deliverableId").map(([field, change]) => <p key={field}>{t(`issues.field.${field}`)}: <span>{fieldValue(field, change.before)}</span> → <span>{fieldValue(field, change.after)}</span></p>)}</li>)}</ol>{events.events.length < events.total ? <Button variant="ghost" disabled={pending} onClick={async () => { setPending(true); setError(null); try { const next = await apiJson(`${root}/${encodeURIComponent(issueId)}/events?limit=${pageSize}&offset=${events.events.length}`); if (mounted.current) setEvents(previous => ({ ...next, events: [...previous.events, ...next.events] })); } catch (failure) { if (mounted.current) setError(failure); } finally { if (mounted.current) setPending(false); } }}>{t("issues.moreActivity")}</Button> : null}</details> : null}
+      {issue ? <details className="issueActivity"><summary><ChevronRight aria-hidden="true" />{t("issues.activity")}</summary><ol>{events.events.map(event => <li key={event.id}><div><span>{event.actor.name}</span><span>{t(`issues.event.${event.type}`)}</span><time dateTime={event.createdAt}>{time(event.createdAt)}</time></div>{Object.entries(event.changes).filter(([field]) => field !== "deliverableId").map(([field, change]) => <p key={field}>{t(`issues.field.${field}`)}: <span>{fieldValue(field, change.before)}</span> → <span>{fieldValue(field, change.after)}</span></p>)}</li>)}</ol>{events.events.length < events.total ? <Button variant="ghost" disabled={pending} onClick={async () => { setPending(true); setError(null); try { const next = await apiJson(`${root}/${encodeURIComponent(issueId)}/events?limit=${pageSize}&offset=${events.events.length}`); if (mounted.current) setEvents(previous => ({ ...next, events: [...previous.events, ...next.events] })); } catch (failure) { if (mounted.current) setError(failure); } finally { if (mounted.current) setPending(false); } }}>{t("issues.moreActivity")}</Button> : null}</details> : null}
     </div> : null}
   </section>;
 }

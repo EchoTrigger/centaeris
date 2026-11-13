@@ -41,7 +41,7 @@ test("Issue starts a real operation with selected model and opens the accepted c
 test("existing execution links open the same persisted conversation", async () => {
   vi.mocked(apiJson).mockResolvedValue({ executions: [{ id: "execution", sessionId: "existing", agentRunId: "run", title: "审核资料", status: "completed", createdAt: "2026-11-13T01:00:00Z" }], total: 1 });
   const router = mount(); const user = userEvent.setup();
-  await user.click(await screen.findByRole("link", { name: /Continue conversation/ }));
+  await user.click(await screen.findByRole("link", { name: "Continue conversation" }));
   await screen.findByText("Conversation opened");
   expect(router.state.location.pathname).toBe("/w/one/sessions/existing");
 });
@@ -54,6 +54,7 @@ test("a returned Issue opens the selected execution's latest results without sub
   });
   mount("/issue?execution=execution");
   await screen.findByText("Revised analysis");
+  expect(screen.queryByText("Completed", { exact: true })).toBeNull();
   expect(screen.queryByRole("textbox", { name: /Summary/ })).toBeNull();
   expect(vi.mocked(apiJson).mock.calls.every(([, options]) => !options?.method)).toBe(true);
 });

@@ -32,7 +32,10 @@
 .issueFormProperties,.issueForm footer,.issuePagination { display:flex; gap:12px; align-items:center; }
 .issueForm footer,.issuePagination { justify-content:flex-end; }
 .issueActivity { grid-column:1; min-width:0; margin-top:28px; }
-.issueActivity > summary { width:fit-content; color:var(--process-text); font-size:12px; cursor:pointer; padding-block:5px; }
+.issueActivity > summary { display:flex; align-items:center; gap:6px; width:fit-content; color:var(--process-text); font-size:12px; cursor:pointer; padding-block:5px; list-style:none; }
+.issueActivity > summary::-webkit-details-marker { display:none; }
+.issueActivity > summary > svg { width:12px; height:12px; }
+.issueActivity[open] > summary > svg { transform:rotate(90deg); }
 .issueActivity ol { list-style:none; padding:0; }
 .issueActivity li { padding:12px 0; font-size:13px; overflow-wrap:anywhere; }
 .issueActivity li > div { display:flex; gap:8px; flex-wrap:wrap; }

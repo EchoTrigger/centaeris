@@ -18,10 +18,10 @@ export function AttachmentCard({ attachment, imageUrl, onPreview, onRemove, unav
   const Content = onPreview && !unavailable ? "button" : "div";
   return (
     <div className={`attachmentCard ${className} ${image ? "isImage" : "isFile"} ${failed ? "isUnavailable" : ""}`}>
-      <Content className="attachmentCardContent" title={name} aria-label={onPreview && !unavailable ? t("attachmentCard.previewValue", { value1: name }) : name} {...(Content === "button" ? { type: "button", onClick: onPreview } : {})}>
+      <Content className="attachmentCardContent" aria-label={onPreview && !unavailable ? t("attachmentCard.previewValue", { value1: name }) : name} {...(Content === "button" ? { type: "button", onClick: onPreview } : {})}>
         {image ? source && !failed ? <img src={source} alt="" loading="lazy" decoding="async" onError={() => setFailedSource(source)} /> : <><ImageOff aria-hidden="true" /><small>{failed ? t("attachmentCard.imageUnavailable") : t("attachmentCard.image")}</small></> : <><Icon aria-hidden="true" /><small>{failed ? t("attachmentCard.unavailable") : label}</small><span className="attachmentCardName">{name}</span></>}
       </Content>
-      {onRemove ? <button className="attachmentCardRemove" type="button" onClick={onRemove} aria-label={t("attachmentCard.removeValueFromThisMessage", { value1: name })} title={t("attachmentCard.removeValue", { value1: name })}><X aria-hidden="true" /></button> : null}
+      {onRemove ? <button className="attachmentCardRemove" type="button" onClick={onRemove} aria-label={t("attachmentCard.removeValueFromThisMessage", { value1: name })}><X aria-hidden="true" /></button> : null}
     </div>
   );
 }
