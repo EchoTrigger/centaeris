@@ -85,10 +85,11 @@ For example, GET on `/internal/jobs/claim` reads the identity `claim`, while POS
 on that path is the claim operation.
 
 Deterministic workspace node, archive or budget failures retain the original
-environment and mark the canonical lifecycle Job `failed` with
+environment and pause the canonical lifecycle Job as `queued` with
 `lastError=workspace_preservation_blocked`. Automatic cleanup claims exclude that
-marker. An administrator can acknowledge a completed repair with an authenticated
-POST to the preservation retry route using exactly
+marker. This pending cleanup is not a terminal Job fact and does not publish a
+terminal outbox generation. An administrator can acknowledge a completed repair
+with an authenticated POST to the preservation retry route using exactly
 `{"schema":"runtime.job.workspace_preservation.retry.v1","jobId":"agent_run.lifecycle:<runId>"}`.
 The operation requires the original signed authorization binding, committed
 terminal Run facts, the still-held original environment and allocation, and no

@@ -48,12 +48,22 @@ fn postgres_workspace_preservation_blocks_automatic_claims_until_same_job_repair
         .block_workspace_preservation(&run.fence.job_id, &run.fence.lease_owner)
         .unwrap();
     let original = store.get_runtime_job(&run.fence.job_id).unwrap().unwrap();
-    assert_eq!(original.status, RuntimeJobStatus::Failed);
+    assert_eq!(original.status, RuntimeJobStatus::Queued);
     assert_eq!(
         original.last_error.as_deref(),
         Some("workspace_preservation_blocked")
     );
     assert!(original.lease_owner.is_none());
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.runtime_job_outbox WHERE job_id=$1",
+            &[&run.fence.job_id]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0,
+        "paused preservation is not a terminal Job fact"
+    );
     assert_eq!(
         db.query_one(
             "SELECT \"transitionReason\" FROM public.app_core_agentrun WHERE id=$1",

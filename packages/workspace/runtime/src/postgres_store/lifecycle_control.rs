@@ -165,7 +165,7 @@ impl PostgresRuntimeStore {
                 return Err("workspace_preservation_block_lease_rejected".into());
             }
             mark_terminal_pending(&mut tx, &run)?;
-            tx.execute("UPDATE runtime_jobs SET status='failed',last_error='workspace_preservation_blocked',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,lease_owner=NULL,lease_expires_at_ms=NULL WHERE job_id=$1", &[&id]).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE runtime_jobs SET status='queued',last_error='workspace_preservation_blocked',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,lease_owner=NULL,lease_expires_at_ms=NULL WHERE job_id=$1", &[&id]).map_err(|error| error.to_string())?;
             tx.execute("UPDATE public.app_core_agentrun SET \"transitionReason\"='workspace_preservation_blocked' WHERE id=$1", &[&run]).map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())
         })
@@ -178,7 +178,7 @@ impl PostgresRuntimeStore {
             let mut tx = client.transaction().map_err(|error| error.to_string())?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
             let run = lock_preservation_target(&mut tx, id)?;
-            let row = tx.query_opt("SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND status='failed' AND last_error='workspace_preservation_blocked' AND lease_owner IS NULL AND lease_expires_at_ms IS NULL FOR UPDATE", &[&id]).map_err(|error| error.to_string())?;
+            let row = tx.query_opt("SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND status='queued' AND last_error='workspace_preservation_blocked' AND lease_owner IS NULL AND lease_expires_at_ms IS NULL FOR UPDATE", &[&id]).map_err(|error| error.to_string())?;
             if row.is_none() {
                 return Err("workspace_preservation_retry_rejected".into());
             }
