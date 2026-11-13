@@ -259,7 +259,6 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
           </Link>
         </li>;
       })}</ul>
-        {plugins?.length > 0 && plugins.every(plugin => plugin.mcpServers?.length === 0 && !plugin.errors.length) ? <p className="catalogEmpty">{t("catalog.noConnections")}</p> : null}
     </div> : <>
       <ul className="catalogRows">{(plugins || []).map(plugin => <li key={plugin.name}>
         <Link to={`${catalog.base}?plugin=${encodeURIComponent(plugin.name)}`} aria-current={catalog.selectedName === plugin.name ? "true" : undefined}>
@@ -378,14 +377,14 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
           {catalog.view === "plugins" && uploadControl ? <div className="globalPluginUpload extensionUpload">{uploadControl}</div> : null}
         </header>
         {catalog.navigation}
+        {filter && plugins && !visiblePlugins.length && !error && !catalog.selectedName ? <small role="status">{t("common.resultCount", { count: visiblePlugins.length })}</small> : null}
       </> : uploadControl ? <div className="globalPluginUpload pluginPackageUpload">{uploadControl}{uploadHints}</div> : null}
+      {!catalog && filter && plugins && !visiblePlugins.length && !error ? <small role="status">{t("common.resultCount", { count: visiblePlugins.length })}</small> : null}
       {notice ? <p className="globalPluginNotice" role="status">{notice}</p> : null}
       {error ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.unableToLoadPlugin")}{error}</div> : null}
       {canManage && credentialError ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.credentialActionFailed")}{credentialError} <button className="pluginEnableButton" type="button" disabled={Boolean(busyCredential)} onClick={() => setCredentialRevision((value) => value + 1)}>{t("pluginSettings.reloadCredentials")}</button></div> : null}
       {plugins === null && !error ? <div className="capabilitySettingsEmpty">{t("pluginSettings.loadingPlugins")}</div> : null}
-      {plugins?.length === 0 && !error && !catalog?.selectedName ? <div className="capabilitySettingsEmpty">{t("pluginSettings.thisDistributionHasNoPlugins")}</div> : null}
       {plugins && catalog?.selectedName && !selected ? <div className="capabilitySettingsEmpty" role="status">{t("extensions.pluginNotFound")}</div> : null}
-      {plugins?.length > 0 && visiblePlugins.length === 0 && !catalog?.selectedName ? <div className="capabilitySettingsEmpty" role="status">{t("extensions.noMatches")}</div> : null}
       {catalog ? <div className={`catalogWorkspace${catalog.selectedName ? " hasDetail" : ""}`}>
         {directory}
         {catalog.selectedName ? <CatalogDetailView backLabel={t(catalog.view === "connections" ? "catalog.backToConnections" : "extensions.backToPlugins")} title={selected?.displayName || catalog.selectedName} backTo={catalog.view === "connections" ? `${catalog.base}?view=connections` : catalog.base}>

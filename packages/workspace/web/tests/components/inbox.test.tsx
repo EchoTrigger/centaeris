@@ -49,7 +49,13 @@ test("server receipts drive read, unread, archive and restore while selected unr
   await user.click(screen.getByRole("button", { name: "Archived", exact: true }));
   await user.click(await list().findByRole("button", { name: /Review evidence/ }));
   await user.click(await screen.findByRole("button", { name: "Restore to inbox" }));
-  await screen.findByText("No archived notifications");
+  await waitFor(() => {
+    expect(notification.archivedAt).toBeNull();
+    expect(screen.getByRole("button", { name: "Archive notification" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("region", { name: "Notifications" }).getAttribute("aria-busy")).toBe("false");
+    expect(list().queryByRole("button", { name: /Review evidence/ })).toBeNull();
+  });
+  expect(screen.getByRole("button", { name: "Archived", exact: true }).getAttribute("aria-pressed")).toBe("true");
   expect(patches).toContainEqual({ archived: true }); expect(patches).toContainEqual({ archived: false });
   expect(router.state.location.search).toContain("notification=notice");
 });

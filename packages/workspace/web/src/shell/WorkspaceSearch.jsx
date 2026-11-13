@@ -202,6 +202,7 @@ export function WorkspaceSearch({ workspaceId, onClose, inputRef }) {
       {[["all", t("libraryRoute.all")], ["conversations", t("searchOverlay.conversations")], ["library", t("libraryObjectRoute.library")]].map(([key, label]) => (
         <button type="button" aria-pressed={key === filter} key={key} onClick={() => { updateQuery(query, key); setSelectedIndex(0); }}>{label}</button>
       ))}
+      {text && !results.length && !failed && !loading ? <small role="status">{t("common.resultCount", { count: results.length })}</small> : null}
     </div>
     <div className="shSearchResults" ref={resultsRef} id={listId} role="listbox" aria-label={t("searchOverlay.searchResults")}>
       {groups.map(({ label, icon: Icon, results: groupResults }) => groupResults.length ? (
@@ -232,9 +233,6 @@ export function WorkspaceSearch({ workspaceId, onClose, inputRef }) {
       }}>{t("agentChat.retry")}</button>
     </div> : null}
     {text && loading ? <p className="shSearchNotice" role="status">{t("agentChat.loading")}</p> : null}
-    {!text || (!results.length && !failed && !loading) ? <div className="shSearchEmpty" role="status">
-      <strong>{t(text ? "searchOverlay.noMatchingResults" : "libraryRoute.search")}</strong>
-      {!text ? <span>{t("searchOverlay.enterKeywordsToSearch")}</span> : null}
-    </div> : null}
+
   </section>;
 }

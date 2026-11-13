@@ -1,0 +1,10 @@
+:root, :root :where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+:root:hover, :root[data-scroll-active], :root :where(:hover, [data-scroll-active]) {
+  scrollbar-color: color-mix(in srgb, var(--process-text) 42%, transparent) transparent;
+}
+@media (forced-colors: active) {
+  :root, :root :where(*) { scrollbar-color: auto; }
+}

@@ -4,6 +4,7 @@
 @import "./styles/typography.css";
 @import "./styles/status-shimmer.css";
 @import "./shell/shell.css";
+@import "./styles/scrollbars.css";
 
 @font-face {
   font-family: "Google Sans Code";

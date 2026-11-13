@@ -27,6 +27,7 @@ export function LibraryTemplatesDialog({ onClose, onCreateNote, onUpload }) {
       <header className="shPrivateCreateHeader">
         <div><button className="quietCloseButton" type="button" aria-label={t("shellSidebar.closeAddMenu")} onClick={onClose}><X aria-hidden="true" /></button><span>{t("libraryRoute.addTo")}</span><strong><LockKeyhole aria-hidden="true" />{t("agentRoute.private")}</strong></div>
         <label><Search aria-hidden="true" /><input autoFocus aria-label={t("shellSidebar.searchTemplates")} placeholder={t("libraryRoute.search")} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        {normalizedQuery && !visibleTemplates.length ? <small role="status">{t("common.resultCount", { count: visibleTemplates.length })}</small> : null}
       </header>
       <div className="shPrivateCreateScroll">
         <div className="shPrivateCreateContent">
@@ -40,7 +41,6 @@ export function LibraryTemplatesDialog({ onClose, onCreateNote, onUpload }) {
               <span><strong>{template.name}</strong><small>{template.description}</small></span>
               <div className="shPrivateTemplatePreview" aria-hidden="true"><strong>{template.name}</strong>{template.preview.map((label) => <i key={label}><span /><em>{label}</em></i>)}</div>
             </button>)}
-            {!visibleTemplates.length ? <p>{t("shellSidebar.noMatchingTemplates")}</p> : null}
           </div>
         </div>
       </div>

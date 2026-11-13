@@ -53,6 +53,15 @@ scope. Storage restrictions retain usable state in the current document.
 
 ## Web interface roles
 
+Home owns the removable getting-started guide. Its steps link to real features,
+use server-reported completion and reflect the current member's role. Dismissal
+is stored per user and Workspace, changes only after server acknowledgement, and
+is restored explicitly through Home's Help menu. Navigation, refresh and releases
+do not reset it. Empty business lists keep their existing controls without empty
+state copy; active searches report a compact result count beside the query.
+Loading, errors and actionable configuration or authorization blockers remain
+separate feedback. Guide actions do not generate sample business records.
+
 This document defines the intended roles and host boundaries. Shared color defaults
 come from `packages/ui/src/theme.css`. Web overrides surface roles in its own
 `styles/theme.css`: rail, reading canvas, static cards, and raised/input surfaces

@@ -18,7 +18,7 @@ export default function WorkPrototypeRoute() {
   if (detail && page === "projects") return <Navigate to={`${base}/${page}`} replace />;
   return <div className="workPrototype">
     {page === "inbox" ? <WorkspaceInbox key={`${user.id}:${workspace.id}`} userId={user.id} workspaceId={workspace.id} />
-      : page === "home" ? <WorkHome workspace={workspace} />
+      : page === "home" ? <WorkHome key={`${user.id}:${workspace.id}`} workspace={workspace} />
       : ["tasks", "mine"].includes(page) ? <Issues key={`${workspace.id}:${page}:${detail || "list"}`} workspaceId={workspace.id} userId={user.id} mine={page === "mine"} issueId={detail} />
       : <header className="workHeader"><WorkBreadcrumb current={t(labels[page] || "work.myIssues")} /></header>}
   </div>;

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { createMemoryRouter, RouterProvider, useRouteLoaderData } from "react-router";
@@ -137,7 +137,9 @@ test("archive deletion confirms its scope and retries only conversations that fa
   expect(screen.queryByText("Draft brief")).toBeNull();
   expect(screen.getByText("Planning call")).toBeTruthy();
   await user.click(within(bulk).getByRole("button", { name: "appRoute.delete" }));
-  expect(await screen.findByText("archive.empty")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByRole("list")).toBeNull();
+  expect(screen.getByRole("heading", { name: "archive.title" })).toBeTruthy();
   expect(removed).toEqual(["/api/sessions/a", "/api/sessions/b", "/api/sessions/c", "/api/sessions/c"]);
 });
 
@@ -167,7 +169,7 @@ test("workspace search reports a failed source and can retry the same query", as
   const input = screen.getByRole("combobox", { name: "searchOverlay.searchConversationsAndNotes" });
   await user.type(input, "field");
   expect((await screen.findByRole("alert")).textContent).toBe("searchOverlay.libraryLoadFailed");
-  expect(screen.queryByText("searchOverlay.noMatchingResults")).toBeNull();
+  expect((input as HTMLInputElement).value).toBe("field");
   await user.click(screen.getByRole("button", { name: "agentChat.retry" }));
   expect(await screen.findByRole("option", { name: "Field guide" })).toBeTruthy();
   expect((input as HTMLInputElement).value).toBe("field");
@@ -208,7 +210,7 @@ test("workspace settings replace the work navigation and return to the same draf
   render(<RouterProvider router={router} />);
 
   await user.type(await screen.findByRole("textbox", { name: "Session draft" }), "Keep this draft");
-  await user.click(screen.getByRole("link", { name: "work.myWork" }));
+  await user.click(screen.getByRole("link", { name: "work.myIssues" }));
   expect(await screen.findByRole("heading", { name: "Work prototype" })).toBeTruthy();
   await router.navigate(-1);
   expect((await screen.findByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("Keep this draft");
@@ -301,7 +303,7 @@ test("a conversation keeps its draft while floating above work, minimizing and e
   const router = createMemoryRouter([{ id: "authenticated", loader: () => ({ user: { id: "dock-user" } }), HydrateFallback: () => null, children: [{ id: "workspace", path: "/w/dock", loader: () => ({ workspace, selectedSession: null }), Component: WorkspaceHomeRoute, children: [{ path: "app", element: <></> }, { path: "work", element: <h1>工作列表</h1> }] }] }], { initialEntries: ["/w/dock/app"] });
   render(<RouterProvider router={router} />);
   await user.type(await screen.findByRole("textbox", { name: "Session draft" }), "保留这段草稿");
-  await user.click(screen.getByRole("link", { name: "work.myWork" }));
+  await user.click(screen.getByRole("link", { name: "work.myIssues" }));
   await screen.findByRole("heading", { name: "工作列表" });
   await user.click(screen.getByRole("button", { name: "打开浮窗" }));
   expect(screen.getByText("浮窗已打开")).toBeTruthy();

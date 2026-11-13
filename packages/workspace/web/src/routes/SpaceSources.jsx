@@ -44,7 +44,6 @@ export function SpaceSources({ workspace }) {
           <ul className="catalogRows">{sources.map(item => <li key={item.id}><Link to={`${base}/library?view=knowledge&source=${encodeURIComponent(item.id)}`} aria-current={sourceId === item.id ? "true" : undefined}>
             <span><strong>{item.name}</strong><small>{t(item.sourceType === "fileTree" ? "space.fileTree" : "space.uploadedFiles")}</small></span><span className="catalogMeta">{t(`space.access.${item.accessLevel}`)}</span>
           </Link></li>)}</ul>
-          {!sources.length ? <p className="catalogEmpty">{t("space.noSources")}</p> : null}
         </>}
       </div>
       {sourceId ? <CatalogDetailView backLabel={t("space.backToSources")} title={source?.name || t("space.sources")} backTo={`${base}/library?view=knowledge`}>
@@ -53,7 +52,7 @@ export function SpaceSources({ workspace }) {
           <div className="catalogTable" role="table" aria-label={source.name}>
             <div className="catalogTableRow catalogTableHead" role="row"><span role="columnheader">{t("libraryRoute.name")}</span><span role="columnheader">{t("work.status")}</span></div>
             {objects.map(item => <div className="catalogTableRow" role="row" key={item.id}><span role="cell">{item.displayPath || item.displayName}</span><span role="cell">{t(`space.status.${item.status}`, { defaultValue: item.status })}</span></div>)}
-          </div>{!objects.length ? <p className="catalogEmpty">{t("space.noObjects")}</p> : null}
+          </div>
         </> : <p role="status">{t("space.notAvailable")}</p>}
       </CatalogDetailView> : null}
     </div>

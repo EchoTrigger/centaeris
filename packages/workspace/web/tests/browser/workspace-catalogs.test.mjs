@@ -40,7 +40,8 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
       await evaluate("document.querySelector('.inboxItem').click()");
       await waitFor(() => evaluate("Boolean(document.querySelector('[aria-label=\"Restore to inbox\"]'))"), "restorable archived notification");
       await evaluate("document.querySelector('[aria-label=\"Restore to inbox\"]').click()");
-      await waitFor(() => text("No archived notifications"), "restored notification");
+      await waitFor(() => evaluate(`Boolean(document.querySelector('[aria-label="Archive notification"]:not(:disabled)')) && document.querySelector('[aria-label="Notifications"]')?.getAttribute("aria-busy") === "false" && !document.querySelector(".inboxItem")`), "server-acknowledged empty archive after restore");
+      assert.ok(await evaluate(`[...document.querySelectorAll(".inboxTabs button")].some(button => button.textContent === "Archived" && button.getAttribute("aria-pressed") === "true")`), "archive filter retained");
       await evaluate("catalogFixture.navigate('library')");
       await waitFor(() => text("Research brief.pdf"), "Space materials");
       await capture("space");
@@ -66,6 +67,15 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
       await waitFor(() => text("Can view"), "source list history");
       await evaluate("catalogFixture.navigate('work/home')");
       await waitFor(() => text("Workspace resources"), "Home resources");
+      await waitFor(() => text("Configure a model"), "role-specific guide");
+      await capture("home-guide");
+      await evaluate("document.querySelector('[aria-label=\"Remove guide\"]').click()");
+      await waitFor(() => evaluate("!document.querySelector('.homeGuide')"), "guide dismissal acknowledged");
+      await send("Page.reload");
+      await waitFor(() => text("Workspace resources"), "Home reloaded");
+      await click("Help");
+      await click("Getting started guide");
+      await waitFor(() => text("Configure a model"), "guide explicitly restored");
       await capture("home");
       await evaluate("[...document.querySelectorAll('.catalogRows a')].find(a => a.textContent.includes('Manage connections')).click()");
       await waitFor(() => text("Credentials required"), "connection status");

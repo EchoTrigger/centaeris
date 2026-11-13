@@ -5,6 +5,7 @@ import { RouterProvider } from "react-router/dom";
 import { configureApi } from "./api";
 import { loadRuntimeConfig } from "./config";
 import { createRouter } from "./router";
+import { ScrollActivity } from "./components/ScrollActivity";
 import "./globals.css";
 
 const rootElement = document.getElementById("root");
@@ -14,7 +15,7 @@ const root = createRoot(rootElement);
 loadRuntimeConfig()
   .then((config) => {
     configureApi(config);
-    root.render(<FrontendProvider iconStrokeWidth={2}><RouterProvider router={createRouter()} /></FrontendProvider>);
+    root.render(<FrontendProvider iconStrokeWidth={2}><ScrollActivity /><RouterProvider router={createRouter()} /></FrontendProvider>);
   })
   .catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);

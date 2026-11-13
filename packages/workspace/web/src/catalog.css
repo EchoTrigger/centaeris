@@ -150,3 +150,17 @@
 
 /* Detail headings receive reading focus on navigation, not control focus. */
 :root .catalogDetailView[tabindex="-1"]:focus, :root .catalogDetailView > h2[tabindex="-1"]:focus { outline:none; }
+
+.homeGuide { margin-bottom:32px; padding:18px; border-radius:9px; background:var(--surface-variant); }
+.homeGuide > header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+.workPrototype .homeGuide h3 { margin:0; }
+.workPrototype .homeGuide header button, .workPrototype .homeHelp { border:0; background:transparent; color:var(--process-text); }
+.workPrototype .homeGuide header button:hover, .workPrototype .homeHelp:hover { color:var(--on-surface); }
+.homeGuide ul { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
+.homeGuide li a { display:flex; align-items:flex-start; gap:12px; padding:8px 0; }
+.homeGuide li svg { width:14px; height:14px; margin-top:3px; flex:none; color:var(--process-text); }
+.homeGuide li span { display:grid; gap:4px; min-width:0; }
+.homeGuide strong { font-size:14px; font-weight:400; }
+.homeGuide small { font-size:12px; line-height:1.6; color:var(--process-text); }
+.homeGuideError { display:flex; align-items:center; gap:12px; margin-bottom:16px; color:var(--error); }
+.workHomeBody .catalogRows a { min-height:52px; padding:12px 14px; }

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { ConversationReadFeedback } from '../../src/chat/ConversationReadFeedback';
 import { createTranscriptViewStore } from '../../src/chat/transcriptViewStore';
@@ -26,15 +26,14 @@ test('snapshot structure without its body fails as first load, while a readable 
   expect(store.presentationContentReady()).toBe(false);
 });
 
-test('pending conversation reads stay quiet until an empty view is authoritative', () => {
+test('an authoritative empty transcript still exposes failed-read retry', () => {
   const store = createTranscriptViewStore();
   store.openTail({ ...page, blocks: [] });
-  const props = { store, placement: 'empty', error: '', paused: false, ready: false, loading: false,
-    checking: false, reconnecting: false, onCheck() {}, onRetry() {} };
-  const view = render(<ConversationReadFeedback {...props} />);
-  expect(view.container.textContent).toBe('');
-  view.rerender(<ConversationReadFeedback {...props} ready />);
-  expect(screen.getByText('appRoute.emptyConversation')).toBeTruthy();
-  view.rerender(<ConversationReadFeedback {...props} ready reconnecting />);
-  expect(view.container.textContent).toBe('');
+  const retry = vi.fn();
+  render(<ConversationReadFeedback store={store} placement="empty" error="" paused ready loading={false}
+    checking={false} reconnecting={false} onCheck={() => {}} onRetry={retry} />);
+  expect(store.getListSnapshot().blockIds).toEqual([]);
+  expect(screen.getByRole('alert').textContent).toContain('appRoute.initialHistoryFailed');
+  fireEvent.click(screen.getByRole('button', { name: 'appRoute.retryStream' }));
+  expect(retry).toHaveBeenCalledOnce();
 });

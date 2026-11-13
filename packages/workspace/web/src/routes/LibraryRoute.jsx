@@ -494,6 +494,7 @@ function LibraryPageContent({ embedded = false } = {}) {
             </div> : libraryView === "materials" ? <div className="libraryFilters" role="tablist" aria-label={t("libraryRoute.materialType")}>
               {[["all", t("libraryRoute.all")], ["images", t("attachmentCard.image")], ["files", t("libraryRoute.files")]].map(([value, label]) => <button className={filter === value ? "active" : ""} type="button" key={value} role="tab" aria-selected={filter === value} onClick={() => setFilter(value)}>{label}</button>)}
             </div> : <span className="libraryCatalogAll">{t("libraryRoute.all")}</span>}
+            {libraryView === "materials" && filter !== "all" && !visibleObjects.length && !loading && !loadError ? <small role="status">{t("common.resultCount", { count: visibleObjects.length })}</small> : null}
           </div>
 
           {libraryView === "materials" ? <>
@@ -504,7 +505,7 @@ function LibraryPageContent({ embedded = false } = {}) {
                 <button className="librarySelect librarySelectAll" type="button" role="checkbox" aria-checked={allVisibleSelected} aria-label={allVisibleSelected ? t("libraryRoute.deselectAll") : t("libraryRoute.selectAllListedItems")} onClick={toggleAllVisible}>{allVisibleSelected ? <Minus aria-hidden="true" /> : null}</button>
                 <span role="columnheader">{t("libraryRoute.name")}</span><span role="columnheader">{t("libraryRoute.modified")}</span><span role="columnheader">{t("libraryRoute.size")}</span>
               </div>
-              {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingLibrary")}</div> : visibleObjects.length === 0 ? <div className="libraryEmptyState">{objects.length === 0 ? t("libraryRoute.noMaterialsYetConversationAttachmentsWillBeSavedHere") : t("libraryRoute.noMaterialsMatchYourFilters")}</div> : visibleObjects.map((item) => {
+              {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingLibrary")}</div> : visibleObjects.map((item) => {
                 const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText;
                 const itemStatus = statusLabel(item);
                 return <div className={`libraryRow ${selectedIds.includes(item.id) || libraryObjectId === item.id ? "selected" : ""}`} role="row" key={item.id}>
@@ -517,7 +518,7 @@ function LibraryPageContent({ embedded = false } = {}) {
               })}
             </div>
             </>}
-          </> : <div className="settingsPanel libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>{t("libraryRoute.noKnowledgeBasesYet")}</strong><span>{t("libraryRoute.connectedSourcesWillAppearHere")}</span></div>}
+          </> : null}
           </div>
           {libraryObjectId ? <CatalogDetailView className="libraryFileView" hideTitle backLabel={t("space.backTo", { name: folderPath.at(-1)?.displayName || t("space.materials") })} title={t("space.fileDetails")} backTo={libraryUrl(folderId)}><Outlet /></CatalogDetailView> : null}
           </div>

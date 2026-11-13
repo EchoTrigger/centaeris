@@ -72,7 +72,6 @@ function ExtensionCatalog({ workspace, view, isSuperuser, detailId, onSelectPlug
         <div className="catalogDirectory" hidden={Boolean(detailId)}>
           {error ? <p className="catalogEmpty" role="alert">{error}</p> : items === null
             ? <p className="catalogEmpty" role="status">{t("agentChat.loading")}</p>
-            : items.length === 0 ? <p className="catalogEmpty">{t("libraryRoute.noSkillsAvailableInThisWorkspace")}</p>
             : <ul className="catalogRows">{items.map(item => <li key={item.skillId}>
               <Link to={`${skillList}&${new URLSearchParams({ skill: item.skillId })}`} aria-current={detailId === item.skillId ? "true" : undefined}>
                 <span><strong>{item.name}</strong><small>{item.description}</small></span>

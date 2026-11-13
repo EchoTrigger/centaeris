@@ -48,7 +48,7 @@ export function ConversationHistory({ sessionProps, workspaceId, currentSessionI
             </Link>)}
           </section> : null)}
         </nav>
-        {recentNavigation?.loading ? <p role="status">{t("work.conversation.loading")}</p> : recentNavigation?.error ? <p role="alert">{t("work.conversation.error")}</p> : !sessions.length ? <p>{t("work.conversation.empty")}</p> : null}
+        {recentNavigation?.loading ? <p role="status">{t("work.conversation.loading")}</p> : recentNavigation?.error ? <p role="alert">{t("work.conversation.error")}</p> : null}
       </Popover.Popup>
     </Popover.Positioner></Popover.Portal>
   </Popover.Root>;

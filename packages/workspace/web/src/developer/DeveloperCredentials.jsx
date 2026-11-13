@@ -73,7 +73,6 @@ function SourceFiles({ workspacePath, sourceId, selected, onToggle }) {
     <button className="secondary" type="button" onClick={() => { setFailed(false); setRevision(value => value + 1); }}>{t("agentChat.retry")}</button>
   </p>;
   if (!files) return <p role="status">{t("agentChat.loading")}</p>;
-  if (!files.length) return <p>{t("developer.noFiles")}</p>;
   return <div className="developerScopeOptions">{files.map(file => <label key={file.id}>
     <input type="checkbox" checked={selected.includes(file.id)} disabled={!selected.includes(file.id) && selected.length >= MAX_SCOPE_ITEMS}
       onChange={() => onToggle(file.id)} />
@@ -97,7 +96,7 @@ function CredentialScopes({ workspacePath, pluginNames, setPlugins, sourceObject
         : enabledPlugins.length ? <div className="developerScopeOptions">{enabledPlugins.map(plugin => <label key={plugin.name}>
           <input type="checkbox" checked={pluginNames.includes(plugin.name)} disabled={!pluginNames.includes(plugin.name) && pluginNames.length >= MAX_SCOPE_ITEMS}
             onChange={() => setPlugins(values => toggleSelection(values, plugin.name))} />{plugin.displayName}
-        </label>)}</div> : <p>{t("developer.noPlugins")}</p>}
+        </label>)}</div> : null}
     </fieldset>
     <fieldset>
       <legend>{t("developer.materials")}</legend>
@@ -115,7 +114,7 @@ function CredentialScopes({ workspacePath, pluginNames, setPlugins, sourceObject
           <p>{t("developer.filesSelected", { count: sourceObjectRefs.length })}{" "}
             {sourceObjectRefs.length ? <button type="button" className="secondary" onClick={() => setSourceObjects([])}>{t("developer.clearFiles")}</button> : null}
           </p>
-        </> : <p>{t("developer.noSources")}</p>}
+        </> : null}
     </fieldset>
   </>;
 }
@@ -304,9 +303,7 @@ export function DeveloperCredentials({ workspaceId }) {
       onClose={() => { setCreating(false); setError(""); }} /> : null}
     {listFailed ? <p role="alert">{t("developer.credentialsLoadFailed")}{" "}
       <button type="button" className="secondary" onClick={reload}>{t("agentChat.retry")}</button>
-    </p> : credentials === null ? <p role="status">{t("agentChat.loading")}</p> : credentials.length === 0
-      ? <p>{t("developer.noCredentials")}</p>
-      : <ul className="developerCredentialList">{credentials.map(item => <li key={item.id}>
+    </p> : credentials === null ? <p role="status">{t("agentChat.loading")}</p> : <ul className="developerCredentialList">{credentials.map(item => <li key={item.id}>
         <div>
           <strong>{item.name}</strong>
           <p><code>{item.modelConfigRef}</code></p>

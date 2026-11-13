@@ -441,7 +441,6 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
               </button>
             </div>;
           })}</div> : null}
-          {!allProviders.length && !busyAction && !error ? <div className="settingsPanel workspaceModelsEmpty"><strong>{t("interface.noProviders")}</strong><span>{t("interface.addAProviderOrCustomHttpsEndpoint")}</span></div> : null}
         </> : <header className="managementDetailHeading">
           <button type="button" className="managementBack" onClick={back} disabled={Boolean(busyAction)} aria-label={t(selection.kind === "model" ? "interface.backToModels" : "interface.modelProviders")}><ArrowLeft aria-hidden="true" /></button>
           <h2>{selection.kind === "model" ? selectedModelForm?.displayName || selectedModelForm?.modelName || t("interface.newModel") : selectedProviderForm?.displayName || selectedProvider?.displayName}</h2>
@@ -488,7 +487,6 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
               {modelTest?.modelId === model.id ? <div className={modelTest.ok ? "workspaceModelsTestResult is-ok" : "workspaceModelsTestResult is-error"} role="status">{testSummary(modelTest, t)}</div> : null}
             </div>;
           })}
-          {!providerModels.length ? <p className="managementEmpty">{t("modelSettings.noModels")}</p> : null}
         </section> : null}
 
         {selection.kind === "model" && selectedModel && selectedModelForm ? <fieldset disabled={!writable(selectedModel)} className="settingsPanel workspaceModelsForm">

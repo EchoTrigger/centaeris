@@ -8,6 +8,7 @@ import LibraryObjectRoute from "../../src/routes/LibraryObjectRoute";
 import LibraryPage from "../../src/routes/LibraryRoute";
 import ExtensionsRoute from "../../src/routes/ExtensionsRoute";
 import WorkPrototypeRoute from "../../src/work/WorkPrototypeRoute";
+import { ScrollActivity } from "../../src/components/ScrollActivity";
 import "../../src/globals.css";
 
 configureApi({ apiBaseUrl: location.origin });
@@ -26,6 +27,13 @@ const notification = { id: "notification-evidence", workspaceId: workspace.id, i
 window.fetch = async (input, options) => {
   const url = new URL(String(input), location.href);
   if (url.pathname === "/api/csrf") return Response.json({ csrfToken: "fixture" });
+  if (url.pathname.endsWith("/guide")) {
+    if (options?.method === "PATCH") localStorage.setItem("fixtureGuideDismissed", String(JSON.parse(String(options.body)).dismissed));
+    return Response.json({ guide: { dismissed: localStorage.getItem("fixtureGuideDismissed") === "true", steps: [
+      { id: "models", completed: false }, { id: "materials", completed: true }, { id: "plugins", completed: true },
+      { id: "connections", completed: false }, { id: "conversation", completed: false }, { id: "issue", completed: true },
+    ] } });
+  }
   if (url.pathname.endsWith("/notifications/notification-evidence")) {
     if (options?.method === "PATCH") {
       const body = JSON.parse(String(options.body));
@@ -69,4 +77,4 @@ const router = createMemoryRouter([{ id: "authenticated", loader: () => ({ user 
 }] }], { initialEntries: [new URLSearchParams(location.search).get("route") || "/w/workspace/work/inbox"] });
 router.subscribe(state => { const url = new URL(location.href); url.searchParams.set("route", state.location.pathname + state.location.search); history.replaceState(null, "", url); });
 Object.assign(window, { catalogFixture: { navigate: (path: string) => router.navigate(`/w/workspace/${path}`), back: () => router.navigate(-1), failures, language: (value: string) => i18n.changeLanguage(value) } });
-createRoot(document.getElementById("fixture")!).render(<FrontendProvider iconStrokeWidth={1.8}><RouterProvider router={router} /></FrontendProvider>);
+createRoot(document.getElementById("fixture")!).render(<FrontendProvider iconStrokeWidth={1.8}><ScrollActivity /><RouterProvider router={router} /></FrontendProvider>);

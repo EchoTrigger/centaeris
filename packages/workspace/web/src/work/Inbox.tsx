@@ -60,7 +60,6 @@ export function Inbox({ items, view, selectedId, onSelect, onViewChange, onChang
               <strong>{item.title}</strong><span className="inboxSummary">{item.summary}</span>{item.target ? <small>{item.target.label}</small> : null}</span>
           </button>
         </li>)}</ul>
-        {!loading && !visible.length ? <p className="catalogEmpty">{t(view === "archived" ? "inbox.noArchived" : "inbox.caughtUp")}</p> : null}
         {pagination && (pagination.total > 50 || pagination.offset > 0) ? <nav className="issuePagination" aria-label={t("issues.pages")}><button type="button" disabled={pending || !pagination.offset} onClick={() => pagination.onPage(Math.max(0, pagination.offset - 50))}>{t("issues.previous")}</button><button type="button" disabled={pending || pagination.offset + 50 >= pagination.total} onClick={() => pagination.onPage(pagination.offset + 50)}>{t("issues.next")}</button></nav> : null}
       </section>
       <section className="inboxDetail" aria-label={t("inbox.detail")}>
@@ -75,7 +74,7 @@ export function Inbox({ items, view, selectedId, onSelect, onViewChange, onChang
             <h2>{selected.title}</h2><p className="inboxLead">{selected.summary}</p>{selected.body ? <p>{selected.body}</p> : null}
             {selected.target ? <Link className="catalogTextLink" to={selected.target.href}>{t("inbox.openItem", { name: selected.target.label })}</Link> : null}
           </article>
-        </> : <div className="inboxNoSelection"><span>{t("inbox.selectNotification")}</span></div>}
+        </> : null}
       </section>
     </div>
   </>;
