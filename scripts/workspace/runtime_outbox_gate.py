@@ -120,6 +120,7 @@ def main(argv=()):
                 [executable, 'postgres_store::integration_tests::environment_owner_schema_tests'],
                 [executable, 'postgres_store::integration_tests::provision_authority_tests']]
     exact_tests = [
+        'model_input_image_tests::postgres_image_history_upgrades_preserves_sessions_and_is_immutable_and_purgeable',
         'question_response_tests::postgres_question_response_receipt_replays_after_consumption_and_preserves_yield_wake',
         'question_wait_notifications::postgres_question_wait_presentation_changes_are_atomic_and_idempotent',
         'wait_handoff_tests::postgres_question_wait_handoff_preserves_bound_snapshot_and_rejects_schema_relabeling',

@@ -31,7 +31,7 @@ mod sqlite_turn_supplement;
 pub mod job_store;
 mod sqlite_job_connection;
 
-pub const STORE_SCHEMA_VERSION: i64 = 5;
+pub const STORE_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Clone)]
 pub struct SqliteRuntimeStore {
@@ -1618,6 +1618,75 @@ mod tests {
         drop(conn);
         drop(SqliteRuntimeStore::new(&db_path).expect("reopen v1 fixture"));
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn image_history_upgrades_preserves_sessions_and_is_immutable_and_purgeable() {
+        use centaeris_core::session::store::{AgentRuntimeSnapshotStorePort, SessionDataStorePort};
+        use sha2::{Digest, Sha256};
+        let path = temp_db_path("image_history_upgrade");
+        let store = SqliteRuntimeStore::new(&path).unwrap();
+        store
+            .save_agent_runtime_snapshot("image-session", "retained snapshot", 7)
+            .unwrap();
+        drop(store);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE session_model_input_images; DELETE FROM schema_migrations WHERE version=6;",
+        )
+        .unwrap();
+        drop(conn);
+        let store = SqliteRuntimeStore::new(&path).unwrap();
+        assert_eq!(
+            store
+                .load_agent_runtime_snapshot("image-session")
+                .unwrap()
+                .as_deref(),
+            Some("retained snapshot")
+        );
+        let bytes = b"verified observation bytes";
+        let digest = format!("sha256:{:x}", Sha256::digest(bytes));
+        store
+            .save_model_input_image("image-session", &digest, bytes)
+            .unwrap();
+        store
+            .save_model_input_image("image-session", &digest, bytes)
+            .unwrap();
+        assert!(store
+            .save_model_input_image("image-session", &digest, b"changed")
+            .is_err());
+        assert!(store
+            .load_model_input_image("other-session", &digest)
+            .unwrap()
+            .is_none());
+        let conn = Connection::open(&path).unwrap();
+        assert!(conn
+            .execute("UPDATE session_model_input_images SET content=x'00'", [])
+            .is_err());
+        drop(conn);
+        drop(store);
+        let store = SqliteRuntimeStore::new(&path).unwrap();
+        assert_eq!(
+            store
+                .load_model_input_image("image-session", &digest)
+                .unwrap()
+                .unwrap(),
+            bytes
+        );
+        store
+            .save_model_input_image("other-session", &digest, bytes)
+            .unwrap();
+        store.delete_session_data("image-session").unwrap();
+        assert!(store
+            .load_model_input_image("image-session", &digest)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .load_model_input_image("other-session", &digest)
+            .unwrap()
+            .is_some());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

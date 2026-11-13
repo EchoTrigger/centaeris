@@ -206,6 +206,21 @@ pub trait RuntimeStore {
 }
 
 pub trait AgentRuntimeSnapshotStorePort {
+    /// Retain verified execution-image bytes as immutable, Session-owned history.
+    /// A repeated digest must contain the exact same bytes.
+    fn save_model_input_image(
+        &self,
+        session_id: &str,
+        content_digest: &str,
+        bytes: &[u8],
+    ) -> Result<(), String>;
+
+    fn load_model_input_image(
+        &self,
+        session_id: &str,
+        content_digest: &str,
+    ) -> Result<Option<Vec<u8>>, String>;
+
     /// Atomically write only if the retained raw snapshot matches `expected_snapshot`.
     /// `None` requires an absent row. A conflict returns false without any write.
     fn compare_and_save_agent_runtime_snapshot(

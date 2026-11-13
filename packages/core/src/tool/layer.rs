@@ -120,6 +120,8 @@ pub struct ToolRuntimeContext {
     pub resource_claim_ttl_ms: u64,
     pub file_mutation_commit_port: Option<Arc<dyn FileMutationCommitPort + Send + Sync>>,
     pub external_context_store: Option<Arc<dyn ExternalContextStorePort + Send + Sync>>,
+    pub model_input_image_store:
+        Option<Arc<dyn crate::session::store::AgentRuntimeSnapshotStorePort + Send + Sync>>,
     pub sandbox_policy: ExecutionPolicy,
     pub resolved_input_manifest: Option<Arc<ResolvedInputState>>,
     pub resolved_input_root: Option<PathBuf>,
@@ -138,6 +140,7 @@ impl Default for ToolRuntimeContext {
             resource_claim_ttl_ms: DEFAULT_RESOURCE_CLAIM_TTL_MS,
             file_mutation_commit_port: None,
             external_context_store: None,
+            model_input_image_store: None,
             sandbox_policy: ExecutionPolicy::workspace_write_no_network("/workspace"),
             resolved_input_manifest: None,
             resolved_input_root: None,
@@ -179,6 +182,10 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field(
                 "external_context_store_configured",
                 &self.external_context_store.is_some(),
+            )
+            .field(
+                "model_input_image_store_configured",
+                &self.model_input_image_store.is_some(),
             )
             .field("sandbox_policy", &self.sandbox_policy)
             .field(
@@ -771,6 +778,14 @@ impl ToolLayer {
         store: Arc<dyn ExternalContextStorePort + Send + Sync>,
     ) -> Self {
         self.runtime_context = self.runtime_context.with_external_context_store(store);
+        self
+    }
+
+    pub(crate) fn with_model_input_image_store(
+        mut self,
+        store: Arc<dyn crate::session::store::AgentRuntimeSnapshotStorePort + Send + Sync>,
+    ) -> Self {
+        self.runtime_context.model_input_image_store = Some(store);
         self
     }
 

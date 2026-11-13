@@ -89,6 +89,7 @@ struct AgentRuntimeTestState {
     checkpoints: Vec<CheckpointRecord>,
     events: Vec<RuntimeEvent>,
     snapshots: HashMap<String, String>,
+    model_input_images: HashMap<(String, String), Vec<u8>>,
     snapshot_load_count: usize,
     snapshot_load_bytes: usize,
     snapshot_save_count: usize,
@@ -531,6 +532,37 @@ impl RuntimeStore for AgentRuntimeTestStore {
 }
 
 impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
+    fn save_model_input_image(
+        &self,
+        session_id: &str,
+        digest: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        crate::model::prepared_prompt::validate_model_input_image_content(digest, bytes)?;
+        let mut state = self.state()?;
+        let key = (session_id.into(), digest.into());
+        if let Some(existing) = state.model_input_images.get(&key) {
+            if existing != bytes {
+                return Err("model_input_image_content_conflict".into());
+            }
+        } else {
+            state.model_input_images.insert(key, bytes.into());
+        }
+        Ok(())
+    }
+
+    fn load_model_input_image(
+        &self,
+        session_id: &str,
+        digest: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .state()?
+            .model_input_images
+            .get(&(session_id.into(), digest.into()))
+            .cloned())
+    }
+
     fn compare_and_save_agent_runtime_snapshot(
         &self,
         session_id: &str,

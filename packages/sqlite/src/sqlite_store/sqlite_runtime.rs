@@ -246,6 +246,7 @@ impl SessionDataStorePort for SqliteRuntimeStore {
             for table in [
                 "runtime_events",
                 "session_runtime_snapshots",
+                "session_model_input_images",
                 "checkpoints",
                 "dead_letters",
                 "resource_claims",
@@ -288,6 +289,40 @@ fn visibility_from_db(raw: &str) -> Result<EventVisibility, String> {
 }
 
 impl AgentRuntimeSnapshotStorePort for SqliteRuntimeStore {
+    fn save_model_input_image(
+        &self,
+        session_id: &str,
+        digest: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        centaeris_core::model::prepared_prompt::validate_model_input_image_content(digest, bytes)?;
+        self.with_conn(|conn| {
+            let inserted = conn.execute(
+                "INSERT INTO session_model_input_images(session_id,content_digest,content) VALUES(?1,?2,?3) ON CONFLICT(session_id,content_digest) DO NOTHING",
+                params![session_id, digest, bytes],
+            ).map_err(|e| e.to_string())?;
+            if inserted == 0 {
+                let existing: Vec<u8> = conn.query_row(
+                    "SELECT content FROM session_model_input_images WHERE session_id=?1 AND content_digest=?2",
+                    params![session_id, digest], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if existing != bytes { return Err("model_input_image_content_conflict".into()); }
+            }
+            Ok(())
+        })
+    }
+
+    fn load_model_input_image(
+        &self,
+        session_id: &str,
+        digest: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.with_conn(|conn| conn.query_row(
+            "SELECT content FROM session_model_input_images WHERE session_id=?1 AND content_digest=?2",
+            params![session_id, digest], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string()))
+    }
+
     fn load_agent_runtime_snapshot(&self, session_id: &str) -> Result<Option<String>, String> {
         self.with_conn(|conn| {
             conn.query_row(

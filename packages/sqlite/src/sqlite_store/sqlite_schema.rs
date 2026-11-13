@@ -30,6 +30,7 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<(), String> {
     }
 
     upgrade_lease_reclaim_budget(conn)?;
+    upgrade_model_input_images(conn)?;
     validate_schema_history(conn)?;
     validate_schema_shape(conn)
 }
@@ -55,6 +56,35 @@ fn upgrade_lease_reclaim_budget(conn: &Connection) -> Result<(), String> {
     validate_schema_shape_with_reclaim_budget(&tx, true)?;
     tx.commit()
         .map_err(|error| format!("commit lease reclaim schema upgrade failed: {error}"))
+}
+
+const MODEL_INPUT_IMAGES_SQL: &str = "CREATE TABLE session_model_input_images (
+    session_id TEXT NOT NULL,
+    content_digest TEXT NOT NULL,
+    content BLOB NOT NULL CHECK(length(content) BETWEEN 1 AND 10485760),
+    PRIMARY KEY(session_id,content_digest)
+)";
+const MODEL_INPUT_IMAGES_TRIGGER: &str = "CREATE TRIGGER model_input_image_facts BEFORE UPDATE ON session_model_input_images BEGIN SELECT RAISE(ABORT, 'model input image is immutable'); END";
+
+fn upgrade_model_input_images(conn: &Connection) -> Result<(), String> {
+    if object_sql(conn, "table", "schema_migrations")?.is_none()
+        || schema_versions(conn)? != [1, 2, 3, 4, 5]
+    {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    validate_schema_shape_with_reclaim_budget(&tx, true)?;
+    tx.execute_batch(&format!(
+        "{MODEL_INPUT_IMAGES_SQL};{MODEL_INPUT_IMAGES_TRIGGER};"
+    ))
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO schema_migrations VALUES(6,CAST(strftime('%s','now') AS INTEGER)*1000)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema_shape(&tx)?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 fn validate_schema_history(conn: &Connection) -> Result<i64, String> {
@@ -95,6 +125,8 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
         ddl.push_str(index.sql);
         ddl.push_str(";\n");
     }
+    ddl.push_str(MODEL_INPUT_IMAGES_TRIGGER);
+    ddl.push(';');
     let transaction = conn
         .unchecked_transaction()
         .map_err(|error| format!("begin runtime sqlite schema transaction failed: {error}"))?;
@@ -123,6 +155,10 @@ struct RequiredObject {
 }
 
 const REQUIRED_TABLES: &[RequiredObject] = &[
+    RequiredObject {
+        name: "session_model_input_images",
+        sql: MODEL_INPUT_IMAGES_SQL,
+    },
     RequiredObject {
         name: "schema_migrations",
         sql: "
@@ -594,6 +630,9 @@ fn validate_schema_shape_with_reclaim_budget(
         }
     }
     for table in REQUIRED_TABLES.iter().chain(TRANSCRIPT_TABLES) {
+        if table.name == "session_model_input_images" && !schema_versions(conn)?.contains(&6) {
+            continue;
+        }
         let expected_sql = if table.name == "runtime_jobs" && !reclaim_budget {
             previous_runtime_jobs_sql(table.sql)
         } else {
@@ -603,6 +642,14 @@ fn validate_schema_shape_with_reclaim_budget(
     }
     for index in REQUIRED_INDEXES.iter().chain(TRANSCRIPT_INDEXES) {
         validate_object_sql(conn, "index", index.name, index.sql)?;
+    }
+    if schema_versions(conn)?.contains(&6) {
+        validate_object_sql(
+            conn,
+            "trigger",
+            "model_input_image_facts",
+            MODEL_INPUT_IMAGES_TRIGGER,
+        )?;
     }
     Ok(())
 }
@@ -724,6 +771,9 @@ mod tests {
 
     fn previous_schema(conn: &Connection) {
         for table in REQUIRED_TABLES.iter().chain(TRANSCRIPT_TABLES) {
+            if table.name == "session_model_input_images" {
+                continue;
+            }
             let sql = if table.name == "runtime_jobs" {
                 previous_runtime_jobs_sql(table.sql)
             } else {
@@ -771,7 +821,7 @@ mod tests {
             .unwrap(),
             4
         );
-        assert_eq!(schema_versions(&conn).unwrap(), [1, 2, 3, 4, 5]);
+        assert_eq!(schema_versions(&conn).unwrap(), [1, 2, 3, 4, 5, 6]);
         ensure_schema(&conn).unwrap();
         assert!(conn
             .execute("UPDATE runtime_jobs SET lease_reclaim_count=-1", [])

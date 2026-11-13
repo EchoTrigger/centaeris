@@ -1745,7 +1745,7 @@ impl<
         }
 
         if !local_tool_requests.is_empty() {
-            let executor = self.build_tool_batch_executor_async();
+            let executor = self.build_tool_batch_executor_async(session_id);
             let mut progress_sink = |event| {
                 let progress_event =
                     build_runtime_event_tool_progress_event(session_id, turn_id, &event);

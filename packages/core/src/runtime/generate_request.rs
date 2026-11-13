@@ -14,6 +14,14 @@ enum ResolvedImageSource {
     Unavailable(String),
 }
 
+struct GeneratePromptProjection {
+    session: SessionStateSnapshot,
+    prepared_prompt: PreparedPromptV1,
+    image_observations: Vec<ModelInputImageObservationV1>,
+    provider_prompt_cache_key: Option<String>,
+    system_prompt_manifest_json: Option<String>,
+}
+
 pub(super) struct PreparedAgentsInstructions {
     revision: u64,
     instructions: Option<(String, String)>,
@@ -322,7 +330,6 @@ impl<
             session_id,
             turn_id,
             input,
-            loop_index,
             &mut prepared_agents,
         )?;
 
@@ -427,7 +434,6 @@ impl<
             session_id,
             turn_id,
             input,
-            loop_index,
             &mut prepared_agents,
         )?;
 
@@ -525,15 +531,72 @@ impl<
         prepared_inputs: Option<PreparedRequestInputs>,
         prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<GenerateDriverRequest, String> {
-        let (request, mut session) = self.project_generate_driver_request_from_session(
+        let projection_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::Projection,
+            turn_id,
+        );
+        let projection = self.project_generate_prompt_from_session(
             session,
             session_id,
             turn_id,
             input,
-            loop_index,
-            compression_stats_json,
             prepared_agents,
         )?;
+        let GeneratePromptProjection {
+            mut session,
+            mut prepared_prompt,
+            image_observations,
+            provider_prompt_cache_key,
+            system_prompt_manifest_json,
+        } = projection;
+        let (messages, images, image_observations) = self.resolve_model_input_images(
+            session_id,
+            prepared_prompt.messages,
+            image_observations,
+        )?;
+        prepared_prompt.messages = messages;
+        prepared_prompt.set_input_images(images)?;
+        let context_token_estimate = estimate_prepared_prompt_input_tokens(&prepared_prompt)?;
+        let mut observations = Vec::new();
+        if let Some(content) = prepared_prompt.system_prompt.clone() {
+            observations.push(ModelObservationV1::SystemPrompt { content });
+        }
+        observations.extend(
+            prepared_prompt
+                .messages
+                .iter()
+                .cloned()
+                .map(|message| ModelObservationV1::ContextMessage { message }),
+        );
+        observations.extend(
+            image_observations
+                .into_iter()
+                .map(|image| ModelObservationV1::InputImage { image }),
+        );
+        if !prepared_prompt.tool_definitions.is_empty() {
+            observations.push(ModelObservationV1::ToolCatalog {
+                tool_definitions: prepared_prompt.tool_definitions.clone(),
+            });
+        }
+        let request = GenerateDriverRequest {
+            prompt_compaction: super::prompt_compaction_commit::active_commit(&session)?,
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            loop_index,
+            provider_prompt_cache_key,
+            provider_prompt_cache_retention: self.config.provider_prompt_cache_retention.clone(),
+            system_prompt_manifest_json,
+            compression_stats_json,
+            context_token_estimate,
+            prepared_prompt,
+            observations,
+            live_content_prefix: input
+                .output_token_recovery_partial()
+                .unwrap_or_default()
+                .into(),
+        };
+        projection_span.complete();
         validate_model_input_budget(
             request.context_token_estimate,
             self.config.model_context_tokens,
@@ -562,7 +625,6 @@ impl<
         session_id: &str,
         turn_id: &str,
         input: &TurnInput,
-        loop_index: u32,
         prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<u32, String> {
         let estimate_span = RequestPreparationSpan::new(
@@ -575,24 +637,27 @@ impl<
             self.config.model_max_output_tokens,
         )?;
         let result = self
-            .project_generate_driver_request_from_session(
+            .project_generate_prompt_from_session(
                 session.clone(),
                 session_id,
                 turn_id,
                 input,
-                loop_index,
-                None,
                 prepared_agents,
             )
-            .map(|(request, _)| {
-                let estimate = u64::from(request.context_token_estimate);
+            .and_then(|projection| {
+                let estimate = u64::from(
+                    estimate_prepared_prompt_input_tokens(&projection.prepared_prompt)?
+                        .saturating_add(
+                            (projection.image_observations.len() as u32).saturating_mul(1_024),
+                        ),
+                );
                 let scale = u64::from(self.config.prompt_token_estimate_scale_basis_points);
-                estimate
+                Ok(estimate
                     .saturating_mul(scale)
                     .saturating_add(9_999)
                     .checked_div(10_000)
                     .unwrap_or(estimate)
-                    .min(u64::from(u32::MAX)) as u32
+                    .min(u64::from(u32::MAX)) as u32)
             });
         if result.is_ok() {
             estimate_span.complete();
@@ -600,25 +665,14 @@ impl<
         result
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "projection carries request-local observations alongside explicit prompt inputs"
-    )]
-    fn project_generate_driver_request_from_session(
+    fn project_generate_prompt_from_session(
         &self,
         mut session: SessionStateSnapshot,
         session_id: &str,
         turn_id: &str,
         input: &TurnInput,
-        loop_index: u32,
-        compression_stats_json: Option<String>,
         prepared_agents: &mut Option<PreparedAgentsInstructions>,
-    ) -> Result<(GenerateDriverRequest, SessionStateSnapshot), String> {
-        let projection_span = RequestPreparationSpan::new(
-            self.request_preparation_observer.as_ref(),
-            RequestPreparationStage::Projection,
-            turn_id,
-        );
+    ) -> Result<GeneratePromptProjection, String> {
         let answer_now = input.answer_now_intervention().is_some();
         let (tool_definitions, _) = if answer_now {
             (Vec::new(), String::new())
@@ -680,8 +734,8 @@ impl<
         }
         let model_messages =
             project_session_messages_to_model_messages(&session, context_messages.as_slice())?;
-        let (mut model_messages, input_images, mut input_image_observations) =
-            self.resolve_model_input_images(context_messages.as_slice(), model_messages)?;
+        let (mut model_messages, image_observations) =
+            project_model_input_images(context_messages.as_slice(), model_messages)?;
         let insertion_index = model_messages
             .iter()
             .position(|message| message.message_id == runtime_context_anchor_message_id)
@@ -817,15 +871,13 @@ impl<
         } else {
             ModelToolChoice::Auto
         };
-        let mut prepared_prompt = PreparedPromptV1::new(
+        let prepared_prompt = PreparedPromptV1::new(
             system_prompt.clone(),
             model_messages,
             tool_definitions.clone(),
             tool_choice,
             self.config.model_max_output_tokens,
         )?;
-        prepared_prompt.set_input_images(input_images)?;
-        let context_token_estimate = estimate_prepared_prompt_input_tokens(&prepared_prompt)?;
         let provider_prompt_cache_key = build_provider_prompt_cache_key(
             system_prompt.as_deref(),
             tool_definitions.as_slice(),
@@ -834,208 +886,57 @@ impl<
             agent_instructions_hash.as_deref(),
             &self.config,
         )?;
-        let mut observations = Vec::new();
-        if let Some(content) = system_prompt {
-            observations.push(ModelObservationV1::SystemPrompt { content });
-        }
-        observations.extend(
-            prepared_prompt
-                .messages
-                .iter()
-                .cloned()
-                .map(|message| ModelObservationV1::ContextMessage { message }),
-        );
-        observations.extend(
-            input_image_observations
-                .drain(..)
-                .map(|image| ModelObservationV1::InputImage { image }),
-        );
-        if !tool_definitions.is_empty() {
-            observations.push(ModelObservationV1::ToolCatalog { tool_definitions });
-        }
-        let prompt_compaction = super::prompt_compaction_commit::active_commit(&session)?;
-        projection_span.complete();
-        Ok((
-            GenerateDriverRequest {
-                prompt_compaction,
-                session_id: session_id.to_string(),
-                turn_id: turn_id.to_string(),
-                loop_index,
-                provider_prompt_cache_key,
-                provider_prompt_cache_retention: self
-                    .config
-                    .provider_prompt_cache_retention
-                    .clone(),
-                system_prompt_manifest_json,
-                compression_stats_json,
-                context_token_estimate,
-                prepared_prompt,
-                observations,
-                live_content_prefix: input
-                    .output_token_recovery_partial()
-                    .unwrap_or_default()
-                    .to_string(),
-            },
+        Ok(GeneratePromptProjection {
             session,
-        ))
+            prepared_prompt,
+            image_observations,
+            provider_prompt_cache_key,
+            system_prompt_manifest_json,
+        })
     }
 
     fn resolve_model_input_images(
         &self,
-        messages: &[ChatMessage],
-        mut model_messages: Vec<ModelMessageV1>,
+        session_id: &str,
+        mut messages: Vec<ModelMessageV1>,
+        references: Vec<ModelInputImageObservationV1>,
     ) -> Result<ResolvedModelInputImages, String> {
-        let mut images = Vec::new();
-        let mut observations = Vec::new();
-        for message in messages {
-            if let Some(raw) = message
-                .metadata
-                .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGES)
-            {
-                let references = serde_json::from_str::<Vec<ModelInputImageRefV1>>(raw)
-                    .map_err(|error| format!("decode model input image refs failed: {error}"))?;
-                for reference in references {
-                    let source = ModelInputImageSourceRefV1::InputRef {
-                        input_ref: reference.input_ref,
-                        content_type: reference.content_type,
-                        placeholder: reference.placeholder,
-                    };
-                    let (content_type, placeholder, bytes) =
-                        match self.resolve_model_input_image_source(&source)? {
-                            ResolvedImageSource::Available(content_type, placeholder, bytes) => {
-                                (content_type, placeholder, bytes)
-                            }
-                            ResolvedImageSource::Unavailable(notice) => {
-                                if let Some(projected) = model_messages
-                                    .iter_mut()
-                                    .find(|projected| projected.message_id == message.message_id)
-                                {
-                                    projected.content.push_str(&format!("\n{notice}"));
-                                }
-                                continue;
-                            }
-                        };
+        let mut images = Vec::with_capacity(references.len());
+        let mut observations = Vec::with_capacity(references.len());
+        for observation in references {
+            match self.resolve_model_input_image_source(session_id, &observation.source)? {
+                ResolvedImageSource::Available(content_type, placeholder, bytes) => {
                     images.push(ModelInputImageV1 {
-                        message_id: message.message_id.clone(),
+                        message_id: observation.message_id.clone(),
                         content_type,
                         placeholder,
                         data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
                     });
-                    observations.push(ModelInputImageObservationV1 {
-                        message_id: message.message_id.clone(),
-                        source,
-                    });
+                    observations.push(observation);
+                }
+                ResolvedImageSource::Unavailable(notice) => {
+                    let message = messages
+                        .iter_mut()
+                        .find(|m| m.message_id == observation.message_id)
+                        .ok_or("model_input_image_message_missing")?;
+                    if observation.message_id.ends_with(":image-observation") {
+                        let label = match &observation.source {
+                            ModelInputImageSourceRefV1::InputRef { .. } => "attached input",
+                            ModelInputImageSourceRefV1::ExecutionFile { image } => &image.path,
+                        };
+                        let line = format!("{} {label}", observation.source.placeholder());
+                        message.content = message.content.replace(&line, &notice);
+                    } else {
+                        message.content.push_str(&format!("\n{notice}"));
+                    }
                 }
             }
-            if message.role == MessageRole::Tool {
-                continue;
-            }
-            let Some(raw) = message
-                .metadata
-                .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES)
-            else {
-                continue;
-            };
-            let sources = serde_json::from_str::<Vec<ModelInputImageSourceRefV1>>(raw)
-                .map_err(|error| format!("decode model input image sources failed: {error}"))?;
-            for source in sources {
-                let (content_type, placeholder, bytes) =
-                    match self.resolve_model_input_image_source(&source)? {
-                        ResolvedImageSource::Available(content_type, placeholder, bytes) => {
-                            (content_type, placeholder, bytes)
-                        }
-                        ResolvedImageSource::Unavailable(notice) => {
-                            if let Some(projected) = model_messages
-                                .iter_mut()
-                                .find(|projected| projected.message_id == message.message_id)
-                            {
-                                projected.content.push_str(&format!("\n{notice}"));
-                            }
-                            continue;
-                        }
-                    };
-                images.push(ModelInputImageV1 {
-                    message_id: message.message_id.clone(),
-                    content_type,
-                    placeholder,
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                });
-                observations.push(ModelInputImageObservationV1 {
-                    message_id: message.message_id.clone(),
-                    source,
-                });
-            }
         }
-        let mut projected = Vec::with_capacity(model_messages.len());
-        let mut pending_tool_sources = Vec::<ModelInputImageSourceRefV1>::new();
-        for (index, (message, model_message)) in messages.iter().zip(model_messages).enumerate() {
-            projected.push(model_message);
-            if message.role == MessageRole::Tool {
-                if let Some(raw) = message
-                    .metadata
-                    .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES)
-                {
-                    pending_tool_sources.extend(
-                        serde_json::from_str::<Vec<ModelInputImageSourceRefV1>>(raw).map_err(
-                            |error| {
-                                format!("decode tool model input image sources failed: {error}")
-                            },
-                        )?,
-                    );
-                }
-            }
-            let tool_batch_ends = message.role == MessageRole::Tool
-                && messages
-                    .get(index + 1)
-                    .is_none_or(|next| next.role != MessageRole::Tool);
-            if !tool_batch_ends || pending_tool_sources.is_empty() {
-                continue;
-            }
-            let observation_message_id = format!("{}:image-observation", message.message_id);
-            let mut content = String::from(
-                "Model-visible image observations from the preceding tool result batch:\n",
-            );
-            for source in pending_tool_sources.drain(..) {
-                let (content_type, placeholder, bytes) =
-                    match self.resolve_model_input_image_source(&source)? {
-                        ResolvedImageSource::Available(content_type, placeholder, bytes) => {
-                            (content_type, placeholder, bytes)
-                        }
-                        ResolvedImageSource::Unavailable(notice) => {
-                            content.push_str(&format!("{notice}\n"));
-                            continue;
-                        }
-                    };
-                let label = match &source {
-                    ModelInputImageSourceRefV1::InputRef { .. } => "attached input",
-                    ModelInputImageSourceRefV1::ExecutionFile { image } => image.path.as_str(),
-                };
-                content.push_str(format!("{placeholder} {label}\n").as_str());
-                images.push(ModelInputImageV1 {
-                    message_id: observation_message_id.clone(),
-                    content_type,
-                    placeholder,
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                });
-                observations.push(ModelInputImageObservationV1 {
-                    message_id: observation_message_id.clone(),
-                    source,
-                });
-            }
-            projected.push(ModelMessageV1 {
-                message_id: observation_message_id,
-                role: ModelMessageRoleV1::User,
-                content: content.trim_end().to_string(),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
-        Ok((projected, images, observations))
+        Ok((messages, images, observations))
     }
-
     fn resolve_model_input_image_source(
         &self,
+        session_id: &str,
         source: &ModelInputImageSourceRefV1,
     ) -> Result<ResolvedImageSource, String> {
         // Wire validity is separate from the availability of an external image.
@@ -1065,8 +966,36 @@ impl<
                 (content_type, placeholder, input_ref.as_str(), resolved)
             }
             ModelInputImageSourceRefV1::ExecutionFile { image } => {
+                if let Some(bytes) = self
+                    .runtime_store
+                    .load_model_input_image(session_id, &image.sha256)?
+                {
+                    let (content_type, width, height) =
+                        crate::model::prepared_prompt::inspect_model_input_image(&bytes)?;
+                    if content_type != image.content_type
+                        || width != image.width_px
+                        || height != image.height_px
+                        || bytes.len() as u64 != image.byte_length
+                    {
+                        return Err("model_input_image_stored_metadata_mismatch".into());
+                    }
+                    return Ok(ResolvedImageSource::Available(
+                        image.content_type.clone(),
+                        image.placeholder.clone(),
+                        bytes,
+                    ));
+                }
+                // Released references without retained pixels are reconstructed once
+                // from their authoritative source, including its original digest.
                 let resolved = match self.tools_port.resolve_execution_model_input_image(image) {
-                    Ok(bytes) => Ok(bytes),
+                    Ok(bytes) => {
+                        self.runtime_store.save_model_input_image(
+                            session_id,
+                            &image.sha256,
+                            &bytes,
+                        )?;
+                        Ok(bytes)
+                    }
                     Err(error) => {
                         if matches!(&error, ExecutionModelInputImageError::FileSystem(failure)
                             if failure.kind == ExecutionFileSystemErrorKind::HostUnavailable)
@@ -1619,6 +1548,97 @@ fn build_model_context_messages(
         continuation_anchor.expect("tool continuation anchor is resolved above")
     };
     Ok((context_messages, anchor_message_id))
+}
+
+fn project_model_input_images(
+    messages: &[ChatMessage],
+    model_messages: Vec<ModelMessageV1>,
+) -> Result<(Vec<ModelMessageV1>, Vec<ModelInputImageObservationV1>), String> {
+    let mut observations = Vec::new();
+    for message in messages {
+        if let Some(raw) = message
+            .metadata
+            .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGES)
+        {
+            let references: Vec<ModelInputImageRefV1> =
+                serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            for reference in references {
+                let source = ModelInputImageSourceRefV1::InputRef {
+                    input_ref: reference.input_ref,
+                    content_type: reference.content_type,
+                    placeholder: reference.placeholder,
+                };
+                source.validate()?;
+                observations.push(ModelInputImageObservationV1 {
+                    message_id: message.message_id.clone(),
+                    source,
+                });
+            }
+        }
+        if message.role != MessageRole::Tool {
+            if let Some(raw) = message
+                .metadata
+                .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES)
+            {
+                let sources: Vec<ModelInputImageSourceRefV1> =
+                    serde_json::from_str(raw).map_err(|e| e.to_string())?;
+                for source in sources {
+                    source.validate()?;
+                    observations.push(ModelInputImageObservationV1 {
+                        message_id: message.message_id.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+    }
+    let mut projected = Vec::with_capacity(model_messages.len());
+    let mut pending = Vec::new();
+    for (index, (message, model_message)) in messages.iter().zip(model_messages).enumerate() {
+        projected.push(model_message);
+        if message.role == MessageRole::Tool {
+            if let Some(raw) = message
+                .metadata
+                .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES)
+            {
+                let sources: Vec<ModelInputImageSourceRefV1> =
+                    serde_json::from_str(raw).map_err(|e| e.to_string())?;
+                pending.extend(sources);
+            }
+        }
+        let batch_ends = message.role == MessageRole::Tool
+            && messages
+                .get(index + 1)
+                .is_none_or(|next| next.role != MessageRole::Tool);
+        if !batch_ends || pending.is_empty() {
+            continue;
+        }
+        let message_id = format!("{}:image-observation", message.message_id);
+        let mut content = String::from(
+            "Model-visible image observations from the preceding tool result batch:\n",
+        );
+        for source in pending.drain(..) {
+            source.validate()?;
+            let label = match &source {
+                ModelInputImageSourceRefV1::InputRef { .. } => "attached input",
+                ModelInputImageSourceRefV1::ExecutionFile { image } => &image.path,
+            };
+            content.push_str(&format!("{} {label}\n", source.placeholder()));
+            observations.push(ModelInputImageObservationV1 {
+                message_id: message_id.clone(),
+                source,
+            });
+        }
+        projected.push(ModelMessageV1 {
+            message_id,
+            role: ModelMessageRoleV1::User,
+            content: content.trim_end().into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+    }
+    Ok((projected, observations))
 }
 
 pub(super) fn estimate_prepared_prompt_input_tokens(

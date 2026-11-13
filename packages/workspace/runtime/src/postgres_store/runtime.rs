@@ -466,6 +466,7 @@ pub(super) fn delete_session_records(
         "transcript_projection_heads",
         "runtime_events",
         "session_runtime_snapshots",
+        "session_model_input_images",
         "checkpoints",
         "dead_letters",
         "resource_claims",
@@ -493,6 +494,32 @@ pub(super) fn delete_session_records(
 }
 
 impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {
+    fn save_model_input_image(
+        &self,
+        session_id: &str,
+        digest: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        centaeris_core::model::prepared_prompt::validate_model_input_image_content(digest, bytes)?;
+        if self.subagent_persistence_scope.is_some() {
+            return self.with_subagent_persistence_transaction(Some(session_id), |tx| {
+                save_model_image_content(tx, session_id, digest, bytes)
+            });
+        }
+        self.with_client(|client| save_model_image_content(client, session_id, digest, bytes))
+    }
+
+    fn load_model_input_image(
+        &self,
+        session_id: &str,
+        digest: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.with_client(|client| client.query_opt(
+            "SELECT content FROM session_model_input_images WHERE session_id=$1 AND content_digest=$2",
+            &[&session_id, &digest],
+        ).map(|row| row.map(|row| row.get(0))).map_err(|e| e.to_string()))
+    }
+
     fn compare_and_save_agent_runtime_snapshot(
         &self,
         session_id: &str,
@@ -552,6 +579,28 @@ impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {
         }
         self.with_client(|client| save_snapshot(client, session_id, snapshot, updated_at_ms))
     }
+}
+
+fn save_model_image_content(
+    client: &mut impl GenericClient,
+    session_id: &str,
+    digest: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let inserted = client.execute(
+        "INSERT INTO session_model_input_images(session_id,content_digest,content) VALUES($1,$2,$3) ON CONFLICT(session_id,content_digest) DO NOTHING",
+        &[&session_id, &digest, &bytes],
+    ).map_err(|e| e.to_string())?;
+    if inserted == 0 {
+        let existing: Vec<u8> = client.query_one(
+            "SELECT content FROM session_model_input_images WHERE session_id=$1 AND content_digest=$2",
+            &[&session_id, &digest],
+        ).map_err(|e| e.to_string())?.get(0);
+        if existing != bytes {
+            return Err("model_input_image_content_conflict".into());
+        }
+    }
+    Ok(())
 }
 
 fn compare_and_save_snapshot(

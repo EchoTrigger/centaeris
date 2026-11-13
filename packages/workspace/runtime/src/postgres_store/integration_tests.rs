@@ -50,6 +50,7 @@ mod host_retirement_tests;
 mod lease_renewal_tests;
 mod maintenance_authority_tests;
 mod maintenance_completion_schema_tests;
+mod model_input_image_tests;
 pub(crate) mod owned_database;
 mod provision_authority_tests;
 mod question_response_tests;
@@ -2723,6 +2724,7 @@ fn postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups() {
                 .replace(",'subagent.run'", ""),
         )
         .unwrap();
+    super::schema::restore_model_input_image_fixture(&mut listener);
     listener
         .execute(
             "DELETE FROM runtime.schema_migrations WHERE version=21",

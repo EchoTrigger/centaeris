@@ -334,7 +334,9 @@ impl<
         let message_handler = MessageHandler::new(MessageHandlerConfig {
             max_message_chars: config.max_message_chars,
         });
-        let tools_port = tools_port.with_external_context_store(Arc::new(store.clone()));
+        let tools_port = tools_port
+            .with_external_context_store(Arc::new(store.clone()))
+            .with_model_input_image_store(Arc::new(store.clone()));
         let prompt_compaction_config = PromptCompactionConfig {
             model_context_tokens: config.model_context_tokens,
             model_max_output_tokens: config.model_max_output_tokens,

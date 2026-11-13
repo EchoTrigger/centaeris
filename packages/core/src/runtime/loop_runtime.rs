@@ -1628,8 +1628,9 @@ impl<
         .await
     }
 
-    pub(super) fn build_tool_batch_executor_async(&self) -> ToolBatchExecutor {
-        let async_tools_port = self.tools_port.clone();
+    pub(super) fn build_tool_batch_executor_async(&self, session_id: &str) -> ToolBatchExecutor {
+        let scoped_tools = self.tools_port.clone().with_session_id(session_id);
+        let async_tools_port = scoped_tools.clone();
         let async_execute_tool = Arc::new(move |request: ToolInvocationRequest| {
             let tools_port = async_tools_port.clone();
             Box::pin(async move { tools_port.execute_async(request).await })
@@ -1637,7 +1638,7 @@ impl<
         });
 
         ToolBatchExecutor::new_with_executors_and_coordinator(
-            self.tools_port.clone(),
+            scoped_tools,
             self.tool_concurrency.clone(),
             async_execute_tool,
         )

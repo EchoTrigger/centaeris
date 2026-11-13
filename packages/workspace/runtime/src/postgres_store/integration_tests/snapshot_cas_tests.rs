@@ -84,6 +84,17 @@ fn postgres_hosted_persistence_fences_late_execution_and_deleted_session_project
     assert!(parent
         .save_agent_runtime_snapshot("child-session", "wrong target", 2)
         .is_err());
+    let image_bytes = b"immutable image observation";
+    let image_digest = {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(image_bytes))
+    };
+    child
+        .save_model_input_image("child-session", &image_digest, image_bytes)
+        .unwrap();
+    assert!(child
+        .save_model_input_image("sess_1", &image_digest, image_bytes)
+        .is_err());
 
     db.execute(
         "UPDATE runtime.runtime_jobs SET lease_owner='replacement-owner' WHERE job_id=$1",
@@ -95,6 +106,12 @@ fn postgres_hosted_persistence_fences_late_execution_and_deleted_session_project
             .save_agent_runtime_snapshot("child-session", "stale owner", 2)
             .unwrap_err(),
         RUNTIME_JOB_LEASE_FENCE_REJECTED,
+    );
+    assert_eq!(
+        child
+            .save_model_input_image("child-session", &image_digest, image_bytes)
+            .unwrap_err(),
+        RUNTIME_JOB_LEASE_FENCE_REJECTED
     );
     let cancelled_child = store
         .hosted_execution_view(

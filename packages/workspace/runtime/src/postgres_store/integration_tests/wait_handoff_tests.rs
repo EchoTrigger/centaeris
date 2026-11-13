@@ -719,7 +719,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     ).map_err(|error| error.to_string())).unwrap();
     let before = legacy_retained_rows(&f);
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), (1..=21).collect::<Vec<_>>());
+    assert_eq!(observation_versions(&f), (1..=22).collect::<Vec<_>>());
     assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
         "INSERT INTO runtime.model_observation_contents VALUES($1,$2,'required_completion_delivery','{}',2,1)",
@@ -763,7 +763,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     append(&mut f).unwrap();
     let before = retained_rows(&f);
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), (1..=21).collect::<Vec<_>>());
+    assert_eq!(observation_versions(&f), (1..=22).collect::<Vec<_>>());
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
         reopened
@@ -789,6 +789,12 @@ fn retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
 
 fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
     let mut rows = retained_rows(f);
+    if let Some(images) = rows.remove("runtime.session_model_input_images") {
+        assert_eq!(
+            images, "[]",
+            "schema migration must not invent historical image pixels"
+        );
+    }
     if let Some(clock) = rows.remove("runtime.resident_capacity_clock") {
         let clock: serde_json::Value = serde_json::from_str(&clock).unwrap();
         assert_eq!(

@@ -190,6 +190,22 @@ Plugin uninstall and credential deletion follow separate lifecycle and audit
 rules. A running AgentRun keeps its frozen activation and must finish or stop
 before required package bytes are removed.
 
+## Model input images
+
+PostgreSQL Runtime schema 22 and SQLite schema 6 add immutable, Session-owned
+execution-image contents, separate from conversation snapshots and public events.
+The original authorized tool read stores verified bytes before its result is
+acknowledged. Later model requests reuse those pixels, including after Runtime
+recreation or changes to the original file. The Session and content digest scope
+the lookup; Session purge removes the retained bytes with the other owned data.
+Hosted writes retain execution-lease and child-Session fencing.
+
+Existing logical execution-image references remain authoritative. Their first
+formal request reconstructs missing contents only after checking the original
+digest and image metadata. A changed or missing original keeps the existing
+unavailable-observation behavior. Attachment `inputRef` sources continue checking
+current source authorization and do not use this execution-image store.
+
 ## Backup
 
 Runtime store schema v5 adds the Core `required_completion_delivery` observation
