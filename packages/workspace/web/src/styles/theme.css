@@ -14,54 +14,40 @@
 }
 /* Web owns luminance layers independently of the shared Desktop palette. */
 :root[data-theme] {
-  --workspace-rail: #e8eaed;
-  --surface-color: #f4f5f6;
-  --surface-variant: #edeff2;
-  --surface-container: #e3e6ea;
-  --surface-raised: #f8f9fa;
-  --surface-input: #edeff2;
-  --surface-hover: #e2e5ea;
-  --surface-active: #d9dee6;
-  --on-surface: #25282d;
-  --process-text: #666b73;
-  --outline: #7d828a;
-  --outline-variant: #d8dce2;
-  --unread-color: #4285f4;
+  --workspace-rail: #ededed;
+  --surface-color: #f7f7f7;
+  --surface-variant: #ffffff;
+  --surface-container: #e6e6e6;
+  --surface-raised: #ffffff;
+  --surface-input: #ffffff;
+  --outline: #898989;
+  --outline-variant: #dedede;
   --workspace-frame-edge: transparent;
-  --background: 210 10% 96.1%;
-  --foreground: 217.5 9.8% 16.1%;
-  --secondary: 216 16.1% 93.9%;
-  --secondary-foreground: var(--foreground);
-  --muted-foreground: 216.9 6% 42.5%;
-  --accent: 214.3 14.3% 90.4%;
-  --accent-foreground: var(--foreground);
-  --input: 216 14.7% 86.7%;
-  --ring: 216.9 5.3% 51.6%;
+  --background: 0 0% 97%;
+  --secondary: 0 0% 100%;
+  --accent: 0 0% 90%;
+  --input: 0 0% 87%;
+  --ring: 0 0% 54%;
 }
 :root[data-theme="dark"] {
-  --workspace-rail: #141518;
-  --surface-color: #1b1c1f;
-  --surface-variant: #24262a;
-  --surface-container: #2d3036;
-  --surface-raised: #292b30;
-  --surface-input: #24262a;
-  --surface-hover: #30343a;
-  --surface-active: #3a3f47;
-  --on-surface: #e3e5e8;
-  --process-text: #a1a6ae;
-  --outline: #737982;
-  --outline-variant: #33363c;
+  --workspace-rail: #090909;
+  --surface-color: #111111;
+  --surface-variant: #191919;
+  --surface-container: #272727;
+  --surface-raised: #1e1e1e;
+  --surface-input: #1e1e1e;
+  --surface-hover: #292929;
+  --surface-active: #303030;
+  --on-surface: #ededed;
+  --process-text: #a0a0a0;
+  --outline: #707070;
+  --outline-variant: #292929;
   --workspace-frame-edge: transparent;
-  --background: 225 6.9% 11.4%;
-  --foreground: 216 9.8% 90%;
-  --secondary: 220 7.7% 15.3%;
-  --muted-foreground: 216.9 7.4% 65.7%;
-  --accent: 220 9.1% 19.4%;
-  --input: 220 8.1% 21.8%;
-  --ring: 216 6.1% 48%;
-}
-:root[data-theme] :is(.inboxReadDot, .workspaceSessionUnread) {
-  background-color: var(--unread-color);
+  --background: 0 0% 7%;
+  --secondary: 0 0% 10%;
+  --accent: 0 0% 15%;
+  --input: 0 0% 16%;
+  --ring: 0 0% 44%;
 }
 @media (forced-colors: active) {
   :root[data-theme] { --workspace-rail: Canvas; --surface-raised: Canvas; --surface-input: Canvas; --workspace-frame-edge: ButtonBorder; }

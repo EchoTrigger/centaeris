@@ -382,7 +382,7 @@
 .shModalClose { position: absolute; z-index: 1; top: 14px; left: 14px; }
 .shAgentCreate button:focus-visible, .shAgentCreate input:focus-visible, .shAgentCreate textarea:focus-visible { outline: 1px solid var(--outline); outline-offset: 2px; }
 .shAgentIdentity { display: grid; justify-items: center; gap: 9px; padding-top: 2px; }
-.shAgentHeroMark { width: 112px; height: 112px; border-radius: 24px !important; box-shadow: 0 14px 30px rgba(0, 0, 0, .14); }
+.shAgentHeroMark { width: 112px; height: 112px; border-radius: 24px !important; box-shadow: 0 14px 30px rgba(3, 32, 67, .14); }
 .shAgentAvatarEdit { position: relative; display: grid; border: 0; border-radius: 24px; background: transparent; padding: 0; cursor: pointer; }
 .shAgentAvatarEdit > span:last-child { position: absolute; right: -4px; bottom: -2px; display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--outline-variant); border-radius: 50%; background: var(--surface-color); color: var(--on-surface); }
 .shAgentAvatarEdit > span:last-child svg { width: 13px; height: 13px; }
