@@ -2761,3 +2761,26 @@ class IssueEvent(models.Model):
     class Meta:
         indexes = [models.Index(fields=["issue", "createdAt", "id"], name="issue_event_chronological")]
         constraints = [models.CheckConstraint(condition=models.Q(type__in=["created", "updated", "archived", "restored"]), name="issue_event_type_valid")]
+
+
+
+def new_notification_id() -> str:
+    return new_id("notification")
+
+
+class IssueNotification(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_notification_id)
+    event = models.ForeignKey(IssueEvent, on_delete=models.CASCADE, related_name="notifications")
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="issue_notifications")
+    issueTitle = models.CharField(max_length=240)
+    kind = models.CharField(max_length=16)
+    readAt = models.DateTimeField(null=True, blank=True)
+    archivedAt = models.DateTimeField(null=True, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["recipient", "-createdAt", "-id"], name="notification_recipient_created")]
+        constraints = [
+            models.UniqueConstraint(fields=["event", "recipient"], name="notification_event_recipient_unique"),
+            models.CheckConstraint(condition=models.Q(kind__in=["assigned", "statusChanged"]), name="notification_kind_valid"),
+        ]

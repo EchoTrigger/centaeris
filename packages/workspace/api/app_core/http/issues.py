@@ -8,6 +8,7 @@ from ninja import Router, Status
 from pydantic import Field, field_validator
 
 from app_core.models import Issue, IssueEvent, WorkspaceMembership
+from app_core.issue_notifications import project_issue_notifications
 from app_core.workspace_access import locked_workspace_membership_for, workspace_membership_for
 from .query import valid_query_fields
 from .response_schema import COMMON_ERROR_RESPONSES
@@ -159,8 +160,9 @@ def create_issue(request, workspace_id: str, payload: IssueFields):
         issue = Issue.objects.create(workspace_id=workspace_id, creator=request.user,
             title=payload.title, description=payload.description, status=payload.status, assignee_id=payload.assignee_id)
         data = _serialize(issue)
-        IssueEvent.objects.create(issue=issue, actor=request.user, type="created", changes={
+        event = IssueEvent.objects.create(issue=issue, actor=request.user, type="created", changes={
             key: {"before": None, "after": data[key]} for key in ("title", "description", "status", "assigneeId")})
+        project_issue_notifications(event)
     return Status(201, {"issue": data})
 
 
@@ -214,7 +216,8 @@ def update_issue(request, workspace_id: str, issue_id: str, payload: IssuePatch)
             issue.version += 1
             issue.save()
             kind = ("archived" if payload.archived else "restored") if "archived" in changes else "updated"
-            IssueEvent.objects.create(issue=issue, actor=request.user, type=kind, changes=changes)
+            event = IssueEvent.objects.create(issue=issue, actor=request.user, type=kind, changes=changes)
+            project_issue_notifications(event)
         return {"issue": _serialize(issue)}
 
 

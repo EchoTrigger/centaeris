@@ -73,3 +73,6 @@ api.add_router("/api", agent_run_api_router)
 
 from app_core.http.issues import router as issues_router
 api.add_router('/api', issues_router)
+
+from app_core.http.notifications import router as notifications_router
+api.add_router("/api", notifications_router)
