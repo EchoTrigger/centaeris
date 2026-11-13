@@ -295,10 +295,8 @@
 .shSearchInputRow { display: flex; min-height: var(--workspace-header-height); flex: none; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-frame-edge); padding: 0 14px; }
 .shSearchInputRow input { min-width: 0; align-self: stretch; flex: 1; border: 0; outline: 0; background: transparent; color: var(--on-surface); font: inherit; font-size: 14px; }
 .shSearchInputRow input::placeholder { color: var(--process-text); }
-.shSearchInputRow input:focus-visible { outline: 1px solid var(--outline); }
-.shSearchInputRow:has(input:focus-visible) { border-bottom-color: var(--outline); }
 .shSearchFilters { display: flex; flex: none; flex-wrap: wrap; gap: 6px; padding: 8px 14px; }
-.shSearchFilters button { min-height: 26px; border: 0; border-radius: 999px; background: var(--surface-container); color: var(--process-text); padding: 0 10px; font-size: 12px; }
+.shSearchFilters button { min-height: 26px; border: 0; border-radius: 999px; background: transparent; color: var(--process-text); padding: 0 10px; font-size: 12px; }
 .shSearchFilters button:hover, .shSearchFilters button[aria-pressed="true"] { color: var(--on-surface); }
 .shSearchResults { min-height: 0; overflow-y: auto; padding: 0 14px 10px; }
 .shSearchResults:empty { display: none; }
@@ -722,3 +720,5 @@
   .shPluginPage, .shSoulDocumentPage { left: 0; }
   .shPluginHeader, .shPluginBody { width: calc(100% - 32px); }
 }
+
+.shSearchFilters button[aria-pressed="true"] { font-weight:500; }

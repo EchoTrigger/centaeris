@@ -57,7 +57,8 @@ This document defines the intended roles and host boundaries. Shared color defau
 come from `packages/ui/src/theme.css`. Web overrides surface roles in its own
 `styles/theme.css`: rail, reading canvas, static cards, and raised/input surfaces
 form distinct luminance layers. Cards use fill and spacing without perimeter
-outlines; keyboard focus retains a thin neutral outline. Catalog and Home entries
+outlines; keyboard controls retain a thin neutral focus outline, while text entry
+uses its caret without an additional focus frame. Catalog and Home entries
 use full-width single-column cards, including on wide screens. Selected and hovered
 navigation retains text/icon emphasis without a background fill. Web control geometry comes from
 `packages/workspace/web/src/styles/theme.css`; conversation type values come from

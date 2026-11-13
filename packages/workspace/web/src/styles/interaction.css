@@ -37,3 +37,7 @@
   border-color: transparent;
 }
 :root :is([data-slot="input"], [data-slot="textarea"]):focus-visible { border-color: var(--outline); }
+
+/* Text entry is indicated by its caret; focus does not add a second frame. */
+:root[data-theme] :is(input, textarea):focus-visible { outline:none; box-shadow:none; }
+:root[data-theme] :is([data-slot="input"], [data-slot="textarea"]):focus-visible { border-color:transparent; }

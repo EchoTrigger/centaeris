@@ -403,8 +403,8 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .workspaceComposerModelChevron { right: 6px; }
 
 .workspaceConversationPlane { position: relative; display: grid; min-height: 0; flex: 1; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; }
-.workspaceConversationPlane.isEmpty { --workspace-draft-width: min(var(--workspace-content-width), calc(100% - 2 * var(--workspace-reading-gutter))); grid-template-rows: minmax(132px, 1fr) auto auto minmax(32px, .75fr); overflow-y: auto; }
-.workspaceConversationPlane.isEmpty::after { content: ""; grid-row: 4; }
+.workspaceConversationPlane.isEmpty { --workspace-draft-width: min(var(--workspace-content-width), calc(100% - 2 * var(--workspace-reading-gutter))); grid-template-rows: minmax(132px, 1fr) auto minmax(132px, 1fr); overflow-y: auto; }
+.workspaceConversationPlane.isEmpty::after { content: ""; grid-row: 3; }
 .workspaceAgentRunList { position: relative; min-height: 0; height: 100%; }
 .workspaceMessages { position: relative; min-height: 0; overflow: auto; padding: 28px var(--workspace-reading-gutter, 16px) 36px; scrollbar-width: none; overflow-anchor: none; }
 .workspaceAgentRunList .workspaceMessages { height: 100%; box-sizing: border-box; }
@@ -579,7 +579,7 @@ button.agent-operation-summary:focus-visible { outline: 1px solid var(--outline)
 
 .workspaceComposer { display: grid; width: min(var(--workspace-content-width), calc(100% - 2 * var(--workspace-reading-gutter, 16px))); min-height: 88px; gap: 3px; margin: 0 auto 16px; border:1px solid transparent; border-radius: 12px; background:var(--surface-input); padding: 9px 10px 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, .045); transition: border-color 120ms ease, box-shadow 120ms ease; }
 .workspaceConversationPlane.isEmpty .workspaceComposer { grid-row: 2; width: var(--workspace-draft-width); margin-bottom: 0; }
-.workspaceComposer:focus-within { border-color: var(--outline); }
+
 .workspaceComposerAttachments { display: flex; min-width: 0; flex-wrap: wrap; gap: 8px; padding: 0 5px 4px; }
 .workspaceComposer textarea { width: 100%; min-height: 44px; max-height: 180px; resize: none; border: 0; background: transparent; color: var(--on-surface); padding: 6px; line-height: 1.5; }
 .workspaceComposer textarea::placeholder { color: var(--process-text); }
@@ -1266,7 +1266,7 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
   .workspaceContextPanel[aria-hidden="true"] { border-color: transparent; }
   .workspaceContextPanelResizeHandle { display: none; }
   .filePreviewBody pre { padding: 24px 18px 56px; }
-  .workspaceConversationPlane.isEmpty { grid-template-rows: minmax(112px, 1fr) auto auto minmax(24px, .8fr); }
+  .workspaceConversationPlane.isEmpty { grid-template-rows: minmax(112px, 1fr) auto minmax(112px, 1fr); }
   .workspaceSettingsPage { --settings-page-top: 28px; --settings-page-gutter: 16px; flex-direction: column; padding: 0; }
   .workspaceSettingsContent { border: 0; border-radius: 0; }
   .workspaceSettingsNav { flex: none; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; overflow: visible; padding: 8px 12px; }

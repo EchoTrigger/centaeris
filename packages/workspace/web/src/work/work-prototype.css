@@ -251,3 +251,8 @@
     padding-inline-start:calc(16px + 28px * (1 - var(--workspace-sidebar-progress)));
   }
 }
+
+/* Shared button variants own their fill; work pages do not add perimeter borders. */
+.workPrototype button[data-slot="button"] { border-color:transparent; box-shadow:none; }
+.workPrototype button[data-variant="outline"] { background:var(--surface-variant); }
+.workPrototype button[data-variant="ghost"] { background:transparent; }
