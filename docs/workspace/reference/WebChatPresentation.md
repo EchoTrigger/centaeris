@@ -55,6 +55,12 @@ response retains its elapsed-time label as static text, with no disclosure body,
 arrow or divider. Live reasoning also counts as process content. Work headers use
 no divider in either state.
 
+Running-turn user supplements appear immediately as right-aligned message bubbles
+with a small Steer label and icon. They remain visible when surrounding process
+details fold. The accepted supplement and its durable transcript record reconcile
+by input identity, with no delivery or model-processing state labels. A rejected
+send retains the composer draft and uses the existing composer error feedback.
+
 ## Focused verification
 
 From the repository root:

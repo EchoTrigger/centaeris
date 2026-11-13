@@ -9,10 +9,11 @@ import type { SessionSummary } from "../../src/router";
 import { AppPageContent } from "../../src/routes/AppRoute";
 import { ApiError } from "../../src/api";
 import { TranscriptFailureNotice } from "../../src/chat/TranscriptBlockContent";
+import { TranscriptSupplement } from "../../src/chat/TranscriptSupplement";
 import type { streamWorkspacePresentation } from "../../src/chat/workspacePresentationTransport";
 import type { TranscriptPage } from "../../src/chat/transcriptContract";
 import type { TranscriptViewStore } from "../../src/chat/transcriptViewStore";
-import type { PendingTranscriptMessage } from "../../src/chat/transcriptTurns";
+import type { PendingTranscriptMessage, PendingSupplement } from "../../src/chat/transcriptTurns";
 
 type Subscription = Parameters<typeof streamWorkspacePresentation>[0];
 const fixture = vi.hoisted(() => ({
@@ -56,12 +57,13 @@ vi.mock("../../src/chat/workspacePresentationTransport", () => ({
   },
 }));
 vi.mock("../../src/chat/TranscriptBlockList", () => ({
-  TranscriptBlockList: ({ store, pendingUserMessage, running, activity, submissionRejected }: { store: TranscriptViewStore; pendingUserMessage: PendingTranscriptMessage | null; running: boolean; activity?: string; submissionRejected?: boolean }) =>
+  TranscriptBlockList: ({ store, pendingUserMessage, pendingSupplements = [], running, activity, submissionRejected }: { store: TranscriptViewStore; pendingUserMessage: PendingTranscriptMessage | null; pendingSupplements?: readonly PendingSupplement[]; running: boolean; activity?: string; submissionRejected?: boolean }) =>
     <section aria-label="Synthetic transcript" data-running={String(running)} data-activity={activity}>
-      {store.getListSnapshot().blockIds.map(id => { const block = store.getBlockSnapshot(id); return block?.body.kind === "userText" ? <p key={id}>{block.body.content.inlineContent}</p> : null; })}
+      {store.getListSnapshot().blockIds.map(id => { const block = store.getBlockSnapshot(id); return block?.body.kind === "userText" ? <p key={id}>{block.body.content.inlineContent}</p> : block?.body.noticeType === "turn_supplement" ? <TranscriptSupplement key={id}>{String((block.body.content as { inlineContent: string }).inlineContent)}</TranscriptSupplement> : null; })}
       {pendingUserMessage ? <p data-submission-status={pendingUserMessage.status ?? "pending"} data-completed-at={pendingUserMessage.completedAtMs}>
         {pendingUserMessage.text}
       </p> : null}
+      {pendingSupplements.map(item => <TranscriptSupplement key={item.supplementId}>{item.text}</TranscriptSupplement>)}
       {submissionRejected ? <TranscriptFailureNotice message="appRoute.messageNotSent" /> : null}
     </section>,
 }));
@@ -226,7 +228,49 @@ test("an active Run shows Send for a draft and sends it to that Run as a supplem
   expect(supplement[0]).toBe("/api/sessions/session/agent-runs/original-run/supplements");
   expect(JSON.parse(String(supplement[1]?.body)).message).toBe("One more detail");
   expect((draft as HTMLTextAreaElement).value).toBe("");
+  expect(screen.getByText("chat.steer")).toBeTruthy();
+  expect(screen.getByText("One more detail")).toBeTruthy();
   expect(callsFor("/messages")).toHaveLength(1);
+  expect(callsFor("/cancel")).toHaveLength(0);
+});
+
+test("Steer appears immediately and is replaced once by its durable input identity", async () => {
+  const user = userEvent.setup(); const accepted = deferred<unknown>();
+  const initial = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, options) => path.endsWith("/messages") ? Promise.resolve(receiptFor(options))
+    : path.endsWith("/supplements") ? accepted.promise : initial(path, options));
+  await mountConversation();
+  const draft = screen.getByRole("textbox", { name: "appRoute.message" });
+  await user.type(draft, "Original input"); await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  await screen.findByRole("button", { name: "appRoute.stop" });
+  await user.type(draft, "直接给结果"); await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  expect(screen.getByText("chat.steer")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Synthetic transcript" })).getByText("直接给结果")).toBeTruthy();
+  const supplementId = JSON.parse(String(callsFor("/supplements")[0][1]?.body)).supplementId;
+  await act(async () => accepted.resolve({ sessionId: "session", agentRunId: "original-run", supplementId, disposition: "accepted", queuedCount: 1 }));
+  const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
+  await act(async () => subscription.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: "workspace.presentation.v1", workspaceId: "workspace", sessionId: "session", kind: "snapshot",
+    page: { ...page, sourceHighWater: "2", resumeCursors: [{ streamId: "workspace-transcript.v1", cursor: "2" }], blocks: [{ blockId: `message:turn:supplement:${supplementId}`, blockRevision: "1", orderKey: { sourceSequence: "2", ordinal: 0 },
+      body: { kind: "notice", noticeType: "turn_supplement", content: { inlineContent: "直接给结果", sourceRef: null }, status: "completed" } }] },
+  } }));
+  expect(screen.getAllByText("直接给结果")).toHaveLength(1);
+  expect(screen.getAllByText("chat.steer")).toHaveLength(1);
+  expect(callsFor("/messages")).toHaveLength(1);
+});
+
+test("rejected Steer preserves its draft and does not leave a sent message behind", async () => {
+  const user = userEvent.setup(); const initial = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, options) => path.endsWith("/messages") ? Promise.resolve(receiptFor(options))
+    : path.endsWith("/supplements") ? Promise.reject(new ApiError("agent_run_supplement_unavailable", 503)) : initial(path, options));
+  await mountConversation();
+  const draft = screen.getByRole("textbox", { name: "appRoute.message" });
+  await user.type(draft, "Original input"); await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  await screen.findByRole("button", { name: "appRoute.stop" });
+  await user.type(draft, "Keep this instruction"); await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  await screen.findByText("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry");
+  expect((draft as HTMLTextAreaElement).value).toBe("Keep this instruction");
+  expect(screen.queryByText("chat.steer")).toBeNull();
   expect(callsFor("/cancel")).toHaveLength(0);
 });
 

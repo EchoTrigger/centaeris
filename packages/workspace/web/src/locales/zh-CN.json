@@ -1390,6 +1390,7 @@
   "issues.execution.waitingForInput": "等待补充",
   "issues.backToIssue": "返回事项",
   "issues.retryOrigin": "重试事项链接",
+  "chat.steer": "Steer",
   "issues.executionThinking": "思考强度",
   "issues.startExecution": "开始执行",
   "issues.conversations": "会话",

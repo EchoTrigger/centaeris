@@ -1390,6 +1390,7 @@
   "issues.execution.waitingForInput": "Waiting for input",
   "issues.backToIssue": "Back to issue",
   "issues.retryOrigin": "Retry issue link",
+  "chat.steer": "Steer",
   "issues.executionThinking": "Reasoning",
   "issues.startExecution": "Start",
   "issues.conversations": "Conversations",

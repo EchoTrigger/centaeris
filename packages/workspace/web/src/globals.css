@@ -1346,7 +1346,10 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 
 .workspaceTranscriptTurn { display: grid; min-width: 0; gap: 18px; }
 
-.workspaceSupplement { justify-self: end; max-width: 82%; padding: 8px 14px; border-radius: 12px; background: var(--surface-container, #f4f4f4); }
+.workspaceSupplement { justify-self: stretch; justify-items: end; max-width:100%; padding:0; gap:4px; background:transparent; }
+.workspaceSupplementHeading { display:flex; align-items:center; gap:5px; color:var(--process-text); font-size:12px; line-height:18px; }
+.workspaceSupplementHeading svg { width:14px; height:14px; stroke-width:1.8; }
+.workspaceSupplement > .workspaceUserMessage { max-width:min(620px,82%); overflow-wrap:anywhere; }
 
 /* The light surface needs a distinct message background without altering dark mode. */
 :root:not([data-theme="dark"]) .workspaceUserMessage { background: #eceff0; }

@@ -9,6 +9,26 @@ export type PendingTranscriptMessage = Readonly<{
   completedAtMs?: number;
 }>;
 
+export type PendingSupplement = Readonly<{
+  supplementId: string;
+  sessionId: string;
+  agentRunId: string;
+  text: string;
+}>;
+
+export function hasCommittedSupplement(
+  pending: PendingSupplement,
+  sessionId: string | null,
+  blockIds: readonly string[],
+  read: (id: string) => TranscriptBlock | null | undefined,
+): boolean {
+  if (pending.sessionId !== sessionId) return false;
+  // Core constructs and validates message:{turnId}:supplement:{supplementId}.
+  // Browser supplement IDs are UUIDs; reconcile their identity, never message text.
+  return blockIds.some(id => id.endsWith(`:supplement:${pending.supplementId}`)
+    && read(id)?.body.kind === "notice" && read(id)?.body.noticeType === "turn_supplement");
+}
+
 export function hasCommittedPendingMessage(
   pending: PendingTranscriptMessage | null | undefined,
   sessionId: string | null,

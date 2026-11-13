@@ -21,7 +21,7 @@ import { useModalDialog } from "../components/useModalDialog";
 import { streamWorkspacePresentation } from "../chat/workspacePresentationTransport";
 import { createTranscriptViewStore } from "../chat/transcriptViewStore";
 import { compareTranscriptBlocks } from "../chat/transcriptContract";
-import { hasCommittedPendingMessage } from "../chat/transcriptTurns";
+import { hasCommittedPendingMessage, hasCommittedSupplement } from "../chat/transcriptTurns";
 import { TranscriptToolOperationRegistry } from "../chat/transcriptToolOperations";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
 import { useTranscriptSearchTarget } from "../chat/useTranscriptSearchTarget";
@@ -214,6 +214,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
   const { setDraft } = draftStore;
   const [rejectedSubmissionScopes, setRejectedSubmissionScopes] = useState(() => new Set());
   const [pendingUserMessage, setPendingUserMessage] = useState(null);
+  const [pendingSupplements, setPendingSupplements] = useState([]);
   const pendingUserMessageRef = useRef(null);
   useEffect(() => { pendingUserMessageRef.current = pendingUserMessage; }, [pendingUserMessage]);
   const [workTime, setWorkTime] = useState(null);
@@ -700,6 +701,10 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
         if (!isCurrent()) return;
         setLoadingHistory(false);
         if (hasCommittedPendingMessage(pendingUserMessageRef.current, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot)) setPendingUserMessage(null);
+        setPendingSupplements(items => {
+          const remaining = items.filter(item => !hasCommittedSupplement(item, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot));
+          return remaining.length === items.length ? items : remaining;
+        });
         const pending = operations.pending();
         if (pending?.receipt?.sessionId === selectedSessionId) operations.complete(pending.operationId);
       },
@@ -775,6 +780,10 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
         if (view && selectedSessionId) sessionViewCache.set(selectedSessionId, view);
         setPresentationReady(true);
         if (hasCommittedPendingMessage(pendingUserMessageRef.current, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot)) setPendingUserMessage(null);
+        setPendingSupplements(items => {
+          const remaining = items.filter(item => !hasCommittedSupplement(item, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot));
+          return remaining.length === items.length ? items : remaining;
+        });
         setReadableThrough(checkpoint.sourceHighWater);
         setLoadingHistory(false);
         setStreamIssue(null);
@@ -937,6 +946,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
       setComposerError("");
       const supplementId = crypto.randomUUID();
       auxiliaryRequestRef.current = supplementId;
+      setPendingSupplements(items => [...items, { supplementId, sessionId, agentRunId: activeAgentRunId, text }]);
       try {
         const response = await apiResponse(`/api/sessions/${sessionId}/agent-runs/${activeAgentRunId}/supplements`, {
           method: "POST",
@@ -961,6 +971,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
         setDraft(value => value === submittedDraft ? "" : value);
         setSubmissionRejected(false);
       } catch (requestError) {
+        setPendingSupplements(items => items.filter(item => item.supplementId !== supplementId));
         if (isCurrentRequest()) setComposerError(requestError?.message === "agent_run_supplement_unavailable" ? t("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry") : t("appRoute.unableToSendSupplementalInput"));
       } finally {
         if (auxiliaryRequestRef.current === supplementId) auxiliaryRequestRef.current = null;
@@ -1588,6 +1599,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
             onShowArtifact={showArtifact}
             onOpenSubagent={showSubagent}
             pendingUserMessage={searchEventId ? null : visiblePendingMessage}
+            pendingSupplements={searchEventId ? [] : pendingSupplements}
             submissionRejected={!searchEventId && rejectedSubmissionScopes.has(requestScopeKey)}
             onReleaseLoadedHistory={searchEventId ? undefined : releaseLoadedTranscriptHistory}
             running={!searchEventId && (hasActiveAgentRun || Boolean(sending && visiblePendingMessage && !["failed", "cancelled", "completed"].includes(visiblePendingMessage.status)))}
