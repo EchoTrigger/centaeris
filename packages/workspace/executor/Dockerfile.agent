@@ -61,7 +61,7 @@ COPY --from=python-deps /opt/centaeris/venv /opt/centaeris/venv
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=build /src/target/static-helper/execution_agent /opt/centaeris/bin/execution_agent
-COPY LICENSE LICENSE-APACHE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris-workspace/
+COPY LICENSE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris-workspace/
 COPY packages/model-catalog/centaeris_model_catalog/logos/LICENSE /usr/share/licenses/centaeris-workspace/packages/model-catalog/centaeris_model_catalog/logos/LICENSE
 COPY skills/system /opt/centaeris/system-skills
 

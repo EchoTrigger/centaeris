@@ -19,12 +19,11 @@ is part of source unification. Only the root configuration is effective.
 
 ## Licensing boundaries
 
-The repository and complete Desktop, TUI, and Workspace products retain the
-AGPL-3.0-only default. [LICENSING.md](../../LICENSING.md) records the Apache-2.0
-foundation-package exceptions and existing System Skill exceptions; third-party
-materials retain their own notices. Package manifests and bundled license texts
-must agree with that scope. This licensing change does not rewrite the frozen
-source snapshots, their manifests, or previously published revisions.
+Original Centaeris code, documentation, and all first-party packages are licensed
+under AGPL-3.0-only. [LICENSING.md](../../LICENSING.md) records this scope and the
+third-party materials that retain their own licenses and notices. Package
+manifests and bundled license texts must agree with that scope. Frozen source
+snapshots retain their recorded contents and manifests.
 
 ## Dependencies
 

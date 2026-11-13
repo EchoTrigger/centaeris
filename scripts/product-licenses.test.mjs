@@ -8,13 +8,12 @@ import { writeProductLicenses, checkProductLicenses } from "./product-licenses.m
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const logoLicense = "packages/model-catalog/centaeris_model_catalog/logos/LICENSE";
 
-test("product distributions retain AGPL, Apache, scope, ownership and logo notices", async () => {
+test("product distributions retain AGPL, scope, ownership and logo notices", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "centaeris-product-licenses-"));
   try {
     await writeProductLicenses(repoRoot, root);
     for (const [source, destination] of [
       ["LICENSE", "LICENSE.centaeris.txt"],
-      ["LICENSE-APACHE", "LICENSE-APACHE"],
       ["LICENSING.md", "LICENSING.md"],
       ["COPYRIGHT", "COPYRIGHT"],
       [logoLicense, logoLicense],
@@ -23,8 +22,8 @@ test("product distributions retain AGPL, Apache, scope, ownership and logo notic
         await fs.readFile(path.join(repoRoot, source)));
     }
     await checkProductLicenses(repoRoot, root);
-    await fs.writeFile(path.join(root, "LICENSE-APACHE"), "truncated license");
-    await assert.rejects(checkProductLicenses(repoRoot, root), /LICENSE-APACHE/);
+    await fs.writeFile(path.join(root, "LICENSE.centaeris.txt"), "truncated license");
+    await assert.rejects(checkProductLicenses(repoRoot, root), /LICENSE\.centaeris\.txt/);
     await writeProductLicenses(repoRoot, root);
     await fs.unlink(path.join(root, logoLicense));
     await assert.rejects(checkProductLicenses(repoRoot, root), /ENOENT/);
