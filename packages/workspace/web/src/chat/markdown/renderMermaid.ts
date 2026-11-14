@@ -16,7 +16,7 @@ export function renderMermaid(code: string, dark: boolean, cancelled: () => bool
     const text = style.getPropertyValue("--on-surface").trim();
     const outline = style.getPropertyValue("--outline").trim();
     mermaid.initialize({
-      theme: "base", startOnLoad: false, securityLevel: "strict",
+      theme: "base", look: "classic", startOnLoad: false, securityLevel: "strict",
       htmlLabels: false, flowchart: { htmlLabels: false }, suppressErrorRendering: true,
       fontFamily: style.fontFamily,
       themeVariables: {
@@ -28,7 +28,7 @@ export function renderMermaid(code: string, dark: boolean, cancelled: () => bool
         actorBkg: raised, actorBorder: outline, actorTextColor: text,
         noteBkgColor: surface, noteTextColor: text, noteBorderColor: outline,
       },
-      secure: ["secure", "securityLevel", "startOnLoad", "maxTextSize", "maxEdges", "suppressErrorRendering", "htmlLabels", "flowchart", "themeCSS", "theme", "themeVariables", "fontFamily"],
+      secure: ["secure", "securityLevel", "startOnLoad", "maxTextSize", "maxEdges", "suppressErrorRendering", "htmlLabels", "flowchart", "themeCSS", "theme", "themeVariables", "fontFamily", "look"],
     });
     const { svg } = await mermaid.render(`centaeris-mermaid-${nextId++}`, code);
     return cancelled() ? null : sanitizeMermaidSvg(svg);
