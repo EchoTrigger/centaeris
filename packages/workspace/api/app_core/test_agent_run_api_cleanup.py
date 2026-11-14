@@ -102,7 +102,7 @@ class AgentRunApiCleanupTests(TransactionTestCase):
         self.assertEqual(collect_agent_run_api_cleanup().cleaned, [])
         self.runtime.assert_called_once()
         expected = f"workspace-agent:agent-run:{{{self.run.pk}}}"
-        self.redis.return_value.delete.assert_called_once_with(f"{expected}:signals", f"{expected}:live:text", f"{expected}:live:meta")
+        self.redis.return_value.delete.assert_called_once_with(f"{expected}:signals", f"{expected}:live:text", f"{expected}:live:meta", f"{expected}:live:reasoning")
 
     def test_deleted_credential_leaves_no_receipt_after_cleanup(self):
         self.operation.credential.delete()

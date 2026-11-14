@@ -64,6 +64,28 @@ Opening or refreshing a Session restores accepted supplements from Runtime's
 durable queue through the existing active-Run read. Restoration does not consume
 the input and reconciles by supplement identity when its transcript record arrives.
 
+## Live delivery
+
+Each presentation subscription starts its live content with a complete `live`
+snapshot. Subsequent `liveDelta` frames contain `agentRunId` and a `delta` with
+`turnId`, `messageId`, `afterSequence`, `baseRevision`, `revision`, `textOffset`,
+`text` and `reasoning`. Offsets count UTF-8 bytes, and `text` is the appended
+suffix. A non-null reasoning delta contains `blockId`, `requestId`, `offset` and
+`text`; null means reasoning is unchanged. Clearing reasoning, changing its
+identity, correcting text or changing the live identity requires a complete
+snapshot. Revisions may skip, but a delta applies only to its exact base revision
+and offsets. Projection resets and reconnections establish a new complete base.
+
+Live snapshots and deltas carry no replay cursor. Only a fully applied committed
+checkpoint advances the durable cursor. Disconnecting delivery does not cancel
+the accepted Run, and a terminal notice does not discard readable live text before
+its committed replacement arrives.
+
+Redis retains one complete text/reasoning snapshot and bounded position signals.
+Normal publication appends only new bytes. The browser delivery adapter reads
+suffixes atomically against its connection's baseline; a replacement boundary
+forces a complete snapshot, including when the replacement has the same length.
+
 ## Focused verification
 
 From the repository root:

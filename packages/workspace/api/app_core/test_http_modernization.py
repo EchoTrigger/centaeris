@@ -564,7 +564,11 @@ class NinjaContractTests(TestCase):
                 "turnId": signal["turnId"],
                 "afterSequence": "2",
                 "revision": "0",
+                "textResetRevision": "0",
+                "reasoningResetRevision": "0",
+                "reasoning": "null",
                 },
+                "",
                 "",
             )
         )

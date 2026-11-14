@@ -12,7 +12,7 @@ from django.db.models import Exists, OuterRef, QuerySet
 from django.http import JsonResponse, QueryDict
 from ninja import Router
 
-from app_core.agent_run_stream import _load_live_text_state_async, _capture_signal_tail, _redis_stream_client, agent_run_signal_key
+from app_core.agent_run_stream import LiveTextRead, load_live_text_update, _capture_signal_tail, _redis_stream_client, agent_run_signal_key
 from app_core.app_delegations import session_authority_is_current
 from app_core.models import AgentRun, Session, SessionEvent, WorkspaceMembership
 from app_core.operation_presentation import operation_records, operation_detail
@@ -137,14 +137,14 @@ class PresentationLoader:
             batches = await _redis_stream_client.xread({agent_run_signal_key(run_id): cursor}, count=100, block=30000)
         return batches[-1][1][-1][0] if batches else cursor
 
-    async def live(self, run_id):
+    async def live(self, run_id, cursor=None):
         try:
             # Ephemeral Redis loss must never prevent the next authoritative
             # Postgres observation. A hung read is treated as unavailable too.
             async with asyncio.timeout(.5):
-                return await _load_live_text_state_async(run_id)
+                return await load_live_text_update(run_id, cursor)
         except (redis.RedisError, TimeoutError):
-            return None
+            return LiveTextRead("live", None, None)
 
 
 @router.get("/workspaces/{workspace_id}/presentation/events", auth=usage_auth("sessions:read"),

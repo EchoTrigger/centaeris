@@ -1,11 +1,94 @@
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import skipUnless
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 from django.test import SimpleTestCase
 
 from . import agent_run_stream as stream
+
+
+@skipUnless(os.environ.get("TEST_REASONING_REDIS_URL"), "requires isolated TEST_REASONING_REDIS_URL")
+class LiveRangeRedisTests(SimpleTestCase):
+    def setUp(self):
+        self.redis = stream.redis.Redis.from_url(os.environ["TEST_REASONING_REDIS_URL"], decode_responses=True)
+        self.run = "live-range-" + uuid4().hex
+        self.prefix = f"workspace-agent:agent-run:{{{self.run}}}:live"
+        self.keys = [self.prefix + suffix for suffix in (":text", ":meta", ":reasoning")]
+        self.meta = {"messageId": "message", "turnId": "turn", "afterSequence": "4", "revision": "1",
+                     "textResetRevision": "0", "reasoningResetRevision": "0", "reasoning": "null"}
+        self.write("汉", "")
+        self.addCleanup(self.redis.close)
+        self.addCleanup(lambda: self.redis.delete(*self.keys))
+
+    def write(self, text, reasoning):
+        with self.redis.pipeline(transaction=True) as pipeline:
+            pipeline.set(self.keys[0], text).hset(self.keys[1], mapping=self.meta).set(self.keys[2], reasoning).execute()
+
+    async def read(self, cursor=None):
+        async with stream.async_redis.Redis.from_url(os.environ["TEST_REASONING_REDIS_URL"], decode_responses=True) as client:
+            with patch.object(stream, "_redis_stream_client", client):
+                return await stream.load_live_text_update(self.run, cursor)
+
+    async def test_append_reads_only_utf8_suffix_and_can_skip_publication_revisions(self):
+        first = await self.read()
+        self.assertEqual((first.kind, first.value["text"], first.cursor["textOffset"]), ("live", "汉", 3))
+        with self.redis.pipeline(transaction=True) as pipeline:
+            pipeline.append(self.keys[0], "🚀续").hset(self.keys[1], "revision", "3").execute()
+        update = await self.read(first.cursor)
+        self.assertEqual(update.kind, "liveDelta")
+        self.assertEqual(update.value, {"messageId": "message", "turnId": "turn", "afterSequence": 4,
+            "baseRevision": 1, "revision": 3, "textOffset": 3, "text": "🚀续", "reasoning": None})
+        self.assertEqual(update.cursor["textOffset"], len("汉🚀续".encode()))
+        self.assertIsNone((await self.read(update.cursor)).kind)
+        self.assertEqual((await self.read()).value["text"], "汉🚀续")
+
+    async def test_same_length_replacement_and_reasoning_change_require_complete_snapshot(self):
+        first = await self.read()
+        self.meta.update(revision="2", textResetRevision="2")
+        self.write("字", "")
+        replacement = await self.read(first.cursor)
+        self.assertEqual((replacement.kind, replacement.value["text"]), ("live", "字"))
+        self.meta.update(revision="3", reasoningResetRevision="3",
+            reasoning=json.dumps({"blockId": "reasoning:one", "requestId": "one"}, separators=(",", ":")))
+        self.write("字", "想")
+        thinking = await self.read(replacement.cursor)
+        self.assertEqual(thinking.kind, "live")
+        self.assertEqual(thinking.value["reasoning"]["text"], "想")
+        with self.redis.pipeline(transaction=True) as pipeline:
+            pipeline.append(self.keys[2], "更多").hset(self.keys[1], "revision", "5").execute()
+        appended = await self.read(thinking.cursor)
+        self.assertEqual(appended.kind, "liveDelta")
+        self.assertEqual(appended.value["reasoning"], {"blockId": "reasoning:one", "requestId": "one", "offset": 3, "text": "更多"})
+        self.meta.update(revision="6", reasoningResetRevision="6",
+            reasoning=json.dumps({"blockId": "reasoning:two", "requestId": "two"}, separators=(",", ":")))
+        self.write("字", "另一段")
+        changed = await self.read(appended.cursor)
+        self.assertEqual(changed.kind, "live")
+        self.assertEqual(changed.value["reasoning"]["requestId"], "two")
+        self.meta.update(revision="7", reasoningResetRevision="7", reasoning="null")
+        self.write("字", "")
+        cleared = await self.read(changed.cursor)
+        self.assertEqual(cleared.kind, "live")
+        self.assertIsNone(cleared.value["reasoning"])
+
+    async def test_missing_or_replaced_identity_never_reuses_another_base(self):
+        first = await self.read()
+        self.meta.update(turnId="next", messageId="next-message", afterSequence="5", revision="1")
+        self.write("新", "")
+        self.assertEqual((await self.read(first.cursor)).kind, "live")
+        self.redis.delete(*self.keys)
+        missing = await self.read(first.cursor)
+        self.assertEqual((missing.kind, missing.value, missing.cursor), ("live", None, None))
+
+    async def test_unknown_metadata_is_rejected_even_when_revision_has_not_changed(self):
+        first = await self.read()
+        self.redis.hset(self.keys[1], "unknown", "unsupported")
+        with self.assertRaisesRegex(ValueError, "live_read_invalid"):
+            await self.read(first.cursor)
 
 
 class TransientStreamTests(SimpleTestCase):

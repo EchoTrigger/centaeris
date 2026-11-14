@@ -11,6 +11,7 @@ from django.conf import settings
 from django.test import SimpleTestCase, TransactionTestCase
 
 from .presentation_stream import CONTENT_DISPLAY_BYTES, PROJECTION_VERSION, PresentationScope, _projection_read, encode_cursor, stream_presentation
+from .agent_run_stream import LiveTextRead
 from .test_hosted_operations import OperationFixture
 from .transcript_content_relay import COMPLETE, MAX_LINE_BYTES, MEDIA_TYPE, REQUEST_SCHEMA, stream_transcript_content
 
@@ -85,7 +86,7 @@ class PresentationStreamTests(SimpleTestCase):
             "patches": [], "nextSourceHighWater": "2", "hasMore": False})
         self.loader.content_stream = Mock()
         self.loader.operations = AsyncMock(return_value=[])
-        self.loader.live = AsyncMock(return_value=None)
+        self.loader.live = AsyncMock(return_value=LiveTextRead("live", None, None))
         self.loader.revisions = AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, subagents=0, live=0))
         async def wait_for_change(_previous):
             await asyncio.Event().wait()
@@ -679,20 +680,77 @@ class PresentationStreamTests(SimpleTestCase):
     async def test_large_live_snapshot_below_transport_budget_is_delivered(self):
         self.state["agentRun"]["status"] = "running"
         self.state["activity"] = "thinking"
-        self.loader.live.return_value = {"afterSequence": 2, "revision": 1, "turnId": "turn",
+        live = {"afterSequence": 2, "revision": 1, "turnId": "turn",
             "messageId": "live-message", "text": "x" * (1024 * 1024 + 1)}
+        self.loader.live.return_value = LiveTextRead("live", live, {"revision": 1})
         source = stream_presentation(self.scope, self.loader)
         try:
             frames = await self.until(source, lambda item, frame: item["kind"] == "live")
         finally:
             await source.aclose()
-        self.assertEqual(data(frames[-1])["live"]["text"], self.loader.live.return_value["text"])
+        self.assertEqual(data(frames[-1])["live"]["text"], live["text"])
+
+    async def test_live_delta_uses_the_sent_base_without_advancing_the_durable_cursor(self):
+        self.state["agentRun"]["status"] = "running"
+        live = {"afterSequence": 2, "revision": 1, "turnId": "turn", "messageId": "message", "text": "汉"}
+        first_cursor = {"revision": 1, "textOffset": 3}
+        delta = {key: live[key] for key in ("afterSequence", "turnId", "messageId")}
+        delta.update(baseRevision=1, revision=3, textOffset=3, text="🚀", reasoning=None)
+        self.loader.live.side_effect = [LiveTextRead("live", live, first_cursor), LiveTextRead("liveDelta", delta, {"revision": 3, "textOffset": 7})]
+        self.loader.wait_for_change = AsyncMock(return_value=None)
+        source = stream_presentation(self.scope, self.loader)
+        try:
+            initial = await self.until(source, lambda item, frame: item["kind"] == "live")
+            following = await self.until(source, lambda item, frame: item["kind"] == "liveDelta")
+        finally:
+            await source.aclose()
+        self.assertEqual(self.loader.live.await_args_list[0].args, ("run", None))
+        self.assertEqual(self.loader.live.await_args_list[1].args, ("run", first_cursor))
+        self.assertEqual(data(following[-1])["delta"], delta)
+        self.assertTrue(any(frame.startswith("id:") for frame in initial))
+        self.assertFalse(any(frame.startswith("id:") for frame in following))
+
+    async def test_next_live_identity_is_sent_when_its_revision_restarts(self):
+        self.state["agentRun"]["status"] = "running"
+        first = {"afterSequence": 2, "revision": 1, "turnId": "turn", "messageId": "message", "text": "first"}
+        following = {**first, "afterSequence": 3, "messageId": "next-message", "text": "next"}
+        self.loader.live.side_effect = [LiveTextRead("live", value, {"revision": 1}) for value in (first, following)]
+        self.loader.wait_for_change = AsyncMock(return_value=None)
+        source = stream_presentation(self.scope, self.loader)
+        try:
+            await self.until(source, lambda item, frame: item["kind"] == "live")
+            frames = await self.until(source, lambda item, frame: item["kind"] == "live")
+        finally:
+            await source.aclose()
+        self.assertEqual(data(frames[-1])["live"], following)
+
+    async def test_projection_reset_drops_the_live_base_before_reloading_current_text(self):
+        from .runtime_client import TranscriptRuntimeError
+        self.state["agentRun"]["status"] = "running"
+        live = {"afterSequence": 2, "revision": 1, "turnId": "turn", "messageId": "message", "text": "complete"}
+        self.loader.live.return_value = LiveTextRead("live", live, {"revision": 1})
+        self.loader.wait_for_change = AsyncMock(return_value=None)
+        source = stream_presentation(self.scope, self.loader)
+        try:
+            await self.until(source, lambda item, frame: item["kind"] == "live")
+            self.loader.revisions.return_value = {**self.loader.revisions.return_value, "state": 1}
+            self.loader.state.return_value = {**self.state, "sourceHighWater": "3"}
+            self.loader.page.return_value = {**self.page, "sourceHighWater": "3", "projectionGeneration": "rebuilt",
+                "resumeCursors": [{"streamId": "workspace-transcript.v1", "cursor": "3"}]}
+            self.loader.patches.side_effect = TranscriptRuntimeError({"error": "transcript_view_invalidated"})
+            frames = await self.until(source, lambda item, frame: item["kind"] == "live")
+        finally:
+            await source.aclose()
+        self.assertTrue(any(data(frame)["kind"] == "reset" for frame in frames))
+        self.assertEqual(self.loader.live.await_args_list[-1].args, ("run", None))
+        self.assertEqual(data(frames[-1])["live"], live)
 
     async def test_live_snapshot_above_transport_budget_fails_explicitly_without_truncation(self):
         self.state["agentRun"]["status"] = "running"
         self.state["activity"] = "thinking"
-        self.loader.live.return_value = {"afterSequence": 2, "revision": 1, "turnId": "turn",
+        live = {"afterSequence": 2, "revision": 1, "turnId": "turn",
             "messageId": "live-message", "text": "x" * (4 * 1024 * 1024)}
+        self.loader.live.return_value = LiveTextRead("live", live, {"revision": 1})
         source = stream_presentation(self.scope, self.loader)
         frames = []
         with self.assertRaisesRegex(RuntimeError, "presentation_frame_budget_exceeded"):

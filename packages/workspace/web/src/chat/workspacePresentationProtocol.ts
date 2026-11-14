@@ -15,6 +15,15 @@ export type PresentationCheckpoint = Common & Readonly<{ kind: 'checkpoint'; pro
 export type PresentationActivity = Common & Readonly<{ kind: 'activity'; agentRunId: string; sourceHighWater: string; activity: 'thinking' | 'working' | 'waitingInput' | 'retrying' | 'preserving' | null }>;
 export type PendingSessionQuestion = Readonly<{ questionId: string; continuationId: string; turnId: string; question: string; options: readonly string[] }>;
 export type PresentationQuestion = Common & Readonly<{ kind: 'question'; agentRunId: string; sourceHighWater: string; question: PendingSessionQuestion | null }>;
+export type PresentationLive = Readonly<{
+  afterSequence: number; revision: number; turnId: string; messageId: string; text: string;
+  reasoning?: Readonly<{ blockId: string; requestId: string; text: string }> | null;
+}>;
+export type PresentationLiveDelta = Readonly<{
+  afterSequence: number; turnId: string; messageId: string; baseRevision: number; revision: number;
+  textOffset: number; text: string;
+  reasoning: Readonly<{ blockId: string; requestId: string; offset: number; text: string }> | null;
+}>;
 export type PresentationFrame =
   | PresentationViewRevision
   | PresentationActivity
@@ -23,7 +32,8 @@ export type PresentationFrame =
   | (Common & Readonly<{ kind: 'snapshot'; page: TranscriptPage }>)
   | (Common & Readonly<{ kind: 'patches'; page: TranscriptPatchPage }>)
   | (Common & Readonly<{ kind: 'content'; range: TranscriptContentRange }>)
-  | (Common & Readonly<{ kind: 'live'; agentRunId: string; live: Readonly<{ afterSequence: number; revision: number; turnId: string; messageId: string; text: string; reasoning?: Readonly<{ blockId: string; requestId: string; text: string }> | null }> | null }>)
+  | (Common & Readonly<{ kind: 'live'; agentRunId: string; live: PresentationLive | null }>)
+  | (Common & Readonly<{ kind: 'liveDelta'; agentRunId: string; delta: PresentationLiveDelta }>)
   | (Common & Readonly<{ kind: 'operation'; detail: PresentationOperation }>)
   | PresentationCheckpoint
   | (Common & Readonly<{ kind: 'reset'; reason: 'cursorInvalid' | 'projectionInvalidated' }>);
@@ -34,7 +44,7 @@ const FIELDS: Record<PresentationFrame['kind'], readonly string[]> = {
   activity: ['agentRunId', 'sourceHighWater', 'activity'],
   question: ['agentRunId', 'sourceHighWater', 'question'],
   navigation: ['snapshotId', 'offset', 'hasMore', 'sessions'], snapshot: ['page'], patches: ['page'], content: ['range'],
-  live: ['agentRunId', 'live'], operation: ['detail'], checkpoint: ['projectionGeneration', 'sourceHighWater', 'agentRun'], reset: ['reason'],
+  live: ['agentRunId', 'live'], liveDelta: ['agentRunId', 'delta'], operation: ['detail'], checkpoint: ['projectionGeneration', 'sourceHighWater', 'agentRun'], reset: ['reason'],
 };
 const SESSION_FIELDS = ['id', 'workspaceId', 'projectId', 'currentEnvironmentId', 'executionMode', 'title', 'origin', 'status', 'deletedAt', 'isPinned', 'isUnread', 'hasActiveAgentRun', 'updatedAt', 'latestAttentionSequence', 'readThroughSequence', 'attentionRevision', 'isManuallyUnread'];
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
@@ -101,6 +111,26 @@ export function validatePresentationFrame(value: unknown, identity: Presentation
       for (const key of ['turnId', 'messageId']) requireString(live[key], `presentation live ${key}`);
       validateLiveReasoning(live.reasoning);
       if (new TextEncoder().encode(JSON.stringify(live)).byteLength > PRESENTATION_MAX_FRAME_BYTES) invalid('presentation live frame is too large');
+      break;
+    }
+    case 'liveDelta': {
+      const delta = value.delta;
+      if (typeof value.agentRunId !== 'string' || !value.agentRunId.trim()
+        || !isRecord(delta) || !hasExactFields(delta, ['afterSequence', 'turnId', 'messageId', 'baseRevision', 'revision', 'textOffset', 'text', 'reasoning'])
+        || ![delta.afterSequence, delta.textOffset].every(item => Number.isSafeInteger(item) && Number(item) >= 0)
+        || !Number.isSafeInteger(delta.baseRevision) || Number(delta.baseRevision) < 1
+        || !Number.isSafeInteger(delta.revision) || Number(delta.revision) <= Number(delta.baseRevision)
+        || typeof delta.turnId !== 'string' || !delta.turnId.trim()
+        || typeof delta.messageId !== 'string' || !delta.messageId.trim()
+        || typeof delta.text !== 'string') invalid('invalid presentation live delta');
+      const reasoning = delta.reasoning;
+      if (reasoning !== null && (!isRecord(reasoning)
+        || !hasExactFields(reasoning, ['blockId', 'requestId', 'offset', 'text'])
+        || typeof reasoning.requestId !== 'string' || !reasoning.requestId.trim()
+        || reasoning.blockId !== `reasoning:${reasoning.requestId}`
+        || !Number.isSafeInteger(reasoning.offset) || Number(reasoning.offset) < 0
+        || typeof reasoning.text !== 'string')) invalid('invalid presentation live reasoning delta');
+      if (new TextEncoder().encode(JSON.stringify(delta)).byteLength > PRESENTATION_MAX_FRAME_BYTES) invalid('presentation live delta is too large');
       break;
     }
     case 'operation': {

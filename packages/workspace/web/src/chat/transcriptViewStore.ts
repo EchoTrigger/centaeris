@@ -77,7 +77,15 @@ export function createTranscriptViewStore() {
   function setLiveSnapshot(next: TranscriptLiveOverlay | null) {
     if (next === null || next.messageId !== liveSnapshot?.messageId || next.turnId !== liveSnapshot?.turnId
       || next.afterSourceHighWater !== liveSnapshot?.afterSourceHighWater) liveTextReplacementBlockId = null;
-    if (canonical(liveSnapshot) === canonical(next)) return;
+    const previous = liveSnapshot;
+    if (previous === next || (previous !== null && next !== null
+      && previous.revision === next.revision && previous.messageId === next.messageId
+      && previous.turnId === next.turnId && previous.afterSourceHighWater === next.afterSourceHighWater
+      && previous.text === next.text && (previous.reasoning === next.reasoning
+        || (previous.reasoning !== null && next.reasoning !== null
+          && previous.reasoning.blockId === next.reasoning.blockId
+          && previous.reasoning.requestId === next.reasoning.requestId
+          && previous.reasoning.text === next.reasoning.text)))) return;
     liveSnapshot = next;
     liveListeners.forEach((listener) => listener());
   }
@@ -432,6 +440,13 @@ export function createTranscriptViewStore() {
     if (expectedEpoch !== viewEpoch || identity === null) return false;
     const next = parseTranscriptLiveOverlay(raw);
     if (next === null) return false;
+    return applyPresentationLiveOverlay(next, expectedEpoch);
+  }
+
+  // The presentation controller carries its validated immutable live object
+  // forward; append delivery must not clone or serialize the accumulated body.
+  function applyPresentationLiveOverlay(next: TranscriptLiveOverlay, expectedEpoch: number) {
+    if (expectedEpoch !== viewEpoch || identity === null) return false;
     if (liveSnapshot !== null) {
       const afterRelation = BigInt(next.afterSourceHighWater) - BigInt(liveSnapshot.afterSourceHighWater);
       if (afterRelation < 0n || (afterRelation === 0n && next.revision <= liveSnapshot.revision)) return false;
@@ -581,6 +596,7 @@ export function createTranscriptViewStore() {
     prependPage,
     applyPatchPage,
     applyLiveOverlay,
+    applyPresentationLiveOverlay,
     clearLiveOverlay,
     clear,
     releaseLoadedHistory,
