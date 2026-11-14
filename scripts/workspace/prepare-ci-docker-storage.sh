@@ -49,17 +49,21 @@ systemd-run --unit=centaeris-ci-builder-containerd --service-type=exec --propert
 systemd-run --unit=centaeris-ci-runtime-containerd --service-type=exec --property=Delegate=yes \
   containerd --root "$runtime_root/containerd" --state /run/centaeris-runtime-containerd/state \
   --address "$runtime_containerd_socket"
-systemd-run --unit=centaeris-ci-builder-docker --service-type=exec --property=Delegate=yes \
-  dockerd --host "$builder_socket" --config-file /run/centaeris-builder/docker.json \
-  --data-root "$builder_root" --exec-root /run/centaeris-builder/exec \
-  --pidfile /run/centaeris-builder/docker.pid --storage-driver overlay2 \
-  --bridge ct-build0 --containerd "$builder_containerd_socket"
 systemd-run --unit=centaeris-ci-runtime-docker --service-type=exec --property=Delegate=yes \
   dockerd --host unix:///var/run/docker.sock --config-file /run/centaeris-runtime-containerd/docker.json \
   --data-root "$runtime_root/docker" --pidfile /run/docker.pid --storage-driver overlay2 \
   --containerd "$runtime_containerd_socket"
 
-for endpoint in "$builder_socket" unix:///var/run/docker.sock; do
+# Docker 28 checks for each shared firewall chain before creating it. Finish
+# runtime initialization before the builder can create the same chains.
+for endpoint in unix:///var/run/docker.sock "$builder_socket"; do
+  if [[ "$endpoint" == "$builder_socket" ]]; then
+    systemd-run --unit=centaeris-ci-builder-docker --service-type=exec --property=Delegate=yes \
+      dockerd --host "$builder_socket" --config-file /run/centaeris-builder/docker.json \
+      --data-root "$builder_root" --exec-root /run/centaeris-builder/exec \
+      --pidfile /run/centaeris-builder/docker.pid --storage-driver overlay2 \
+      --bridge ct-build0 --containerd "$builder_containerd_socket"
+  fi
   ready=0
   for ((attempt = 0; attempt < 120; attempt++)); do
     if docker --host "$endpoint" info >/dev/null 2>&1; then ready=1; break; fi
