@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router";
 import { Button } from "@centaeris/ui/button";
 import { ChevronDown, MessagesSquare, Plus, RefreshCw } from "lucide-react";
 import { Textarea } from "@centaeris/ui/textarea";
@@ -8,12 +8,13 @@ import { OperationClient } from "../chat/operationReceipts";
 import { MarkdownContent } from "../chat/MarkdownContent";
 import { readModelThinkingMode, readPreferredModelIdentity } from "../preferences";
 import { sessionChatPath } from "../shell/sessionNavigation.mjs";
+import { ConversationDockContext } from "../shell/ConversationDock";
 import { useTranslation } from "../i18n";
 import { DeliverableSubmit } from "./IssueDeliverables";
 
 export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
+  const conversationDock = useContext(ConversationDockContext);
   const [params, setParams] = useSearchParams();
   const endpoint = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(issue.id)}/executions`;
   const operations = useMemo(() => new OperationClient({ userId, workspaceId, command: "submitMessage" }), [userId, workspaceId]);
@@ -61,7 +62,10 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
     if (!mounted.current) return;
     if (result.session.workspaceId !== workspaceId || result.session.id !== receipt.sessionId) throw new Error("operation_receipt_invalid");
     operations.complete(receipt.operationId);
-    navigate(sessionChatPath(workspaceId, receipt.sessionId));
+    conversationDock.openSession(result.session);
+    setExpanded(false);
+    setInstructions("");
+    setRevision(value => value + 1);
   }
   async function launch() {
     if (pending || !modelId) return;

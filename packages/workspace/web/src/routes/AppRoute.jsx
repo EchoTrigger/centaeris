@@ -1678,7 +1678,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
       </section>
 
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
-        <ConversationDockContext.Provider value={{ container: dockContainer, chatFloating, minimizeChat: () => { if (chatFloating) keepChatTab(); onMinimizeChat(); } }}>{catalogContent}</ConversationDockContext.Provider>
+        <ConversationDockContext.Provider value={{ container: dockContainer, chatFloating, openSession: openHistorySession, minimizeChat: () => { if (chatFloating) keepChatTab(); onMinimizeChat(); } }}>{catalogContent}</ConversationDockContext.Provider>
       </section> : null}
       {dockContainer ? createPortal(<ConversationTabs panelId={chatPanelId} sessions={dockedSessions} activeId={activeSession?.id || "draft"} expanded={chatFloating && !search.open} onSelect={openDockedSession} onMinimize={onMinimizeChat} onClose={onCloseChatTab} />, dockContainer) : null}
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
