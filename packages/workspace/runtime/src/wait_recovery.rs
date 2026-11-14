@@ -200,7 +200,7 @@ impl WaitHandoff {
         }
         let (write, _) = self.normalized_snapshot()?;
         let sealed =
-            serde_json::from_str(&write.snapshot_json()).map_err(|error| error.to_string())?;
+            serde_json::from_str(write.snapshot_json()).map_err(|error| error.to_string())?;
         let current = centaeris_core::session::history::prepare_session_snapshot_write(
             &serde_json::to_string(snapshot).map_err(|error| error.to_string())?,
         )?;
@@ -325,7 +325,7 @@ impl WaitHandoff {
             };
         let (write, legacy) = self.normalized_snapshot()?;
         let mut snapshot: SessionStateSnapshot =
-            serde_json::from_str(&write.snapshot_json()).map_err(|e| e.to_string())?;
+            serde_json::from_str(write.snapshot_json()).map_err(|e| e.to_string())?;
         if self.schema != schema
             || self.handoff_key != Self::key(payload, &self.wait_checkpoint)?
             || payload.checkpoint_id != self.checkpoint_id()?
@@ -353,7 +353,7 @@ impl WaitHandoff {
                 .collect();
             snapshot.model_semantics = write
                 .entries()
-                .into_iter()
+                .iter()
                 .map(|entry| {
                     (
                         entry.message.message_id.clone(),

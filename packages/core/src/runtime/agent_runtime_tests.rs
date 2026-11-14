@@ -553,7 +553,7 @@ fn apply_test_snapshot(
         let key = (session_id.to_owned(), entry.record_id.clone());
         if let Some(stored) = state.history_entries.get(&key) {
             if serde_json::to_value(stored).map_err(|error| error.to_string())?
-                != serde_json::to_value(&entry).map_err(|error| error.to_string())?
+                != serde_json::to_value(entry).map_err(|error| error.to_string())?
             {
                 return Err("session_history_entry_content_conflict".into());
             }

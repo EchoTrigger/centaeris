@@ -842,13 +842,13 @@ impl<
                 prepared_agents,
                 session_config,
             )
-            .and_then(|projection| {
+            .map(|projection| {
                 let estimate = self.estimate_generate_prompt_admission_tokens(
                     session,
                     projection.prompt_usage_basis.as_ref(),
                     projection.raw_input_token_estimate,
                 );
-                Ok((projection, estimate))
+                (projection, estimate)
             });
         if result.is_ok() {
             estimate_span.complete();
@@ -908,7 +908,7 @@ impl<
             session.context_window.as_slice(),
             &session.model_semantics,
         )?;
-        crate::runtime::context_window::validate_context_window_materialization(&session)?;
+        crate::runtime::context_window::validate_context_window_materialization(session)?;
         let (context_messages, runtime_context_anchor_message_id) = build_model_context_messages(
             session.context_window.as_slice(),
             match input {

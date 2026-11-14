@@ -583,7 +583,7 @@ mod tests {
         );
         state.updated_at_ms = 99;
         assert_eq!(identity, state.context_revision().unwrap());
-        let mut legacy = serde_json::to_value(&compacted()).unwrap();
+        let mut legacy = serde_json::to_value(compacted()).unwrap();
         legacy.as_object_mut().unwrap().remove("history");
         let raw = serde_json::to_string(&legacy).unwrap();
         assert!(prepare_session_snapshot_write(&raw).is_err());

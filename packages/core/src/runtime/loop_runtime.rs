@@ -1978,7 +1978,9 @@ impl<
                             .await?;
                         if !resumed.tool_results.is_empty() {
                             if let Some(sink) = tool_safe_point {
-                                sink.commit(ToolSafePoint::CompletedTurn(resumed.clone()))?;
+                                sink.commit(ToolSafePoint::CompletedTurn(Box::new(
+                                    resumed.clone(),
+                                )))?;
                             }
                         }
                         if let Some(sink) = stream_sink.as_deref_mut() {
@@ -2023,7 +2025,7 @@ impl<
             let stop = continuation_run_stop(resumed_continuation);
             if !resumed.tool_results.is_empty() {
                 if let Some(sink) = tool_safe_point {
-                    sink.commit(ToolSafePoint::CompletedTurn(resumed.clone()))?;
+                    sink.commit(ToolSafePoint::CompletedTurn(Box::new(resumed.clone())))?;
                 }
             }
             if let Some(sink) = stream_sink.as_deref_mut() {
@@ -2670,7 +2672,7 @@ impl<
                 .save_session_owned(response.session_snapshot)?;
             if !response.tool_results.is_empty() {
                 if let Some(sink) = tool_safe_point {
-                    sink.commit(ToolSafePoint::CompletedTurn(response.clone()))?;
+                    sink.commit(ToolSafePoint::CompletedTurn(Box::new(response.clone())))?;
                 }
             }
             if let Some(sink) = stream_sink.as_deref_mut() {
@@ -2741,7 +2743,9 @@ impl<
                                 .await?;
                             if !resumed.tool_results.is_empty() {
                                 if let Some(sink) = tool_safe_point {
-                                    sink.commit(ToolSafePoint::CompletedTurn(resumed.clone()))?;
+                                    sink.commit(ToolSafePoint::CompletedTurn(Box::new(
+                                        resumed.clone(),
+                                    )))?;
                                 }
                             }
                             if let Some(sink) = stream_sink.as_deref_mut() {
@@ -2795,7 +2799,9 @@ impl<
                         };
                         if !resumed.tool_results.is_empty() {
                             if let Some(sink) = tool_safe_point {
-                                sink.commit(ToolSafePoint::CompletedTurn(resumed.clone()))?;
+                                sink.commit(ToolSafePoint::CompletedTurn(Box::new(
+                                    resumed.clone(),
+                                )))?;
                             }
                         }
                         if let Some(sink) = stream_sink.as_deref_mut() {

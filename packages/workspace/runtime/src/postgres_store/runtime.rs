@@ -972,6 +972,11 @@ pub struct PostgresSessionLog {
     cold_append_barrier: Arc<Mutex<Option<ColdAppendBarrier>>>,
 }
 
+struct SessionAppendCheckpoint<'a> {
+    record: &'a CheckpointRecord,
+    wait_handoff: Option<&'a crate::wait_recovery::WaitHandoff>,
+}
+
 impl std::fmt::Debug for PostgresSessionLog {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1881,8 +1886,10 @@ impl PostgresSessionLog {
                 events,
                 Some(fence),
                 None,
-                Some(checkpoint),
-                Some(handoff),
+                Some(SessionAppendCheckpoint {
+                    record: checkpoint,
+                    wait_handoff: Some(handoff),
+                }),
                 None,
             )
         })
@@ -2088,7 +2095,6 @@ impl SessionLogPort for PostgresSessionLog {
                     None,
                     None,
                     None,
-                    None,
                 )
             })
             .await
@@ -2103,7 +2109,7 @@ impl PostgresSessionLog {
         agent_run_id: &str,
         events: &[SequencedSessionRecord],
     ) -> Result<SessionCommitReceipt, String> {
-        self.append_transaction(agent_run_id, events, None, None, None, None, None)
+        self.append_transaction(agent_run_id, events, None, None, None, None)
     }
 
     pub fn append_session_records_with_runtime_job_lease_blocking(
@@ -2115,7 +2121,7 @@ impl PostgresSessionLog {
         // The blocking boundary permits sync Postgres inside Tokio without
         // creating another thread for a multi-thread Runtime blocking caller.
         run_postgres_blocking(|| {
-            self.append_transaction(agent_run_id, events, Some(fence), None, None, None, None)
+            self.append_transaction(agent_run_id, events, Some(fence), None, None, None)
         })
     }
 
@@ -2132,8 +2138,10 @@ impl PostgresSessionLog {
                 events,
                 Some(fence),
                 None,
-                Some(checkpoint),
-                None,
+                Some(SessionAppendCheckpoint {
+                    record: checkpoint,
+                    wait_handoff: None,
+                }),
                 None,
             )
         })
@@ -2162,7 +2170,6 @@ impl PostgresSessionLog {
                 Some(fence),
                 None,
                 None,
-                None,
                 Some(&prepared),
             )
         })
@@ -2176,15 +2183,7 @@ impl PostgresSessionLog {
         fence: &RuntimeJobLeaseFence,
     ) -> Result<SessionCommitReceipt, String> {
         run_postgres_blocking(|| {
-            self.append_transaction(
-                agent_run_id,
-                events,
-                Some(fence),
-                Some(rewrite),
-                None,
-                None,
-                None,
-            )
+            self.append_transaction(agent_run_id, events, Some(fence), Some(rewrite), None, None)
         })
     }
 
@@ -2194,8 +2193,7 @@ impl PostgresSessionLog {
         events: &[SequencedSessionRecord],
         fence: Option<&RuntimeJobLeaseFence>,
         rewrite: Option<&RewriteLastUserTailRequest>,
-        checkpoint: Option<&CheckpointRecord>,
-        handoff: Option<&crate::wait_recovery::WaitHandoff>,
+        checkpoint: Option<SessionAppendCheckpoint<'_>>,
         source_snapshot: Option<&SessionSnapshotWriteV1>,
     ) -> Result<SessionCommitReceipt, String> {
         let result = self.connections.with_client(|client| {
@@ -2205,8 +2203,10 @@ impl PostgresSessionLog {
                 events,
                 fence,
                 rewrite,
-                checkpoint,
-                handoff,
+                checkpoint.as_ref().map(|checkpoint| checkpoint.record),
+                checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.wait_handoff),
                 source_snapshot,
             )
         });

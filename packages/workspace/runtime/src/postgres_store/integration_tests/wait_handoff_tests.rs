@@ -159,8 +159,7 @@ fn postgres_source_checkpoint_reuses_bounded_state_and_rejects_changed_sources_o
         );
         if mode == "external_append" {
             assert!(terminal
-                .err()
-                .expect("a foreign append invalidates the existing Run ledger")
+                .expect_err("a foreign append invalidates the existing Run ledger")
                 .contains("sequence gap"));
             assert!(f
                 .store

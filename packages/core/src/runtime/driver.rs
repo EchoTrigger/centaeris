@@ -898,7 +898,7 @@ pub enum ToolSafePoint {
         call: ToolCallEnvelope,
         result: ToolExecutionResult,
     },
-    CompletedTurn(TurnStepResult),
+    CompletedTurn(Box<TurnStepResult>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -520,7 +520,7 @@ fn archive_wait_handoff_history(
             // Its body references remain verified, but this new store has not
             // archived those bytes yet.
             let mut snapshot: centaeris_core::session::state::SessionStateSnapshot =
-                serde_json::from_str(&write.snapshot_json()).map_err(|error| error.to_string())?;
+                serde_json::from_str(write.snapshot_json()).map_err(|error| error.to_string())?;
             snapshot.history = Default::default();
             write = centaeris_core::session::history::prepare_session_snapshot_write(
                 &serde_json::to_string(&snapshot).map_err(|error| error.to_string())?,
