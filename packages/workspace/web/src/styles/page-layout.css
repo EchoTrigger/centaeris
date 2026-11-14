@@ -11,6 +11,7 @@
   padding-inline-start:var(--workspace-page-inset);
 }
 :root .workPrototype .inboxTabs, :root .catalogPage .libraryFilters { gap:28px; }
+:root .workPrototype .inboxTabs { padding-inline:0; }
 :root .workPrototype :is(.issueFilters,.inboxTabs) > button, :root .catalogPage :is(.catalogTabs > a,.libraryFilters > button) {
   min-height:30px;
   padding:5px 0;
