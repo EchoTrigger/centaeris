@@ -199,7 +199,8 @@ class WorkspaceResourceMigrationIsolationTests(SimpleTestCase):
     databases = {"default"}
     serialized_rollback = True
 
-    def test_resource_and_search_migrations_allow_the_next_case_to_restore_auth_permissions(self):
+    def test_migration_fixtures_allow_the_next_case_to_restore_auth_permissions(self):
+        from .test_issue_materials import IssueMaterialMigrationTests
         from .test_session_search import SessionSearchMigrationTests
 
         class SerializedPermissionTests(TransactionTestCase):
@@ -219,6 +220,9 @@ class WorkspaceResourceMigrationIsolationTests(SimpleTestCase):
             SessionSearchMigrationTests(
                 "test_existing_committed_text_is_indexed_and_future_text_is_maintained"
             ),
+            IssueMaterialMigrationTests(
+                "test_forward_preserves_existing_issues_without_materials"
+            ),
             SerializedPermissionTests("test_auth_permissions_are_restored"),
         ])
         result = unittest.TestResult()
@@ -226,4 +230,4 @@ class WorkspaceResourceMigrationIsolationTests(SimpleTestCase):
         self.assertTrue(result.wasSuccessful(), "\n".join(
             detail for _test, detail in [*result.errors, *result.failures]
         ))
-        self.assertEqual(result.testsRun, 3)
+        self.assertEqual(result.testsRun, 4)

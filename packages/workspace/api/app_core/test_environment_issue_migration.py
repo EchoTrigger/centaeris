@@ -8,7 +8,7 @@ from .migration_testing import isolated_migration_database
 
 class EnvironmentIssueMigrationTests(TransactionTestCase):
     serialized_rollback = True
-    merged = [("app_core", "0064_merge_environment_resources")]
+    merged = [("app_core", "0065_self_deliverable_receipts")]
 
     def test_each_source_path_preserves_its_records_and_gains_the_other_capability(self):
         for source in ("0056_workspace_environment_resources", "0063_issue_deliverables_and_templates"):

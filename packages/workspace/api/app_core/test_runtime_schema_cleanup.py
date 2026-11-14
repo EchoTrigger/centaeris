@@ -30,7 +30,7 @@ class RuntimeSchemaCleanupTests(TransactionTestCase):
                          "verify_resident_allocation", "protect_environment_retirement",
                          "protect_environment_maintenance_completion",
                          "protect_agent_run_cleanup_receipt",
-                         "protect_environment_provision_completion"):
+                         "protect_environment_provision_completion", "protect_model_input_image"):
                 cursor.execute("CREATE FUNCTION runtime." + name + "() RETURNS trigger "
                                "LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$")
 

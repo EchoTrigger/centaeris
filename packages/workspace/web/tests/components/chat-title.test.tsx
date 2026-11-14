@@ -75,7 +75,7 @@ test("favoriting a chat saves its metadata and adds a working sidebar entry unti
       <ChatTitle session={sessions[0]} actions={actions} titleControl={<button>{session.title}</button>} /></>;
   }
   function open() {
-    const router = createMemoryRouter([{ id: "workspace", path: "/w/demo/*", loader: () => ({ workspaces: [] }), HydrateFallback: () => null, Component: Fixture }], { initialEntries: ["/w/demo/app"] });
+    const router = createMemoryRouter([{ id: "authenticated", loader: () => ({ user: { id: "owner" } }), HydrateFallback: () => null, children: [{ id: "workspace", path: "/w/demo/*", loader: () => ({ workspaces: [] }), Component: Fixture }] }], { initialEntries: ["/w/demo/app"] });
     render(<RouterProvider router={router} />);
     return router;
   }

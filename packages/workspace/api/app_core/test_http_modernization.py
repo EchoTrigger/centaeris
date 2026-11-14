@@ -247,6 +247,7 @@ class NinjaContractTests(TestCase):
             "/api/agents/{agent_id}/inputs/{input_id}/attachments/{input_ref}/{action}",
             "/api/agents/{agent_id}/attachments/{input_ref}/{action}",
             "/api/sessions/{session_id}/outputs/{artifact_id}/{action}",
+            "/api/workspaces/{workspace_id}/issues/{issue_id}/deliverables/{deliverable_id}/artifacts/{artifact_id}",
             "/api/office-preview/{owner_kind}/{object_id}",
             "/api/spreadsheet-preview/{owner_kind}/{object_id}",
             "/api/artifacts/{artifact_id}/download",

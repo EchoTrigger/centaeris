@@ -135,6 +135,8 @@ class IssueMaterialTests(SessionRecordFixture, TestCase):
 
 
 class IssueMaterialMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+
     def test_forward_preserves_existing_issues_without_materials(self):
         previous, target = [("app_core", "0061_issue_executions")], [("app_core", "0062_issue_materials")]
         with isolated_migration_database(previous) as database:
