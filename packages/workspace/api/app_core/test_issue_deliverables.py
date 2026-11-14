@@ -166,6 +166,8 @@ class IssueDeliverableTests(SessionRecordFixture, TestCase):
 
 
 class IssueDeliverableMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+
     def test_forward_restores_only_missing_self_submission_receipts(self):
         previous = [("app_core", "0064_merge_environment_resources")]
         target = [("app_core", "0065_self_deliverable_receipts")]
