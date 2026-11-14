@@ -24,7 +24,7 @@ const fixture = vi.hoisted(() => ({
   user: { id: "user" }, workspace: { id: "workspace", name: "Synthetic workspace", avatarUrl: null as string | null },
   activeRun: null as { agentRunId: string; status: string; streamCursor: string } | null,
   pendingSupplements: [] as { supplementId: string; message: string }[],
-  activeRead: null as Promise<{ agentRun: { agentRunId: string; status: string; streamCursor: string }; pendingSupplements: { supplementId: string; message: string }[] }> | null,
+  activeRead: null as Promise<{ agentRun: { agentRunId: string; status: string; streamCursor: string } | null; pendingSupplements: { supplementId: string; message: string }[] }> | null,
 }));
 
 vi.mock("../../src/api", async original => ({
@@ -92,13 +92,13 @@ function deferred<T>() {
 const callsFor = (suffix: string) => fixture.request.mock.calls.filter(([path, options]) => path.endsWith(suffix) && options?.method === "POST");
 const receiptFor = (options?: RequestInit) => ({ operationId: JSON.parse(String(options?.body)).operationId,
   command: "submitMessage", status: "accepted", sessionId: "session", agentRunId: "original-run", turnId: "original-turn" });
-async function sendCheckpoint(status: "failed" | "cancelled" | null, sourceHighWater = "0") {
+async function sendCheckpoint(status: "running" | "completed" | "failed" | "cancelled" | null, sourceHighWater = "0", agentRunId = "original-run") {
   const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
   await act(async () => {
     await subscription.controller.acceptWithBackpressure({ cursor: "applied:0", item: {
       schema: "workspace.presentation.v1", workspaceId: "workspace",  sessionId: "session", kind: "checkpoint",
       projectionGeneration: "generation", sourceHighWater, agentRun: status ? {
-        agentRunId: "original-run", status, startedAt: null, completedAt: "2026-10-23T00:00:01Z",
+        agentRunId, status, startedAt: null, completedAt: status === "running" ? null : "2026-10-23T00:00:01Z",
       } : null,
     } });
   });
@@ -302,6 +302,75 @@ test.each([false, true])("a late Steer restore survives a checkpoint but respect
     pendingSupplements: [{ supplementId: "delayed-steer", message: "迟到的追加" }] }));
   if (changeSession) expect(screen.queryByText("迟到的追加")).toBeNull();
   else expect(await screen.findByText("迟到的追加")).toBeTruthy();
+});
+
+test.each(["cancelled", "completed", "failed"] as const)("a %s Run retires its pending Steer without refreshing", async status => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "pending-steer", message: "Pending old instruction" }];
+  await mountConversation();
+  expect(screen.getByText("Pending old instruction")).toBeTruthy();
+  await sendCheckpoint(status);
+  expect(screen.queryByText("Pending old instruction")).toBeNull();
+  expect(screen.queryByText("chat.steer")).toBeNull();
+});
+
+test("a late active Run read cannot restore Steer after its terminal checkpoint", async () => {
+  const read = deferred<Awaited<NonNullable<typeof fixture.activeRead>>>();
+  fixture.activeRead = read.promise;
+  await mountConversation();
+  await sendCheckpoint("cancelled");
+  await act(async () => read.resolve({ agentRun: { agentRunId: "original-run", status: "running", streamCursor: "0" },
+    pendingSupplements: [{ supplementId: "late-steer", message: "Already cancelled instruction" }] }));
+  expect(screen.queryByText("Already cancelled instruction")).toBeNull();
+  expect(screen.queryByRole("button", { name: "appRoute.stop" })).toBeNull();
+});
+
+test("an older Run terminal checkpoint preserves the newer Run's pending Steer", async () => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "old-steer", message: "Old Run instruction" }];
+  await mountConversation();
+  fixture.activeRun = { agentRunId: "new-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "new-steer", message: "New Run instruction" }];
+  await sendCheckpoint("running", "0", "new-run");
+  await screen.findByText("New Run instruction");
+  await sendCheckpoint("cancelled");
+  expect(screen.queryByText("Old Run instruction")).toBeNull();
+  expect(screen.getByText("New Run instruction")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "appRoute.stop" })).toBeTruthy();
+});
+
+test("an authoritative empty read retires old pending Steer and preserves input sent after the read began", async () => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "old-steer", message: "Old queued instruction" }];
+  const request = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, options) => path.endsWith("/supplements")
+    ? Promise.resolve({ sessionId: "session", agentRunId: "original-run",
+      supplementId: JSON.parse(String(options?.body)).supplementId, disposition: "accepted", queuedCount: 1 })
+    : request(path, options));
+  await mountConversation();
+  const read = deferred<Awaited<NonNullable<typeof fixture.activeRead>>>();
+  fixture.activeRead = read.promise;
+  await sendCheckpoint(null);
+  const user = userEvent.setup();
+  await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Newly sent instruction");
+  await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  await screen.findByText("Newly sent instruction");
+  await act(async () => read.resolve({ agentRun: null, pendingSupplements: [] }));
+  expect(screen.queryByText("Old queued instruction")).toBeNull();
+  expect(screen.getByText("Newly sent instruction")).toBeTruthy();
+});
+
+test("a stale empty read cannot retire Steer after a newer active Run checkpoint", async () => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "pending-steer", message: "Still queued instruction" }];
+  await mountConversation();
+  const read = deferred<Awaited<NonNullable<typeof fixture.activeRead>>>();
+  fixture.activeRead = read.promise;
+  await sendCheckpoint(null);
+  await sendCheckpoint("running");
+  await act(async () => read.resolve({ agentRun: null, pendingSupplements: [] }));
+  expect(screen.getByText("Still queued instruction")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "appRoute.stop" })).toBeTruthy();
 });
 
 test("rejected Steer preserves its draft and does not leave a sent message behind", async () => {
