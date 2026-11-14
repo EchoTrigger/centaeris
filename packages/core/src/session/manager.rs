@@ -17,6 +17,10 @@ impl<S: AgentRuntimeSnapshotStorePort> SessionManager<S> {
         };
         let state = serde_json::from_str::<SessionStateSnapshot>(raw.as_str())
             .map_err(|err| format!("deserialize session state failed: {err}"))?;
+        if state.session_id != session_id {
+            return Err("session_snapshot_identity_mismatch".into());
+        }
+        crate::session::history::validate_session_snapshot_history(&state)?;
         Ok(Some(state))
     }
 
@@ -36,6 +40,30 @@ impl<S: AgentRuntimeSnapshotStorePort> SessionManager<S> {
             snapshot_json.as_str(),
             now,
         )
+    }
+
+    /// Commits and returns the same normalized working state for further publication.
+    pub fn save_session_owned(
+        &self,
+        session: SessionStateSnapshot,
+    ) -> Result<SessionStateSnapshot, String> {
+        let prepared = crate::session::history::prepare_session_snapshot_state_write(session)?;
+        self.store
+            .save_prepared_agent_runtime_snapshot(prepared, now_ms())
+    }
+
+    /// Commits a reconstructed view and its authoritative inactive-source decisions.
+    pub fn save_recovered_session_owned(
+        &self,
+        session: SessionStateSnapshot,
+        retired_message_ids: Vec<String>,
+    ) -> Result<SessionStateSnapshot, String> {
+        let prepared = crate::session::history::prepare_recovered_session_snapshot_write(
+            session,
+            retired_message_ids,
+        )?;
+        self.store
+            .save_prepared_agent_runtime_snapshot(prepared, now_ms())
     }
 }
 

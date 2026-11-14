@@ -2,7 +2,24 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 22;
+const STORE_SCHEMA_VERSION: i64 = 24;
+const SESSION_HISTORY_DDL: &str = r#"
+CREATE TABLE runtime.session_message_history_entries(
+ session_id text NOT NULL,record_id text NOT NULL,message_id text NOT NULL,entry_json text NOT NULL,
+ PRIMARY KEY(session_id,record_id),
+ CHECK(record_id ~ '^sha256:[0-9a-f]{64}$'),
+ CHECK((entry_json::jsonb->>'recordId') IS NOT DISTINCT FROM record_id),
+ CHECK((entry_json::jsonb->'message'->>'messageId') IS NOT DISTINCT FROM message_id));
+CREATE TABLE runtime.session_message_history_heads(
+ session_id text NOT NULL,message_id text NOT NULL,position bigint NOT NULL CHECK(position>0),
+ current_record_id text NOT NULL,is_original_user_request boolean NOT NULL,retired boolean NOT NULL,
+ PRIMARY KEY(session_id,message_id),UNIQUE(session_id,position),
+ FOREIGN KEY(session_id,current_record_id) REFERENCES runtime.session_message_history_entries(session_id,record_id));
+CREATE FUNCTION runtime.protect_session_history_entry() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'Session history entry is immutable'; END;
+$$;
+CREATE TRIGGER session_message_history_entry_facts BEFORE UPDATE ON runtime.session_message_history_entries FOR EACH ROW EXECUTE FUNCTION runtime.protect_session_history_entry();
+"#;
 const MODEL_INPUT_IMAGE_DDL: &str = r#"
 CREATE TABLE runtime.session_model_input_images(
  session_id text NOT NULL,content_digest text NOT NULL,
@@ -82,7 +99,11 @@ pub(super) const RUNTIME_TABLES: &[&str] = &[
     "runtime_turn_supplement_queues",
     "schema_migrations",
     "session_runtime_snapshots",
+    "session_message_history_entries",
+    "session_message_history_heads",
     "session_model_input_images",
+    "session_source_mutations",
+    "session_source_checkpoints",
     "transcript_block_identities",
     "transcript_block_versions",
     "transcript_projection_current_recoveries",
@@ -117,17 +138,55 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
-    ("session_model_input_images", "session_id:text:NO,content_digest:text:NO,content:bytea:NO"),
-    ("sandbox_deployment", "singleton:boolean:NO,deployment_id:uuid:NO"),
+    (
+        "session_message_history_entries",
+        "session_id:text:NO,record_id:text:NO,message_id:text:NO,entry_json:text:NO",
+    ),
+    (
+        "session_message_history_heads",
+        "session_id:text:NO,message_id:text:NO,position:bigint:NO,current_record_id:text:NO,is_original_user_request:boolean:NO,retired:boolean:NO",
+    ),
+    (
+        "session_model_input_images",
+        "session_id:text:NO,content_digest:text:NO,content:bytea:NO",
+    ),
+    (
+        "sandbox_deployment",
+        "singleton:boolean:NO,deployment_id:uuid:NO",
+    ),
     ("runsc_environment_power", super::runsc_rotation::COLUMNS),
-    ("resident_capacity_clock", "singleton:boolean:NO,generation:bigint:NO,changed_at_ms:bigint:NO"),
-    ("resident_capacity_waiters", "job_id:text:NO,lease_owner:text:NO,observed_generation:bigint:NO"),
-    ("environment_creation_attempts", "allocation_execution_id:text:NO,instance_id:text:NO,attempt_id:text:NO,state:text:NO,recorded_at_ms:bigint:NO"),
-    ("environment_provision_completions","operation_id:text:NO,environment_id:text:NO,session_id:text:NO,workspace_id:text:NO,host_id:text:NO,instance_id:text:NO,container_id:text:NO,profile_digest:text:NO,controller_epoch:bigint:NO,controller_lease_digest:text:NO,request_digest:text:NO,completion_json:text:NO,recorded_at_ms:bigint:NO"),
-    ("environment_maintenance_completions", "operation_id:text:NO,environment_id:text:NO,instance_id:text:NO,container_id:text:NO,profile_digest:text:NO,controller_epoch:bigint:NO,controller_lease_digest:text:NO,request_digest:text:NO,completion_json:text:NO,recorded_at_ms:bigint:NO"),
-    ("environment_retirements", "operation_id:text:NO,environment_id:text:NO,instance_id:text:NO,host_id:text:NO,allocation_execution_id:text:NO,container_id:text:NO,request_json:text:NO,state:text:NO,recorded_at_ms:bigint:NO"),
-    ("agent_run_cleanup_receipts", "receipt_id:text:NO,agent_run_id:text:NO,environment_id:text:NO,authorization_digest:text:NO,controller_epoch:bigint:NO,allocation_kind:text:NO,instance_id:text:YES,cleanup_complete:boolean:NO,file_protection:text:NO,recorded_at_ms:bigint:NO"),
-    ("execution_instances", "execution_id:text:NO,instance_id:text:NO,environment_id:text:NO,session_id:text:NO,agent_run_id:text:NO,host_id:text:NO,authorization_digest:text:NO,binding_digest:text:NO,image_digest:text:NO"),
+    (
+        "resident_capacity_clock",
+        "singleton:boolean:NO,generation:bigint:NO,changed_at_ms:bigint:NO",
+    ),
+    (
+        "resident_capacity_waiters",
+        "job_id:text:NO,lease_owner:text:NO,observed_generation:bigint:NO",
+    ),
+    (
+        "environment_creation_attempts",
+        "allocation_execution_id:text:NO,instance_id:text:NO,attempt_id:text:NO,state:text:NO,recorded_at_ms:bigint:NO",
+    ),
+    (
+        "environment_provision_completions",
+        "operation_id:text:NO,environment_id:text:NO,session_id:text:NO,workspace_id:text:NO,host_id:text:NO,instance_id:text:NO,container_id:text:NO,profile_digest:text:NO,controller_epoch:bigint:NO,controller_lease_digest:text:NO,request_digest:text:NO,completion_json:text:NO,recorded_at_ms:bigint:NO",
+    ),
+    (
+        "environment_maintenance_completions",
+        "operation_id:text:NO,environment_id:text:NO,instance_id:text:NO,container_id:text:NO,profile_digest:text:NO,controller_epoch:bigint:NO,controller_lease_digest:text:NO,request_digest:text:NO,completion_json:text:NO,recorded_at_ms:bigint:NO",
+    ),
+    (
+        "environment_retirements",
+        "operation_id:text:NO,environment_id:text:NO,instance_id:text:NO,host_id:text:NO,allocation_execution_id:text:NO,container_id:text:NO,request_json:text:NO,state:text:NO,recorded_at_ms:bigint:NO",
+    ),
+    (
+        "agent_run_cleanup_receipts",
+        "receipt_id:text:NO,agent_run_id:text:NO,environment_id:text:NO,authorization_digest:text:NO,controller_epoch:bigint:NO,allocation_kind:text:NO,instance_id:text:YES,cleanup_complete:boolean:NO,file_protection:text:NO,recorded_at_ms:bigint:NO",
+    ),
+    (
+        "execution_instances",
+        "execution_id:text:NO,instance_id:text:NO,environment_id:text:NO,session_id:text:NO,agent_run_id:text:NO,host_id:text:NO,authorization_digest:text:NO,binding_digest:text:NO,image_digest:text:NO",
+    ),
     (
         "resident_sandboxes",
         "host_id:text:NO,execution_id:text:NO,agent_run_id:text:NO,workspace_id:text:NO,container_id:text:YES,state:text:NO,memory_bytes:bigint:NO,cpu_milli:bigint:NO,pids:bigint:NO,workspace_bytes:bigint:NO,created_at_ms:bigint:NO,updated_at_ms:bigint:NO",
@@ -188,6 +247,8 @@ const TABLE_SHAPES: &[(&str, &str)] = &[
         "model_observation_contents",
         "session_id:text:NO,content_digest:text:NO,kind:text:NO,content_json:text:NO,content_bytes:bigint:NO,first_seen_at_ms:bigint:NO",
     ),
+    ("session_source_mutations", "session_id:text:NO,revision:bigint:NO"),
+    ("session_source_checkpoints", "session_id:text:NO,source_sequence:bigint:NO,mutation_revision:bigint:NO,snapshot_json:text:NO,observations_json:text:NO"),
     (
         "model_observation_manifests",
         "session_id:text:NO,manifest_digest:text:NO,parent_digest:text:YES,manifest_json:text:NO,manifest_bytes:bigint:NO,first_seen_at_ms:bigint:NO",
@@ -329,11 +390,54 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_subagent_presentation(client)?;
         upgrade_child_job_notifications(client)?;
         upgrade_dispatch_schema(client, 22, MODEL_INPUT_IMAGE_DDL)?;
+        upgrade_session_history(client)?;
+        upgrade_session_source_checkpoints(client)?;
     } else {
         create_schema(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
+}
+
+fn create_source_checkpoint_schema(client: &mut impl GenericClient) -> Result<(), String> {
+    client
+        .batch_execute(super::runtime::session_source::DDL)
+        .map_err(|error| error.to_string())?;
+    let source_exists: bool = client
+        .query_one(
+            "SELECT to_regclass('public.app_core_sessionevent') IS NOT NULL",
+            &[],
+        )
+        .map_err(|error| error.to_string())?
+        .get(0);
+    if source_exists {
+        client
+            .batch_execute(super::runtime::session_source::CANONICAL_TRIGGER_DDL)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn upgrade_session_source_checkpoints(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=23).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|error| error.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|error| error.to_string())?;
+    if schema_versions(&mut tx)? != (1..=23).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    create_source_checkpoint_schema(&mut tx)?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(24,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|error| error.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|error| error.to_string())
 }
 
 fn schema_exists(client: &mut impl GenericClient) -> Result<bool, String> {
@@ -344,6 +448,92 @@ fn schema_exists(client: &mut impl GenericClient) -> Result<bool, String> {
         )
         .map(|row| row.get(0))
         .map_err(|error| format!("inspect Postgres runtime schema failed: {error}"))
+}
+
+fn upgrade_session_history(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=22).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|error| error.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|error| error.to_string())?;
+    if schema_versions(&mut tx)? != (1..=22).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(SESSION_HISTORY_DDL)
+        .map_err(|error| error.to_string())?;
+    let mut after: Option<String> = None;
+    loop {
+        let Some(session_row) = tx.query_opt(
+            "SELECT session_id FROM (SELECT session_id FROM runtime.session_runtime_snapshots UNION SELECT session_id FROM runtime.checkpoints WHERE wait_handoff_json IS NOT NULL) sources WHERE ($1::text IS NULL OR session_id>$1) ORDER BY session_id LIMIT 1",
+            &[&after],
+        ).map_err(|error| error.to_string())? else { break; };
+        let session_id: String = session_row.get(0);
+        let current = tx.query_opt(
+            "SELECT snapshot_json,updated_at_ms FROM runtime.session_runtime_snapshots WHERE session_id=$1 FOR UPDATE",
+            &[&session_id],
+        ).map_err(|error| error.to_string())?;
+        archive_wait_handoff_history(&mut tx, &session_id)?;
+        if let Some(row) = current {
+            let raw: String = row.get(0);
+            let write = centaeris_core::session::history::migrate_legacy_session_snapshot(&raw)?;
+            super::runtime::save_prepared_snapshot(&mut tx, &session_id, &write, row.get(1))?;
+        }
+        after = Some(session_id);
+    }
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(23,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|error| error.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|error| error.to_string())
+}
+
+fn archive_wait_handoff_history(
+    client: &mut impl GenericClient,
+    session_id: &str,
+) -> Result<(), String> {
+    let invalid: bool = client.query_one(
+        "SELECT EXISTS(SELECT 1 FROM runtime.checkpoints WHERE session_id=$1 AND wait_handoff_json IS NOT NULL AND ((wait_handoff_json::jsonb->>'sourceSessionSequence') IS NULL OR (wait_handoff_json::jsonb->>'sourceSessionSequence')::bigint<0))",
+        &[&session_id],
+    ).map_err(|error| error.to_string())?.get(0);
+    if invalid {
+        return Err("legacy wait history source position invalid".into());
+    }
+    let mut after_sequence = -1_i64;
+    let mut after_id = String::new();
+    loop {
+        let Some(row) = client.query_opt(
+            "SELECT checkpoint_id,(wait_handoff_json::jsonb->>'sourceSessionSequence')::bigint AS source_sequence FROM runtime.checkpoints WHERE session_id=$1 AND wait_handoff_json IS NOT NULL AND ((wait_handoff_json::jsonb->>'sourceSessionSequence')::bigint>$2 OR ((wait_handoff_json::jsonb->>'sourceSessionSequence')::bigint=$2 AND checkpoint_id>$3)) ORDER BY source_sequence,checkpoint_id LIMIT 1",
+            &[&session_id, &after_sequence, &after_id],
+        ).map_err(|error| error.to_string())? else { break; };
+        let checkpoint_id: String = row.get(0);
+        let sequence: i64 = row.get(1);
+        let handoff = super::runtime::load_wait_handoff_attachment(client, &checkpoint_id)?
+            .ok_or("legacy wait history attachment missing")?;
+        let (mut write, legacy) = handoff.normalized_snapshot()?;
+        if !legacy {
+            // Historical fixtures can retain already bounded opaque Core state.
+            // Its body references remain verified, but this new store has not
+            // archived those bytes yet.
+            let mut snapshot: centaeris_core::session::state::SessionStateSnapshot =
+                serde_json::from_str(&write.snapshot_json()).map_err(|error| error.to_string())?;
+            snapshot.history = Default::default();
+            write = centaeris_core::session::history::prepare_session_snapshot_write(
+                &serde_json::to_string(&snapshot).map_err(|error| error.to_string())?,
+            )?;
+        }
+        if write.session_id() != session_id {
+            return Err("legacy wait history Session binding mismatch".into());
+        }
+        super::runtime::session_history::append_history_write(client, session_id, &write)?;
+        after_sequence = sequence;
+        after_id = checkpoint_id;
+    }
+    Ok(())
 }
 
 fn upgrade_completion_delivery_observations(client: &mut Client) -> Result<(), String> {
@@ -825,6 +1015,9 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(MODEL_INPUT_IMAGE_DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(SESSION_HISTORY_DDL)
+        .map_err(|e| e.to_string())?;
+    create_source_checkpoint_schema(&mut tx)?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -872,6 +1065,7 @@ pub(super) fn restore_sandbox_deployment_fixture(client: &mut Client) {
 #[cfg(test)]
 pub(super) fn restore_model_input_image_fixture(client: &mut Client) {
     super::integration_tests::require_owned_migration_fixture(client);
+    restore_session_history_fixture(client);
     if !schema_versions(client).unwrap().contains(&22) {
         return;
     }
@@ -887,6 +1081,40 @@ pub(super) fn restore_model_input_image_fixture(client: &mut Client) {
         "fixture cannot discard image history"
     );
     client.batch_execute("DROP TABLE runtime.session_model_input_images; DROP FUNCTION runtime.protect_model_input_image(); DELETE FROM runtime.schema_migrations WHERE version=22;").unwrap();
+}
+
+#[cfg(test)]
+pub(super) fn restore_session_history_fixture(client: &mut Client) {
+    super::integration_tests::require_owned_migration_fixture(client);
+    if !schema_versions(client).unwrap().contains(&23) {
+        return;
+    }
+    let mut tx = client
+        .transaction()
+        .expect("begin history fixture downgrade");
+    if schema_versions(&mut tx).unwrap().contains(&24) {
+        tx.batch_execute("DO $$ BEGIN IF to_regclass('public.app_core_sessionevent') IS NOT NULL THEN DROP TRIGGER IF EXISTS session_event_source_mutation ON public.app_core_sessionevent; END IF; END $$; DROP INDEX IF EXISTS public.session_tool_call_origins; DROP TABLE runtime.session_source_checkpoints; DROP TABLE runtime.session_source_mutations; DROP FUNCTION runtime.record_session_source_mutation() CASCADE; DELETE FROM runtime.schema_migrations WHERE version=24;").unwrap();
+    }
+    let rows = tx.query("SELECT session_id,snapshot_json FROM runtime.session_runtime_snapshots ORDER BY session_id", &[]).unwrap();
+    for row in rows {
+        let session_id: String = row.get(0);
+        let snapshot = serde_json::from_str(&row.get::<_, String>(1)).unwrap();
+        let snapshot = super::runtime::session_history::hydrate_session_history(
+            &mut tx,
+            &session_id,
+            snapshot,
+        )
+        .unwrap();
+        let mut legacy = serde_json::to_value(snapshot).unwrap();
+        legacy.as_object_mut().unwrap().remove("history");
+        tx.execute(
+            "UPDATE runtime.session_runtime_snapshots SET snapshot_json=$2 WHERE session_id=$1",
+            &[&session_id, &legacy.to_string()],
+        )
+        .unwrap();
+    }
+    tx.batch_execute("DROP TABLE runtime.session_message_history_heads; DROP TABLE runtime.session_message_history_entries; DROP FUNCTION runtime.protect_session_history_entry(); DELETE FROM runtime.schema_migrations WHERE version=23;").unwrap();
+    tx.commit().expect("commit history fixture downgrade");
 }
 
 fn validate_schema_with_reclaim_budget(
@@ -918,12 +1146,24 @@ fn validate_schema_with_resource_budgets(
     let worker_dispatch_host = versions.contains(&19);
     let subagent_presentation = versions.contains(&20);
     let model_input_images = versions.contains(&22);
+    let session_history = versions.contains(&23);
+    let source_checkpoints = versions.contains(&24);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
         .copied()
         .filter(|table| {
             (sandbox_deployment || *table != "sandbox_deployment")
+                && (source_checkpoints
+                    || !matches!(
+                        *table,
+                        "session_source_mutations" | "session_source_checkpoints"
+                    ))
+                && (session_history
+                    || !matches!(
+                        *table,
+                        "session_message_history_entries" | "session_message_history_heads"
+                    ))
                 && (model_input_images || *table != "session_model_input_images")
                 && (runsc_rotation || *table != "runsc_environment_power")
                 && (capacity_waits
@@ -945,7 +1185,17 @@ fn validate_schema_with_resource_budgets(
         return Err(format!("Postgres runtime table set mismatch: {tables:?}"));
     }
     for (table, expected) in TABLE_SHAPES {
-        if (*table == "session_model_input_images" && !model_input_images)
+        if (!source_checkpoints
+            && matches!(
+                *table,
+                "session_source_mutations" | "session_source_checkpoints"
+            ))
+            || (!session_history
+                && matches!(
+                    *table,
+                    "session_message_history_entries" | "session_message_history_heads"
+                ))
+            || (*table == "session_model_input_images" && !model_input_images)
             || (*table == "sandbox_deployment" && !sandbox_deployment)
             || (*table == "runsc_environment_power" && !runsc_rotation)
             || (!capacity_waits
@@ -971,8 +1221,12 @@ fn validate_schema_with_resource_budgets(
             expected
         };
         let expected = match (*table, retained_accounting) {
-            ("execution_instances", true) => format!("{expected},allocation_execution_id:text:NO,allocation_mode:text:NO,profile_digest:text:YES"),
-            ("resident_sandboxes", true) => format!("{expected},instance_id:text:YES,environment_id:text:YES,allocation_mode:text:NO"),
+            ("execution_instances", true) => format!(
+                "{expected},allocation_execution_id:text:NO,allocation_mode:text:NO,profile_digest:text:YES"
+            ),
+            ("resident_sandboxes", true) => format!(
+                "{expected},instance_id:text:YES,environment_id:text:YES,allocation_mode:text:NO"
+            ),
             _ => expected.to_string(),
         };
         let expected =
@@ -1014,7 +1268,13 @@ fn validate_schema_with_resource_budgets(
     }
     if typed_owners {
         let removal = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.agent_run_cleanup_receipts'::regclass AND conname='cleanup_physical_removal_facts' AND contype='c' AND convalidated", &[]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
-        if removal.as_deref()!=Some("CHECK ((((NOT physical_removed) AND (removed_container_id IS NULL)) OR (physical_removed AND (allocation_kind = 'instance'::text) AND (removed_container_id IS NOT NULL) AND (removed_container_id ~ '^[0-9a-f]{64}$'::text))))"){return Err("Postgres cleanup physical removal constraint mismatch".into());}
+        if removal.as_deref()
+            != Some(
+                "CHECK ((((NOT physical_removed) AND (removed_container_id IS NULL)) OR (physical_removed AND (allocation_kind = 'instance'::text) AND (removed_container_id IS NOT NULL) AND (removed_container_id ~ '^[0-9a-f]{64}$'::text))))",
+            )
+        {
+            return Err("Postgres cleanup physical removal constraint mismatch".into());
+        }
         let cleanup_trigger=client.query_opt("SELECT tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND tgfoid='runtime.protect_agent_run_cleanup_receipt()'::regprocedure AND tgqual IS NULL AND tgnargs=0 FROM pg_trigger WHERE tgrelid='runtime.agent_run_cleanup_receipts'::regclass AND tgname='agent_run_cleanup_receipt_facts'",&[]).map_err(|e|e.to_string())?;
         if !cleanup_trigger.is_some_and(|row| row.get::<_, bool>(0)) {
             return Err("Postgres cleanup receipt trigger mismatch".into());
@@ -1088,7 +1348,11 @@ fn validate_schema_with_resource_budgets(
             }
         }
         let identity = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.agent_run_cleanup_receipts'::regclass AND conname='agent_run_cleanup_receipts_check' AND contype='c' AND convalidated", &[]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
-        if identity.as_deref() != Some("CHECK ((((allocation_kind = 'instance'::text) AND (instance_id IS NOT NULL) AND (length(instance_id) > 0)) OR ((allocation_kind = 'neverAllocated'::text) AND (instance_id IS NULL))))") {
+        if identity.as_deref()
+            != Some(
+                "CHECK ((((allocation_kind = 'instance'::text) AND (instance_id IS NOT NULL) AND (length(instance_id) > 0)) OR ((allocation_kind = 'neverAllocated'::text) AND (instance_id IS NULL))))",
+            )
+        {
             return Err("Postgres cleanup receipt allocation constraint mismatch".into());
         }
     }
@@ -1101,14 +1365,21 @@ fn validate_schema_with_resource_budgets(
             return Err("Postgres resident budget identity constraints mismatch".into());
         }
         for (name, expected) in [
-            ("state", "CHECK ((state = ANY (ARRAY['reserved'::text, 'resident'::text, 'releasing'::text])))"),
+            (
+                "state",
+                "CHECK ((state = ANY (ARRAY['reserved'::text, 'resident'::text, 'releasing'::text])))",
+            ),
             ("memory_bytes", "CHECK ((memory_bytes > 0))"),
             ("cpu_milli", "CHECK ((cpu_milli > 0))"),
             ("pids", "CHECK ((pids > 0))"),
             ("workspace_bytes", "CHECK ((workspace_bytes > 0))"),
         ] {
             let constraint = client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.resident_sandboxes'::regclass AND conname=$1 AND contype='c'", &[&format!("resident_sandboxes_{name}_check")]).map_err(|error| error.to_string())?.map(|row| row.get::<_, String>(0));
-            if constraint.as_deref() != Some(expected) { return Err(format!("Postgres resident budget {name} constraint mismatch")); }
+            if constraint.as_deref() != Some(expected) {
+                return Err(format!(
+                    "Postgres resident budget {name} constraint mismatch"
+                ));
+            }
         }
     }
     if retained_accounting {
@@ -1356,7 +1627,15 @@ fn validate_schema_with_resource_budgets(
             return Err("Postgres lifecycle lease purpose constraint mismatch".into());
         }
         let stage=client.query_opt("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='runtime.runtime_jobs'::regclass AND conname='runtime_jobs_control_stage_check' AND contype='c' AND convalidated AND NOT condeferrable",&[]).map_err(|e|e.to_string())?.map(|row|row.get::<_,String>(0));
-        if stage.as_deref()!=Some("CHECK ((((lease_purpose = 'execute'::text) AND (lease_control_stage IS NULL)) OR ((lease_purpose = 'control'::text) AND (lease_control_stage = ANY (ARRAY['advance'::text, 'cleanup'::text])) AND (lease_control_stage IS NOT NULL))))") {return Err(format!("Postgres lifecycle control stage constraint mismatch: {stage:?}"));}
+        if stage.as_deref()
+            != Some(
+                "CHECK ((((lease_purpose = 'execute'::text) AND (lease_control_stage IS NULL)) OR ((lease_purpose = 'control'::text) AND (lease_control_stage = ANY (ARRAY['advance'::text, 'cleanup'::text])) AND (lease_control_stage IS NOT NULL))))",
+            )
+        {
+            return Err(format!(
+                "Postgres lifecycle control stage constraint mismatch: {stage:?}"
+            ));
+        }
         let default=client.query_one("SELECT column_default FROM information_schema.columns WHERE table_schema='runtime' AND table_name='runtime_jobs' AND column_name='lease_purpose'",&[]).map_err(|e|e.to_string())?.get::<_,Option<String>>(0);
         if default.as_deref() != Some("'execute'::text") {
             return Err("Postgres lifecycle lease purpose default mismatch".into());
@@ -1407,6 +1686,62 @@ fn validate_schema_with_resource_budgets(
             return Err("Postgres immutable image constraints mismatch".into());
         }
     }
+    if session_history {
+        expected_functions.insert("protect_session_history_entry".into());
+        let expected_body = SESSION_HISTORY_DDL
+            .split_once("AS $$")
+            .ok_or("history function missing")?
+            .1
+            .split_once("$$;")
+            .ok_or("history function body missing")?
+            .0;
+        let actual = client.query_one("SELECT prosrc FROM pg_proc WHERE oid='runtime.protect_session_history_entry()'::regprocedure", &[])
+            .map_err(|error| error.to_string())?.get::<_, String>(0);
+        if actual != expected_body {
+            return Err("Postgres immutable Session history function mismatch".into());
+        }
+        let trigger: i64 = client.query_one("SELECT count(*) FROM pg_trigger WHERE tgrelid='runtime.session_message_history_entries'::regclass AND tgname='session_message_history_entry_facts' AND tgenabled='O' AND NOT tgisinternal AND tgtype=19 AND tgfoid='runtime.protect_session_history_entry()'::regprocedure AND tgqual IS NULL AND tgnargs=0", &[])
+            .map_err(|error| error.to_string())?.get(0);
+        if trigger != 1 {
+            return Err("Postgres immutable Session history trigger mismatch".into());
+        }
+    }
+    if source_checkpoints {
+        expected_functions.insert("record_session_source_mutation".into());
+        let body = super::runtime::session_source::DDL
+            .split_once("AS $$")
+            .unwrap()
+            .1
+            .split_once("$$;")
+            .unwrap()
+            .0;
+        let actual: String = client.query_one("SELECT prosrc FROM pg_proc WHERE oid='runtime.record_session_source_mutation()'::regprocedure",&[])
+            .map_err(|error| error.to_string())?.get(0);
+        if actual != body {
+            return Err("Session source mutation function mismatch".into());
+        }
+        for (table, trigger) in [
+            (
+                "model_observation_contents",
+                "model_observation_content_source_mutation",
+            ),
+            (
+                "model_observation_manifests",
+                "model_observation_manifest_source_mutation",
+            ),
+            (
+                "session_model_input_images",
+                "model_input_image_source_mutation",
+            ),
+        ] {
+            let found: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=('runtime.'||$1)::regclass AND tgname=$2 AND tgenabled='O' AND NOT tgisinternal AND tgtype=25 AND tgfoid='runtime.record_session_source_mutation()'::regprocedure)",&[&table,&trigger]).map_err(|error| error.to_string())?.get(0);
+            if !found {
+                return Err(format!(
+                    "Session source mutation trigger missing: {trigger}"
+                ));
+            }
+        }
+    }
     if capacity_waits {
         expected_functions.extend([
             "resident_capacity_release".into(),
@@ -1430,6 +1765,16 @@ fn validate_schema_with_resource_budgets(
     let mut expected_triggers = BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]);
     if model_input_images {
         expected_triggers.insert("model_input_image_facts".into());
+    }
+    if session_history {
+        expected_triggers.insert("session_message_history_entry_facts".into());
+    }
+    if source_checkpoints {
+        expected_triggers.extend([
+            "model_observation_content_source_mutation".into(),
+            "model_observation_manifest_source_mutation".into(),
+            "model_input_image_source_mutation".into(),
+        ]);
     }
     if subagent_presentation {
         expected_triggers.insert("runtime_subagent_presentation_v1".into());
@@ -1627,7 +1972,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 22);
+        assert_eq!(STORE_SCHEMA_VERSION, 24);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

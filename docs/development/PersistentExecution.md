@@ -71,17 +71,47 @@ requests are hydrated and validated individually, including tombstoned records,
 then their bodies are released after folding the required control facts. The
 latest main request and its necessary source facts reconstruct the same model
 context; authority, input membership and tool provenance checks remain in Core.
-This removes simultaneous expansion of all historical request bodies. Historical
-validation, source metadata and ordinary Session snapshot reads/writes still have
-history-dependent costs; this is not complete bounded hot-state separation.
+This removes simultaneous expansion of all historical request bodies. Cold
+validation still processes the required history; it is measured separately from
+the ordinary warm-turn path.
 
-This result-lifetime change does not complete Session hot-state separation.
-The current Session may still contain full history; repeated full-snapshot
-loads/saves and context-selection copies remain measurable costs. Follow-up
-work must first prove lossless historical coverage and bounded reads, then
-separate execution state and model context, and finally validate versioned
-migration and recovery. Only that work can establish ordinary-turn cost bounded
-by the current working set rather than the entire historical transcript.
+Session snapshots retain the active source messages, their model semantics,
+execution metadata and immutable history references. SQLite and PostgreSQL
+archive message revisions separately and replace the bounded snapshot in the
+same transaction. Evicting a message from the working view does not retire its
+historical head; explicit recovery corrections do. History pages use stable
+first-seen positions, while body changes create new immutable revisions.
+The owned commit API returns the normalized state actually committed with those
+revisions. Hosts carry that object into completion and wait handoffs. Authoritative
+reconstruction also supplies exact inactive plaintext source identities, so a
+tombstoned original request cannot reappear through later compaction replay.
+
+Ordinary new turns reuse a source-bound working state. Desktop keeps the binding
+in its existing active read cache, including the validation generation; eviction,
+source replacement or an independently changed SQLite state requires cold recovery.
+PostgreSQL retains one bounded source checkpoint and the latest verified model
+observation references per Session. Its source sequence, mutation revision and
+contiguous append receipts bind that checkpoint to the canonical log. Canonical
+or CAS mutation invalidates reuse; normal appends advance the verified references
+without recursively loading historical manifest ancestors.
+
+Compaction reads older original user requests only after pressure requires a
+plan, under the existing replay budget. Original input anchors, complete tool
+batches and the summary/main-request commit boundary remain authoritative.
+Request preparation reuses an owned projection for an unchanged input revision;
+new intake, context, instructions, tools, images or model configuration invalidate
+the corresponding preparation. Provider usage is a token-estimation anchor only
+when its exact model/configuration and prompt prefix remain valid. It does not
+replace authorization or execution facts.
+
+The previous snapshot format is imported by explicit forward migrations. Legacy
+published wait handoffs retain their identities and payload bytes; their source
+histories are archived before current snapshots so recovery preserves message
+order. A schema upgrade and successful focused checks are not performance or
+real-model quality acceptance; those measurements bind to the final candidate.
+Archive API payload counts and full-source document-read counts describe their
+own boundaries. They do not measure device I/O or every historical runtime-event
+fact query. Explicit recovery can still page durable execution facts.
 
 Candidate components only: tar+zstd encoding, validation and bridge support.
 They are not enabled for production capture/upload or cold restoration. All

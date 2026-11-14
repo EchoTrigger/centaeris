@@ -3077,6 +3077,7 @@ fn execute_agent_run(
                         events.as_slice(),
                         &terminal_lease_fence,
                     )
+                    .map(|receipt| (receipt, None))
                 } else {
                     commit_new_user_turn_admission(
                         job_store.as_ref(),
@@ -3091,7 +3092,7 @@ fn execute_agent_run(
             },
             std::thread::sleep,
         );
-        let receipt = session_delivery::admission(admission_result, || {
+        let (receipt, admitted_snapshot) = session_delivery::admission(admission_result, || {
             DockerExecutionHostRunner::teardown(
                 agent_run_start.agent_run_id.as_str(),
                 job_store.as_ref(),
@@ -3108,6 +3109,7 @@ fn execute_agent_run(
             store.as_ref(),
             agent_run_start.authorization.session_id.as_str(),
             receipt.last_sequence()?,
+            admitted_snapshot,
         )?;
         *sequence_guard(&session_record_sequence)? = committed_sequence;
         session_start_commit_ms = session_start_commit_started.elapsed().as_millis();
@@ -4448,12 +4450,15 @@ fn execute_agent_run(
                     }
                 }
             }
-            let receipt = append_agent_run_session_records(
-                &runtime,
-                &session_log,
-                &agent_run_start,
+            let final_snapshot = response
+                .last_turn
+                .ok_or("completed AgentRun has no final Session snapshot")?
+                .session_snapshot;
+            let receipt = session_log.append_terminal_with_source_snapshot(
+                &agent_run_start.agent_run_id,
                 &completed_events,
                 &terminal_lease_fence,
+                final_snapshot,
             )?;
             let mut completed_sequence = sequence_guard(&session_record_sequence)?.clone();
             accept_session_commit(
@@ -5244,6 +5249,11 @@ fn append_agent_run_session_records(
         })
 }
 
+struct AdmittedSessionState {
+    snapshot: centaeris_core::session::state::SessionStateSnapshot,
+    retired_message_ids: Vec<String>,
+}
+
 fn commit_new_user_turn_admission(
     job_store: &PostgresRuntimeStore,
     session_log: &PostgresSessionLog,
@@ -5252,7 +5262,7 @@ fn commit_new_user_turn_admission(
     new_run_events: &[SequencedSessionRecord],
     lease_fence: &RuntimeJobLeaseFence,
     now_ms: i64,
-) -> Result<SessionCommitReceipt, String> {
+) -> Result<(SessionCommitReceipt, Option<AdmittedSessionState>), String> {
     let session_id = agent_run_start.authorization.session_id.as_str();
     let session_head = job_store.with_client(|client| {
         client
@@ -5263,27 +5273,73 @@ fn commit_new_user_turn_admission(
             .map_err(|error| format!("load admission session head failed: {error}"))
             .map(|row| row.get::<_, i32>(0))
     })?;
-    let plan = if session_head == 0 {
-        centaeris_core::runtime::contracts::NewUserTurnClosurePlanV1 {
-            session_id: session_id.to_string(),
-            expected_session_sequence: 0,
-            trigger_agent_run_id: agent_run_start.agent_run_id.clone(),
-            trigger_turn_id: agent_run_start.turn_id.clone(),
-            evidence_preconditions: Vec::new(),
-            closures: Vec::new(),
+    let source_sequence =
+        u64::try_from(session_head).map_err(|_| "admission session head is invalid".to_string())?;
+    let (snapshot, witness, observations, retired_message_ids) = match job_store
+        .load_session_source_checkpoint(session_id, source_sequence)?
+    {
+        Some((snapshot, witness, observations)) => (snapshot, witness, observations, Vec::new()),
+        None => {
+            let revision = job_store.session_source_revision(session_id)?;
+            let (snapshot, observations, retired) = if session_head == 0 {
+                (
+                    centaeris_core::session::state::SessionStateSnapshot::new(
+                        session_id.into(),
+                        now_ms,
+                    ),
+                    Default::default(),
+                    Vec::new(),
+                )
+            } else {
+                let (recovery, observations) = load_recovery_session_state_with_observations(
+                    job_store,
+                    session_id,
+                    session_head,
+                )?;
+                (
+                    recovery.snapshot,
+                    observations,
+                    recovery.retired_message_ids,
+                )
+            };
+            if job_store.session_source_revision(session_id)? != revision {
+                return Err("admission recovery source changed during validation".into());
+            }
+            (
+                snapshot,
+                postgres_store::SessionSourceWitness {
+                    sequence: source_sequence,
+                    mutation_revision: revision,
+                },
+                observations,
+                retired,
+            )
         }
-    } else {
-        let recovery = load_recovery_session_state(job_store, session_id, session_head)?;
-        agent_runtime.plan_new_user_turn_closures_from_recovery(
-            session_id,
-            &recovery,
-            agent_run_start.agent_run_id.as_str(),
-            agent_run_start.turn_id.as_str(),
-            u64::try_from(session_head)
-                .map_err(|_| "admission session head is invalid".to_string())?,
-            now_ms,
-        )?
     };
+    let call_ids = snapshot
+        .model_semantics
+        .values()
+        .filter_map(|semantics| match semantics {
+            centaeris_core::session::state::ModelMessageSemanticsV1::Assistant {
+                tool_calls,
+                ..
+            } => Some(tool_calls),
+            _ => None,
+        })
+        .flatten()
+        .map(|call| call.id.clone())
+        .collect::<Vec<_>>();
+    let origins = job_store.load_tool_call_origins(session_id, &call_ids)?;
+    let plan = agent_runtime.plan_new_user_turn_closures_with_verified_snapshot(
+        session_id,
+        &snapshot,
+        &origins,
+        &agent_run_start.agent_run_id,
+        &agent_run_start.turn_id,
+        source_sequence,
+        now_ms,
+    )?;
+    session_log.bind_verified_session_source(witness, observations)?;
     let mut closure_events = Vec::with_capacity(plan.closures.len());
     for closure in &plan.closures {
         closure_events.push(centaeris_core::runtime::canonical_tool_call_closure_record(
@@ -5299,13 +5355,27 @@ fn commit_new_user_turn_admission(
             now_ms,
         )?);
     }
-    session_log.append_new_user_turn_admission_blocking(
+    let receipt = session_log.append_new_user_turn_admission_blocking(
         agent_run_start.agent_run_id.as_str(),
         new_run_events,
         closure_events.as_slice(),
         &plan,
         lease_fence,
-    )
+    )?;
+    let events = receipt
+        .records
+        .iter()
+        .map(|record| record.event.clone())
+        .collect::<Vec<_>>();
+    let snapshot =
+        centaeris_core::session::recovery::apply_new_user_turn_admission(snapshot, &events)?;
+    Ok((
+        receipt,
+        Some(AdmittedSessionState {
+            snapshot,
+            retired_message_ids,
+        }),
+    ))
 }
 
 fn append_assistant_progress_records(
@@ -6086,14 +6156,22 @@ fn refresh_runtime_state_after_admission(
     store: &RuntimeStoreActor,
     session_id: &str,
     session_sequence: u64,
+    admitted_snapshot: Option<AdmittedSessionState>,
 ) -> Result<(), String> {
+    if let Some(state) = admitted_snapshot {
+        return SessionManager::new(store.clone())
+            .save_recovered_session_owned(state.snapshot, state.retired_message_ids)
+            .map(|_| ());
+    }
     let session_sequence = i32::try_from(session_sequence)
         .map_err(|_| "admitted Session sequence overflow".to_string())?;
     // Admission may close tools from an earlier AgentRun. The cached snapshot
     // predates that commit; replay Core's authoritative Session records before
     // starting the new turn, rather than weakening safe-point identity checks.
     let recovery = load_recovery_session_state(job_store, session_id, session_sequence)?;
-    SessionManager::new(store.clone()).save_session(&recovery.snapshot)
+    SessionManager::new(store.clone())
+        .save_recovered_session_owned(recovery.snapshot, recovery.retired_message_ids)
+        .map(|_| ())
 }
 
 fn restore_runtime_state_from_recovery_checkpoint(
@@ -6113,7 +6191,9 @@ fn restore_runtime_state_from_recovery_checkpoint(
         .map_err(|_| "recovery checkpoint Session sequence overflow".to_string())?;
     let recovery =
         load_recovery_session_state(job_store, checkpoint.session_id.as_str(), session_sequence)?;
-    SessionManager::new(store.clone()).save_session(&recovery.snapshot)
+    SessionManager::new(store.clone())
+        .save_recovered_session_owned(recovery.snapshot, recovery.retired_message_ids)
+        .map(|_| ())
 }
 
 fn load_recovery_session_state(
@@ -6121,6 +6201,21 @@ fn load_recovery_session_state(
     session_id: &str,
     session_sequence: i32,
 ) -> Result<centaeris_core::session::recovery::SessionRecoveryResult, String> {
+    load_recovery_session_state_with_observations(store, session_id, session_sequence)
+        .map(|(recovery, _)| recovery)
+}
+
+fn load_recovery_session_state_with_observations(
+    store: &PostgresRuntimeStore,
+    session_id: &str,
+    session_sequence: i32,
+) -> Result<
+    (
+        centaeris_core::session::recovery::SessionRecoveryResult,
+        postgres_store::SessionSourceObservations,
+    ),
+    String,
+> {
     // Fixed high-water mark; no append after it enters either pass. The first
     // pass carries only stored references and envelope/tombstone decisions.
     // Recheck every decoded stored wire digest before hydrating its body.
@@ -6168,7 +6263,7 @@ fn load_recovery_session_state(
                 Ok(())
             },
         )?;
-        recovery.finish()
+        Ok((recovery.finish()?, hydrator.into_source_observations()))
     })
 }
 
@@ -9798,7 +9893,7 @@ mod tests {
                 .unwrap();
             receipts.push(centaeris_core::runtime::TurnCommitReceipt {
                 turn_id: turn_id.into(),
-                continuation: centaeris_core::runtime::QueryContinuation::ExecuteTools,
+                continuation: centaeris_core::runtime::QueryContinuation::Continue,
                 provider_tool_call_ids: vec![call_id.into()],
                 tool_result_ids: vec![call_id.into()],
                 checkpoint_ref: None,
@@ -9939,7 +10034,7 @@ mod tests {
         let turn = TurnStepResult {
             current_assistant_reply: None,
             turn_id: "turn_1".to_string(),
-            continuation: centaeris_core::runtime::QueryContinuation::ExecuteTools,
+            continuation: centaeris_core::runtime::QueryContinuation::Continue,
             checkpoint: None,
             provider_tool_calls: vec![call],
             tool_results: vec![completed],

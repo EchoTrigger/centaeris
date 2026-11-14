@@ -312,7 +312,9 @@ async fn assert_compacted_context_recovery(
     );
     let mut recovery_snapshot = rebuilt;
     for retry in 0..=usize::from(fail_recovery_again) {
-        let recovered_store = AgentRuntimeTestStore::new();
+        // Restart the Runtime over its durable store, including archived bodies
+        // referenced by the bounded prepared snapshot.
+        let recovered_store = store.clone();
         SessionManager::new(recovered_store.clone())
             .save_session(&recovery_snapshot)
             .unwrap();

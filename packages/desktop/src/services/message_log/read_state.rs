@@ -83,6 +83,97 @@ pub(super) struct State {
     run_states: HashMap<String, centaeris_core::session::AgentRunSessionState>,
     pub sequence: usize,
     updated: i64,
+    runtime_checkpoint: Option<RuntimeCheckpoint>,
+    validation_generation: String,
+}
+
+struct RuntimeCheckpoint {
+    snapshot_digest: [u8; 32],
+    admission_records: Vec<SessionLogRecord>,
+}
+
+fn runtime_snapshot_digest(
+    snapshot: &centaeris_core::session::state::SessionStateSnapshot,
+) -> Result<[u8; 32], String> {
+    use centaeris_core::session::state::{ChatMessage, MessageRole, SessionStateSnapshot};
+    use std::collections::BTreeMap;
+
+    #[derive(serde::Serialize)]
+    struct Message<'a> {
+        message_id: &'a str,
+        role: &'a MessageRole,
+        content: &'a str,
+        created_at_ms: i64,
+        metadata: BTreeMap<&'a str, &'a str>,
+    }
+    fn messages(source: &[ChatMessage]) -> Vec<Message<'_>> {
+        source
+            .iter()
+            .map(|message| {
+                let ChatMessage {
+                    message_id,
+                    role,
+                    content,
+                    created_at_ms,
+                    metadata,
+                } = message;
+                Message {
+                    message_id,
+                    role,
+                    content,
+                    created_at_ms: *created_at_ms,
+                    metadata: metadata
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str()))
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+    struct DigestWriter(Sha256);
+    impl std::io::Write for DigestWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    // Exhaustive destructuring keeps new state fields part of this independent
+    // store/source binding. Sort borrowed map entries without copying W bodies.
+    let SessionStateSnapshot {
+        history,
+        session_id,
+        messages: source,
+        context_window,
+        model_semantics,
+        completed_turn,
+        updated_at_ms,
+        metadata,
+    } = snapshot;
+    let mut writer = DigestWriter(Sha256::new());
+    writer
+        .0
+        .update(b"centaeris.desktop.runtime_checkpoint.v1\0");
+    serde_json::to_writer(
+        &mut writer,
+        &(
+            history,
+            session_id,
+            messages(source),
+            messages(context_window),
+            model_semantics,
+            completed_turn,
+            updated_at_ms,
+            metadata
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<BTreeMap<_, _>>(),
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(writer.0.finalize().into())
 }
 
 fn digest(record: &SessionLogRecord) -> Result<[u8; 32], String> {
@@ -146,6 +237,8 @@ pub(super) fn take(path: &Path) -> Result<State, String> {
         assistant_ids: HashMap::new(),
         sequence: document.records.len(),
         updated: 0,
+        runtime_checkpoint: None,
+        validation_generation: centaeris_core::runtime::contracts::new_turn_id(),
     };
     for record in &document.records {
         state.restore_run(record)?;
@@ -297,6 +390,26 @@ impl State {
             }
             self.known.insert(record.event_id.clone(), digest(&record)?);
             self.updated = self.updated.max(record.created_at_ms);
+            if record.event_type == SessionRecordType::HostEventInput {
+                // This source can arrive outside the running loop's durable callbacks.
+                self.validation_generation = centaeris_core::runtime::contracts::new_turn_id();
+            }
+            if let Some(checkpoint) = &mut self.runtime_checkpoint {
+                match record.event_type {
+                    SessionRecordType::UserMessage
+                    | SessionRecordType::ToolCallClosure
+                    | SessionRecordType::AgentRunStarted
+                    | SessionRecordType::AgentRunExecutionStarted => {
+                        checkpoint.admission_records.push(record.clone());
+                    }
+                    SessionRecordType::SessionMeta
+                    | SessionRecordType::AgentRunExecutionEnded
+                    | SessionRecordType::AgentRunCompleted
+                    | SessionRecordType::AgentRunFailed
+                    | SessionRecordType::AgentRunInterrupted => {}
+                    _ => self.runtime_checkpoint = None,
+                }
+            }
             pending.push(record);
         }
         Ok(pending)
@@ -306,6 +419,88 @@ impl State {
         self.identity = session_log_identity(path)?;
         Ok(())
     }
+}
+
+pub(super) fn bind_runtime_snapshot(
+    path: &Path,
+    snapshot: &centaeris_core::session::state::SessionStateSnapshot,
+    expected_sequence: Option<usize>,
+    expected_generation: &str,
+) -> Result<bool, String> {
+    let mut state = take(path)?;
+    let result = if state.manifest.session_id != snapshot.session_id {
+        Err("runtime checkpoint Session identity mismatch".into())
+    } else if state.validation_generation != expected_generation {
+        state.runtime_checkpoint = None;
+        Ok(false)
+    } else if expected_sequence.is_some_and(|sequence| sequence != state.sequence) {
+        state.runtime_checkpoint = None;
+        Err("Session changed before runtime checkpoint binding".into())
+    } else {
+        state.runtime_checkpoint = Some(RuntimeCheckpoint {
+            snapshot_digest: runtime_snapshot_digest(snapshot)?,
+            admission_records: Vec::new(),
+        });
+        Ok(true)
+    };
+    put(path, state);
+    result
+}
+
+pub(super) fn advance_runtime_snapshot(
+    path: &Path,
+    snapshot: centaeris_core::session::state::SessionStateSnapshot,
+) -> Result<
+    Option<(
+        centaeris_core::session::state::SessionStateSnapshot,
+        usize,
+        bool,
+        String,
+    )>,
+    String,
+> {
+    let state = take(path)?;
+    let result = if let Some(checkpoint) = &state.runtime_checkpoint {
+        if state.manifest.session_id == snapshot.session_id
+            && checkpoint.snapshot_digest == runtime_snapshot_digest(&snapshot)?
+        {
+            let changed = !checkpoint.admission_records.is_empty();
+            let advanced = if changed {
+                centaeris_core::session::recovery::apply_new_user_turn_admission(
+                    snapshot,
+                    &checkpoint.admission_records,
+                )?
+            } else {
+                snapshot
+            };
+            Some((
+                advanced,
+                state.sequence,
+                changed,
+                state.validation_generation.clone(),
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    put(path, state);
+    Ok(result)
+}
+
+pub(super) fn agent_runs(path: &Path) -> Result<Vec<ProjectedAgentRun>, String> {
+    let state = take(path)?;
+    let runs = state.runs.values().cloned().collect();
+    put(path, state);
+    Ok(runs)
+}
+
+pub(super) fn source_generation(path: &Path) -> Result<String, String> {
+    let state = take(path)?;
+    let generation = state.validation_generation.clone();
+    put(path, state);
+    Ok(generation)
 }
 
 pub(crate) fn catalog_projection(
@@ -463,8 +658,6 @@ pub(super) fn context(path: &Path) -> Result<ProjectedAgentContextState, String>
         context_token_estimate: projection.context_token_estimate(),
         context_token_breakdown: projection.context_token_breakdown().cloned(),
         context_token_estimate_updated_at_ms: projection.context_token_estimate_updated_at_ms(),
-        latest_provider_usage_context_token_estimate: projection
-            .latest_provider_usage_context_token_estimate(),
         is_compacting: projection.is_compacting(),
     };
     put(path, state);

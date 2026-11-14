@@ -8,8 +8,9 @@ fn postgres_image_history_upgrades_preserves_sessions_and_is_immutable_and_purge
     let url = test_url();
     reset_store(&url);
     let store = PostgresRuntimeStore::new(&url).unwrap();
+    let snapshot = session_snapshot_fixture("image-session", "retained snapshot");
     store
-        .save_agent_runtime_snapshot("image-session", "retained snapshot", 7)
+        .save_agent_runtime_snapshot("image-session", &snapshot, 7)
         .unwrap();
     let mut db = Client::connect(&url, NoTls).unwrap();
     super::super::schema::restore_model_input_image_fixture(&mut db);
@@ -20,7 +21,7 @@ fn postgres_image_history_upgrades_preserves_sessions_and_is_immutable_and_purge
             .load_agent_runtime_snapshot("image-session")
             .unwrap()
             .as_deref(),
-        Some("retained snapshot")
+        Some(snapshot.as_str())
     );
     let bytes = b"verified observation bytes";
     let digest = format!("sha256:{:x}", Sha256::digest(bytes));

@@ -607,7 +607,9 @@ fn run_postgres_blocking_error<T: Send, E: From<String> + Send>(
     operation()
 }
 
+pub(crate) use runtime::session_source::SessionSourceWitness;
 pub use runtime::PostgresSessionLog;
+pub(crate) use runtime::SessionSourceObservations;
 pub(crate) use runtime::SessionWireHydrator;
 
 #[cfg(test)]

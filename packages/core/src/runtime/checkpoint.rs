@@ -32,18 +32,27 @@ pub struct RouteGenerateResultRequest {
     pub state: AgentStateSnapshot,
 }
 
+/// Routing selected from a provider response before tool execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelRoute {
+    AwaitQuestion,
+    ExecuteTools,
+    Finalize,
+}
+
+/// The next action after a completed or suspended turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryContinuation {
     AwaitQuestion,
     AwaitRuntimeJob,
-    ExecuteTools,
+    Continue,
     CompleteTerminalTool,
     Finalize,
 }
 
 #[derive(Debug, Clone)]
 pub struct RouteGenerateResultResponse {
-    pub continuation: QueryContinuation,
+    pub route: ModelRoute,
     pub decision: LoopDecision,
     pub state: AgentStateSnapshot,
 }
@@ -152,7 +161,7 @@ impl<S: RuntimeStore + RuntimeStoreTransactionPort> TurnCheckpointStore<S> {
         if question.is_some() {
             state.done_reason = Some(DoneReason::Question);
             return Ok(RouteGenerateResultResponse {
-                continuation: QueryContinuation::AwaitQuestion,
+                route: ModelRoute::AwaitQuestion,
                 decision: LoopDecision {
                     next_hop: ContinueHop::Tools,
                     tools_route: Some(ToolsRoute::Execute),
@@ -163,7 +172,7 @@ impl<S: RuntimeStore + RuntimeStoreTransactionPort> TurnCheckpointStore<S> {
         let decision = decide_loop_step(&state);
         apply_decision_to_state(&mut state, &decision)?;
         Ok(RouteGenerateResultResponse {
-            continuation: continuation_from_decision(&decision),
+            route: model_route_from_decision(&decision),
             decision,
             state,
         })
@@ -259,10 +268,10 @@ fn done_reason_to_str(done_reason: DoneReason) -> &'static str {
     }
 }
 
-fn continuation_from_decision(decision: &LoopDecision) -> QueryContinuation {
+fn model_route_from_decision(decision: &LoopDecision) -> ModelRoute {
     match decision.next_hop {
-        ContinueHop::Finalize => QueryContinuation::Finalize,
-        ContinueHop::Tools => QueryContinuation::ExecuteTools,
+        ContinueHop::Finalize => ModelRoute::Finalize,
+        ContinueHop::Tools => ModelRoute::ExecuteTools,
     }
 }
 

@@ -628,7 +628,6 @@ pub(crate) struct ProjectedAgentContextState {
     pub(crate) context_token_estimate: Option<u64>,
     pub(crate) context_token_breakdown: Option<centaeris_core::runtime::ContextTokenBreakdownV1>,
     pub(crate) context_token_estimate_updated_at_ms: Option<i64>,
-    pub(crate) latest_provider_usage_context_token_estimate: Option<u64>,
     pub(crate) is_compacting: bool,
 }
 
@@ -1078,24 +1077,74 @@ pub(crate) fn project_session_agent_runs(
     project_agent_runs_for_session(session_id)
 }
 
+#[cfg(test)]
 pub(crate) fn restore_runtime_snapshot(
     session_id: &str,
 ) -> Result<centaeris_core::session::state::SessionStateSnapshot, String> {
-    restore_runtime_snapshot_with_sequence(session_id).map(|(snapshot, _)| snapshot)
+    restore_runtime_recovery_with_sequence(session_id).map(|(recovery, _, _)| recovery.snapshot)
 }
 
-pub(crate) fn restore_runtime_snapshot_with_sequence(
+pub(crate) fn restore_runtime_recovery_with_sequence(
     session_id: &str,
-) -> Result<(centaeris_core::session::state::SessionStateSnapshot, usize), String> {
-    let records = {
+) -> Result<
+    (
+        centaeris_core::session::recovery::SessionRecoveryResult,
+        usize,
+        String,
+    ),
+    String,
+> {
+    let (records, generation) = {
         let _guard = lock_session_logs_for_read()?;
-        read_session_records_unlocked(session_id)?
+        let records = read_session_records_unlocked(session_id)?;
+        let path = existing_session_log_file_path(session_id)?;
+        (records, read_state::source_generation(&path)?)
     };
-    let snapshot = centaeris_core::session::restore_runtime_snapshot_from_session_records(
-        session_id,
-        records.as_slice(),
-    )?;
-    Ok((snapshot, records.len()))
+    let recovery =
+        centaeris_core::session::recovery::recover_session_records(session_id, records.as_slice())?;
+    Ok((recovery, records.len(), generation))
+}
+
+pub(crate) fn advance_verified_runtime_snapshot(
+    session_id: &str,
+    snapshot: centaeris_core::session::state::SessionStateSnapshot,
+) -> Result<
+    Option<(
+        centaeris_core::session::state::SessionStateSnapshot,
+        usize,
+        bool,
+        String,
+    )>,
+    String,
+> {
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::advance_runtime_snapshot(&path, snapshot)
+}
+
+pub(crate) fn bind_runtime_snapshot_checkpoint(
+    session_id: &str,
+    snapshot: &centaeris_core::session::state::SessionStateSnapshot,
+    expected_sequence: Option<usize>,
+    expected_generation: &str,
+) -> Result<bool, String> {
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::bind_runtime_snapshot(&path, snapshot, expected_sequence, expected_generation)
+}
+
+pub(crate) fn runtime_source_generation(session_id: &str) -> Result<String, String> {
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::source_generation(&path)
+}
+
+pub(crate) fn verified_session_agent_runs(
+    session_id: &str,
+) -> Result<Vec<ProjectedAgentRun>, String> {
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::agent_runs(&path)
 }
 
 pub(crate) fn project_incomplete_tool_calls(

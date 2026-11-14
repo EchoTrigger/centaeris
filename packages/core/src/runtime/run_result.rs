@@ -127,7 +127,7 @@ mod tests {
         TurnStepResult {
             current_assistant_reply: None,
             turn_id: format!("turn-{round}"),
-            continuation: QueryContinuation::ExecuteTools,
+            continuation: QueryContinuation::Continue,
             checkpoint: Some(CheckpointRecord {
                 checkpoint_id: format!("checkpoint-{round}"),
                 kind: contracts::CheckpointKindV1::Wait,
@@ -162,6 +162,7 @@ mod tests {
             agent_run_resource_usage: Default::default(),
             runtime_events: vec![],
             session_snapshot: SessionStateSnapshot {
+                history: Default::default(),
                 session_id: "session-retention".into(),
                 messages: vec![message.clone()],
                 context_window: vec![message],

@@ -23,6 +23,7 @@ tokio-util = { version = "=0.7.18", features = ["rt"] }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
+centaeris-model-http.workspace = true
 tempfile = "=3.27.0"
 rusqlite = { workspace = true, features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }

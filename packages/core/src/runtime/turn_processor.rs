@@ -160,26 +160,30 @@ impl<
 
         let mut runtime_events = prompt_compaction_runtime_events;
         let mut checkpoint = None;
-        let mut continuation = routed.continuation;
+        let mut continuation = match routed.route {
+            ModelRoute::AwaitQuestion => QueryContinuation::AwaitQuestion,
+            ModelRoute::ExecuteTools => QueryContinuation::Continue,
+            ModelRoute::Finalize => QueryContinuation::Finalize,
+        };
         let mut tool_results = vec![];
         let mut tool_use_summary = None;
         let mut tool_operations_json = None;
-        let model_process_summary = if should_emit_model_process_summary(&routed.continuation) {
+        let model_process_summary = if should_emit_model_process_summary(&continuation) {
             model_process_summary_message(&effective_generate_result)
         } else {
             None
         };
         if matches!(
-            routed.continuation,
-            QueryContinuation::ExecuteTools | QueryContinuation::AwaitQuestion
+            routed.route,
+            ModelRoute::ExecuteTools | ModelRoute::AwaitQuestion
         ) && ensure_model_assistant_semantics_message(
             &self.message_handler,
             &mut session,
             &effective_generate_result,
         )? {
-            self.session_manager.save_session(&session)?;
+            session = self.session_manager.save_session_owned(session)?;
         }
-        if matches!(routed.continuation, QueryContinuation::AwaitQuestion) {
+        if matches!(routed.route, ModelRoute::AwaitQuestion) {
             let persisted = self
                 .persist_query_state_with_retry(
                     PersistQueryStateRequest {
@@ -196,8 +200,7 @@ impl<
                 .await?;
             checkpoint = Some(persisted.checkpoint);
         }
-        let should_emit_tool_call_events =
-            matches!(routed.continuation, QueryContinuation::ExecuteTools);
+        let should_emit_tool_call_events = matches!(routed.route, ModelRoute::ExecuteTools);
         if let Some(message) = model_process_summary.as_ref() {
             let task_id = format!("model_process_status:{}", req.turn_id);
             let event = build_runtime_event_status_event(
@@ -206,7 +209,7 @@ impl<
                 task_id.as_str(),
                 req.turn_id.as_str(),
                 message.as_str(),
-                continuation_event_status(&routed.continuation),
+                continuation_event_status(&continuation),
                 Some(StatusStage::ModelProcessSummary),
                 Some("model_process_summary"),
             );
@@ -220,8 +223,8 @@ impl<
                 Some(&tool_permission_preview),
             )?);
         }
-        match routed.continuation {
-            QueryContinuation::AwaitQuestion => {
+        match routed.route {
+            ModelRoute::AwaitQuestion => {
                 let question_message = "Waiting for user input.";
                 runtime_events.push(build_runtime_event_status_event(
                     req.session_id.as_str(),
@@ -246,7 +249,7 @@ impl<
                     .map_err(|error| format!("invalid question payload: {error}"))?,
                 ));
             }
-            QueryContinuation::ExecuteTools => {
+            ModelRoute::ExecuteTools => {
                 let execution_batch = self
                     .execute_tool_calls_with_safe_point_async(
                         req.session_id.as_str(),
@@ -293,7 +296,7 @@ impl<
                             format!("serialize pending runtime tool batch failed: {error}")
                         })?,
                     );
-                    self.session_manager.save_session(&session)?;
+                    self.session_manager.save_session_owned(session)?;
 
                     let (waiting_checkpoint, event, changed) = runtime_waiting_transition(
                         req.session_id.as_str(),
@@ -362,19 +365,11 @@ impl<
                     )? {
                         continuation = QueryContinuation::CompleteTerminalTool;
                     } else {
-                        continuation = QueryContinuation::ExecuteTools;
+                        continuation = QueryContinuation::Continue;
                     }
                 }
             }
-            QueryContinuation::AwaitRuntimeJob => {
-                return Err(
-                    "runtime job continuation cannot be routed from provider output".to_string(),
-                );
-            }
-            QueryContinuation::CompleteTerminalTool => {
-                return Err("terminal tool continuation cannot be routed".to_string());
-            }
-            QueryContinuation::Finalize => {
+            ModelRoute::Finalize => {
                 continuation = QueryContinuation::Finalize;
                 let text = effective_generate_result.content.as_str();
                 self.message_handler.push_model_assistant_message(
@@ -396,7 +391,7 @@ impl<
             mark_terminal_tool_transcript_committed(&mut session, &effective_generate_result)?;
         }
         refresh_session_context_window(&mut session);
-        self.session_manager.save_session(&session)?;
+        session = self.session_manager.save_session_owned(session)?;
         Ok(TurnStepResult {
             current_assistant_reply: nonempty_current_assistant_reply(
                 &effective_generate_result.content,

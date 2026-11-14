@@ -331,6 +331,11 @@ impl PostgresRuntimeStore {
                     let snapshot =
                         serde_json::from_str::<SessionStateSnapshot>(&row.get::<_, String>(0))
                             .map_err(|error| format!("decode subagent snapshot failed: {error}"))?;
+                    let snapshot = super::runtime::session_history::hydrate_session_history(
+                        &mut tx,
+                        &agent.child_session_id,
+                        snapshot,
+                    )?;
                     present_messages(snapshot, &agent.child_session_id)?
                 }
                 None => vec![],

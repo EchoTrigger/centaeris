@@ -440,6 +440,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "centaeris-core",
+ "centaeris-model-http",
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",

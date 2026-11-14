@@ -329,6 +329,8 @@ impl PostgresRuntimeStore {
                 ).map_err(|error| format!("erase Session purge orphan object failed: {error}"))?;
             }
             erase_platform_body(&mut tx, &request.session_id)?;
+            tx.execute("DELETE FROM runtime.session_source_mutations WHERE session_id=$1", &[&request.session_id])
+                .map_err(|error| format!("erase Session source witness failed: {error}"))?;
             tx.execute(
                 "UPDATE public.app_core_session SET status='deleted',title='',\"archivedAt\"=NULL,\"deletedAt\"=COALESCE(\"deletedAt\",transaction_timestamp()),\"deletedBy_id\"=owner_id,\"purgedAt\"=COALESCE(\"purgedAt\",transaction_timestamp()),\"updatedAt\"=transaction_timestamp() WHERE id=$1",
                 &[&request.session_id],

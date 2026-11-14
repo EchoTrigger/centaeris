@@ -20,6 +20,7 @@ pub mod prompt_compaction_commit;
 mod prompt_compaction_metadata;
 mod prompt_compaction_runtime;
 mod prompt_projection;
+pub mod prompt_usage;
 mod provider_polling;
 pub mod query_loop;
 pub mod question;
@@ -116,7 +117,6 @@ use self::turn_pipeline::{
     ModelClientGenerateDriver, PreparedTurnGeneration,
 };
 use crate::model::prompt::{
-    run_one_turn_model_compaction_and_pre_hook, run_one_turn_model_compaction_async_and_pre_hook,
     AsyncModelCompactionSummaryCandidateProducer, ModelCompactionSummaryCandidateProducer,
     ModelCompactionSummaryCandidateRequest, PromptCompactionCommit, PromptCompactionConfig,
     PromptCompactionError, PromptCompactionOutcome, PromptCompactionPlanV1,
@@ -417,7 +417,7 @@ impl<
             }
             None => {
                 session.completed_turn = Some(projection.clone());
-                self.session_manager.save_session(&session)?;
+                self.session_manager.save_session_owned(session)?;
                 Ok(projection)
             }
         }
@@ -475,7 +475,7 @@ impl<
             return Err("completed_turn_projection_identity_mismatch".to_string());
         }
         session.completed_turn = None;
-        self.session_manager.save_session(&session)
+        self.session_manager.save_session_owned(session).map(|_| ())
     }
 
     fn acquire_active_agent_run(

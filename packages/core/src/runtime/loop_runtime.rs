@@ -3,10 +3,8 @@ use super::*;
 use std::time::Duration;
 
 const MAX_OUTPUT_TOKEN_RECOVERY_ATTEMPTS: u8 = 5;
-const OUTPUT_TOKEN_RECOVERY_MESSAGE: &str =
-    "Output token limit hit. Resume directly from the incomplete response without apology or recap. Break the remaining work into smaller pieces.";
-const INCOMPLETE_TOOL_IDENTITY_RECOVERY_MESSAGE: &str =
-    "Provider truncated a tool call identity. Do not infer or reuse an id. Re-issue the complete tool call with a fresh valid identity.";
+const OUTPUT_TOKEN_RECOVERY_MESSAGE: &str = "Output token limit hit. Resume directly from the incomplete response without apology or recap. Break the remaining work into smaller pieces.";
+const INCOMPLETE_TOOL_IDENTITY_RECOVERY_MESSAGE: &str = "Provider truncated a tool call identity. Do not infer or reuse an id. Re-issue the complete tool call with a fresh valid identity.";
 const CANCELLATION_POLL_INTERVAL_MS: u64 = 50;
 
 enum GenerateStep<T> {
@@ -212,7 +210,7 @@ impl<
                 Some("runtime_job") => {
                     return self
                         .resume_runtime_job_wait_async(checkpoint, agent_run_identity)
-                        .await
+                        .await;
                 }
                 Some("question") => {
                     return self.consume_question_wait_checkpoint(
@@ -220,7 +218,7 @@ impl<
                         agent_run_identity,
                         session,
                         tool_safe_point,
-                    )
+                    );
                 }
                 Some(other) => return Err(format!("unsupported_runtime_wait_done_reason:{other}")),
                 None => return Err("runtime checkpoint missing doneReason".to_string()),
@@ -334,7 +332,7 @@ impl<
             mark_terminal_tool_transcript_committed(&mut session, &generate_result)?;
         }
         session.metadata.remove(RUNTIME_PENDING_TOOL_BATCH_META_KEY);
-        self.session_manager.save_session(&session)?;
+        session = self.session_manager.save_session_owned(session)?;
         let tool_operations_json = project_tool_operations_json(&tool_results);
         Ok(TurnStepResult {
             current_assistant_reply: nonempty_current_assistant_reply(&generate_result.content),
@@ -342,7 +340,7 @@ impl<
             continuation: if complete_turn {
                 QueryContinuation::CompleteTerminalTool
             } else {
-                QueryContinuation::ExecuteTools
+                QueryContinuation::Continue
             },
             checkpoint: None,
             provider_tool_calls: generate_result.tool_calls,
@@ -824,7 +822,7 @@ impl<
             mark_terminal_tool_transcript_committed(&mut session, &generate_result)?;
         }
         session.metadata.remove(RUNTIME_PENDING_TOOL_BATCH_META_KEY);
-        self.session_manager.save_session(&session)?;
+        session = self.session_manager.save_session_owned(session)?;
 
         let mut runtime_events = Vec::new();
         runtime_events.push(build_runtime_event_runtime_wait_changed(
@@ -853,7 +851,7 @@ impl<
             continuation: if complete_turn {
                 QueryContinuation::CompleteTerminalTool
             } else {
-                QueryContinuation::ExecuteTools
+                QueryContinuation::Continue
             },
             checkpoint: None,
             provider_tool_calls: generate_result.tool_calls,
@@ -1483,7 +1481,7 @@ impl<
                         run,
                         &ids,
                     )?;
-                    self.session_manager.save_session(&session)?;
+                    self.session_manager.save_session_owned(session)?;
                     turn_control.record_committed_input_ids(&ids)?;
                 }
             }
@@ -2320,7 +2318,7 @@ impl<
                     .ok_or("host_event_input_message_missing")?;
                 crate::session::host_event_input::bind_owning_run(message, &identity.agent_run_id);
                 refresh_session_context_window(&mut session);
-                self.session_manager.save_session(&session)?;
+                self.session_manager.save_session_owned(session)?;
             }
             self.prepare_completion_delivery(
                 &session_id,
@@ -2331,60 +2329,150 @@ impl<
                 tool_safe_point,
                 &runtime_scope,
             )?;
-            let context_token_estimate = generate_req.context_token_estimate;
-            let execution_tools = generate_req.execution_tools.clone();
-            let request_tool_names = generate_req
-                .prepared_prompt
-                .tool_definitions
-                .iter()
-                .map(|definition| definition.name.clone())
-                .collect::<HashSet<_>>();
             let recovery_content_prefix = input
                 .output_token_recovery_partial()
                 .unwrap_or_default()
                 .to_string();
-            let prepared_turn = PreparedTurnGeneration::new(
-                session_id.clone(),
-                turn_id.clone(),
-                input,
-                agent_run_identity.clone(),
-                generate_req,
-            );
-            let generate_step = if let Some(sink) = stream_sink.as_deref_mut() {
-                tokio::select! {
-                    result = drive_prepared_turn_with_sink_async(driver, prepared_turn, sink) => {
-                        GenerateStep::Completed(result)
+            let mut blocking_compaction_attempted = generate_req.context_was_compacted
+                || generate_req
+                    .prompt_compaction
+                    .as_ref()
+                    .is_some_and(|commit| !commit.acknowledged);
+            let (
+                turn_req_result,
+                context_token_estimate,
+                execution_tools,
+                request_tool_names,
+                prompt_usage_basis,
+            ) = loop {
+                let context_token_estimate = generate_req.context_token_estimate;
+                let execution_tools = generate_req.execution_tools.clone();
+                let request_tool_names = generate_req
+                    .prepared_prompt
+                    .tool_definitions
+                    .iter()
+                    .map(|definition| definition.name.clone())
+                    .collect::<HashSet<_>>();
+                let prompt_usage_basis = generate_req.prompt_usage_basis.take();
+                let prepared_turn = PreparedTurnGeneration::new(
+                    session_id.clone(),
+                    turn_id.clone(),
+                    input.clone(),
+                    agent_run_identity.clone(),
+                    generate_req,
+                );
+                let generate_step = if let Some(sink) = stream_sink.as_deref_mut() {
+                    tokio::select! {
+                        result = drive_prepared_turn_with_sink_async(driver, prepared_turn, sink) => {
+                            GenerateStep::Completed(result)
+                        }
+                        reason = wait_for_loop_cancellation(cancellation_probe, worker_cancellation) => {
+                            GenerateStep::Cancelled(reason?)
+                        }
                     }
-                    reason = wait_for_loop_cancellation(cancellation_probe, worker_cancellation) => {
-                        GenerateStep::Cancelled(reason?)
+                } else {
+                    tokio::select! {
+                        result = drive_prepared_turn_async(driver, prepared_turn) => {
+                            GenerateStep::Completed(result)
+                        }
+                        reason = wait_for_loop_cancellation(cancellation_probe, worker_cancellation) => {
+                            GenerateStep::Cancelled(reason?)
+                        }
+                    }
+                };
+                let turn_req_result = match generate_step {
+                    GenerateStep::Completed(result) => result,
+                    GenerateStep::Cancelled(reason) => {
+                        if let Some(sink) = stream_sink.as_deref_mut() {
+                            sink(TurnUpdate::ModelDone {
+                                session_id: session_id.clone(),
+                                turn_id: turn_id.clone(),
+                                finish_reason: Some("user_cancelled".to_string()),
+                                process_state: RuntimeProcessState::Waiting,
+                            });
+                        }
+                        return Ok(AgentRunResult::new(
+                            responses,
+                            AgentRunStop::Cancelled(reason),
+                        ));
+                    }
+                };
+                if let Err(error) = &turn_req_result {
+                    if error.is_context_overflow() {
+                        agent_run_resource_usage.record_provider_attempts(
+                            context_token_estimate,
+                            error.provider_attempts.max(1),
+                        );
+                        if !blocking_compaction_attempted {
+                            blocking_compaction_attempted = true;
+                            if let Some(sink) = stream_sink.as_deref_mut() {
+                                sink(TurnUpdate::Status {
+                                    session_id: session_id.clone(),
+                                    turn_id: turn_id.clone(),
+                                    message: None,
+                                    process_state: RuntimeProcessState::Recovering,
+                                });
+                            }
+                            let recovery_request = self.build_generate_driver_request_with_compaction_mode(
+                                &session_id, &turn_id, &mut input, loop_index as u32,
+                                runtime_scope.clone(), Some(&mut agent_run_resource_usage),
+                                tool_safe_point, driver, None,
+                                super::generate_request::GenerateCompactionMode::ContextOverflow,
+                            ).await;
+                            generate_req = match recovery_request {
+                                Ok(request) => request,
+                                Err(reason) => {
+                                    let message = format!("{}; {reason}", error.message);
+                                    if let Some(sink) = stream_sink.as_deref_mut() {
+                                        sink(TurnUpdate::RuntimeError {
+                                            session_id: session_id.clone(),
+                                            turn_id: turn_id.clone(),
+                                            message: message.clone(),
+                                            reason: "invalid_request".into(),
+                                            retryable: false,
+                                            process_state:
+                                                RuntimeProcessState::from_provider_error_reason(
+                                                    "invalid_request",
+                                                ),
+                                        });
+                                    }
+                                    return Err(message);
+                                }
+                            };
+                            self.prepare_completion_delivery(
+                                &session_id,
+                                &turn_id,
+                                &input,
+                                agent_run_identity.as_ref(),
+                                &mut generate_req,
+                                tool_safe_point,
+                                &runtime_scope,
+                            )?;
+                            // The first attempt already durably observed its input membership.
+                            // Recovery changes context, not input admission or queue ownership.
+                            continue;
+                        }
+                        if let Some(sink) = stream_sink.as_deref_mut() {
+                            sink(TurnUpdate::RuntimeError {
+                                session_id: session_id.clone(),
+                                turn_id: turn_id.clone(),
+                                message: error.message.clone(),
+                                reason: "invalid_request".into(),
+                                retryable: false,
+                                process_state: RuntimeProcessState::from_provider_error_reason(
+                                    "invalid_request",
+                                ),
+                            });
+                        }
                     }
                 }
-            } else {
-                tokio::select! {
-                    result = drive_prepared_turn_async(driver, prepared_turn) => {
-                        GenerateStep::Completed(result)
-                    }
-                    reason = wait_for_loop_cancellation(cancellation_probe, worker_cancellation) => {
-                        GenerateStep::Cancelled(reason?)
-                    }
-                }
-            };
-            let turn_req_result = match generate_step {
-                GenerateStep::Completed(result) => result,
-                GenerateStep::Cancelled(reason) => {
-                    if let Some(sink) = stream_sink.as_deref_mut() {
-                        sink(TurnUpdate::ModelDone {
-                            session_id: session_id.clone(),
-                            turn_id: turn_id.clone(),
-                            finish_reason: Some("user_cancelled".to_string()),
-                            process_state: RuntimeProcessState::Waiting,
-                        });
-                    }
-                    return Ok(AgentRunResult::new(
-                        responses,
-                        AgentRunStop::Cancelled(reason),
-                    ));
-                }
+                break (
+                    turn_req_result,
+                    context_token_estimate,
+                    execution_tools,
+                    request_tool_names,
+                    prompt_usage_basis,
+                );
             };
             let mut turn_req = match turn_req_result {
                 Ok(turn_req) => turn_req,
@@ -2444,6 +2532,8 @@ impl<
                 }
                 Err(error) => return Err(error.into()),
             };
+            let prompt_usage_anchor =
+                prompt_usage_basis.and_then(|basis| basis.into_anchor(&turn_req.generate_result));
             for call in &turn_req.generate_result.tool_calls {
                 if !request_tool_names.contains(&call.name) {
                     return Err(format!(
@@ -2574,8 +2664,10 @@ impl<
             }
             let continuation = response.continuation;
             let stop = continuation_run_stop(continuation);
-            self.session_manager
-                .save_session(&response.session_snapshot)?;
+            response.session_snapshot.history.prompt_usage_anchor = prompt_usage_anchor;
+            response.session_snapshot = self
+                .session_manager
+                .save_session_owned(response.session_snapshot)?;
             if !response.tool_results.is_empty() {
                 if let Some(sink) = tool_safe_point {
                     sink.commit(ToolSafePoint::CompletedTurn(response.clone()))?;
@@ -2762,7 +2854,7 @@ impl<
             input_ids.push(input.input_id.clone());
         }
         refresh_session_context_window(&mut session);
-        self.session_manager.save_session(&session)?;
+        self.session_manager.save_session_owned(session)?;
         inputs.clear();
         Ok(())
     }
@@ -2969,7 +3061,7 @@ fn collect_turn_control_inputs(
                 supplements.push(supplement)
             }
             TurnControlInput::Supplement(_) => {
-                return Err("turn_control_supplement_after_answer_now".to_string())
+                return Err("turn_control_supplement_after_answer_now".to_string());
             }
             TurnControlInput::AnswerNow(intervention) => match answer_now.as_ref() {
                 None => {
@@ -3249,7 +3341,7 @@ fn answer_now_safe_boundary(response: &TurnStepResult) -> &'static str {
     match response.continuation {
         QueryContinuation::AwaitQuestion => "question_wait_boundary",
         QueryContinuation::AwaitRuntimeJob => "runtime_job_wait_boundary",
-        QueryContinuation::ExecuteTools | QueryContinuation::CompleteTerminalTool => {
+        QueryContinuation::Continue | QueryContinuation::CompleteTerminalTool => {
             "tool_terminal_boundary"
         }
         QueryContinuation::Finalize => "provider_final_boundary",

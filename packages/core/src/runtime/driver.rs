@@ -14,7 +14,7 @@ use crate::session::turn_input::{
 use crate::tool::ModelToolDefinition;
 use std::collections::VecDeque;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnInput {
     UserMessage(String),
     UserMessageBatch {
@@ -1050,7 +1050,7 @@ impl ModelRequestStartedV1 {
                     if request.prepared_prompt.system_prompt.as_deref()
                         != Some(content.as_str()) =>
                 {
-                    return Err("model request system prompt observation mismatch".to_string())
+                    return Err("model request system prompt observation mismatch".to_string());
                 }
                 ModelObservationV1::InputImage { image }
                     if !request
@@ -1066,19 +1066,19 @@ impl ModelRequestStartedV1 {
                     return Err(format!(
                         "model request input image observation is absent from prepared prompt: {}",
                         image.message_id
-                    ))
+                    ));
                 }
                 ModelObservationV1::ToolCatalog { tool_definitions }
                     if &request.prepared_prompt.tool_definitions != tool_definitions =>
                 {
-                    return Err("model request tool catalog observation mismatch".to_string())
+                    return Err("model request tool catalog observation mismatch".to_string());
                 }
                 ModelObservationV1::CompactionPrompt { message }
                     if purpose != ModelRequestPurposeV1::Compaction
                         || request.prepared_prompt.messages.len() != 1
                         || request.prepared_prompt.messages.first() != Some(message) =>
                 {
-                    return Err("model compaction prompt observation mismatch".to_string())
+                    return Err("model compaction prompt observation mismatch".to_string());
                 }
                 _ => {}
             }
@@ -1128,13 +1128,13 @@ impl ModelRequestStartedV1 {
             {
                 return Err(
                     "model request context observation coverage or order mismatch".to_string(),
-                )
+                );
             }
             ModelRequestPurposeV1::Compaction if !context_messages.is_empty() => {
                 return Err(
                     "compaction model request cannot contain context message observations"
                         .to_string(),
-                )
+                );
             }
             _ => {}
         }
@@ -1407,6 +1407,12 @@ pub struct GenerateDriverRequest {
     pub compression_stats_json: Option<String>,
     pub context_token_estimate: u32,
     pub prepared_prompt: PreparedPromptV1,
+    /// A known model configuration frozen with this request. Opaque bridges use None.
+    pub session_config: Option<crate::model::ModelSessionConfig>,
+    /// Compact measured contributions reused when the completed response reports usage.
+    pub prompt_usage_basis: Option<super::prompt_usage::PromptUsageBasisV1>,
+    /// Whether preparing this logical generation already committed a new summary.
+    pub context_was_compacted: bool,
     /// Execution contracts frozen alongside the model-visible tool definitions.
     pub tool_contracts: Vec<crate::tool::ToolContract>,
     pub execution_tools: crate::tool::layer::ToolLayer,
@@ -1455,6 +1461,11 @@ impl GenerateDriverError {
 
     pub fn is_output_token_limit(&self) -> bool {
         self.provider_code.as_deref() == Some("incomplete_output_token_limit")
+    }
+
+    /// Identifies a structured provider rejection that requires changing input.
+    pub fn is_context_overflow(&self) -> bool {
+        self.provider_code.as_deref() == Some("context_length_exceeded")
     }
 }
 
@@ -1563,6 +1574,14 @@ pub type GenerateDriverPromptCompactionFuture<'a> =
     Pin<Box<dyn Future<Output = Option<GenerateDriverPromptCompactionOutcome>> + Send + 'a>>;
 
 pub trait AsyncGenerateDriver: Send + Sync {
+    /// Returns the actual selected configuration only when this driver owns it.
+    fn trusted_session_model_config(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<crate::model::ModelSessionConfig>, String> {
+        Ok(None)
+    }
+
     fn durable_agent_run_id(&self) -> Option<&str> {
         None
     }

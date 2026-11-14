@@ -52,18 +52,27 @@ fn postgres_hosted_persistence_fences_late_execution_and_deleted_session_project
         )
         .unwrap();
     parent
-        .save_agent_runtime_snapshot("sess_1", "{}", 1)
+        .save_agent_runtime_snapshot("sess_1", &session_snapshot_fixture("sess_1", ""), 1)
         .unwrap();
     db.execute("DELETE FROM public.app_core_presentationchangeoutbox", &[])
         .unwrap();
     child
-        .save_agent_runtime_snapshot("child-session", "{}", 1)
+        .save_agent_runtime_snapshot(
+            "child-session",
+            &session_snapshot_fixture("child-session", ""),
+            1,
+        )
         .unwrap();
     assert_eq!(db.query_one("SELECT count(*) FROM public.app_core_presentationchangeoutbox WHERE key='session:sess_1:subagents'", &[]).unwrap().get::<_, i64>(0), 1);
     db.execute("DELETE FROM public.app_core_presentationchangeoutbox", &[])
         .unwrap();
     assert!(!child
-        .compare_and_save_agent_runtime_snapshot("child-session", Some("other"), "changed", 2)
+        .compare_and_save_agent_runtime_snapshot(
+            "child-session",
+            Some("other"),
+            &session_snapshot_fixture("child-session", "changed"),
+            2
+        )
         .unwrap());
     assert_eq!(
         db.query_one(
@@ -75,7 +84,12 @@ fn postgres_hosted_persistence_fences_late_execution_and_deleted_session_project
         0
     );
     assert!(child
-        .compare_and_save_agent_runtime_snapshot("child-session", Some("{}"), "changed", 2)
+        .compare_and_save_agent_runtime_snapshot(
+            "child-session",
+            Some(&session_snapshot_fixture("child-session", "")),
+            &session_snapshot_fixture("child-session", "changed"),
+            2
+        )
         .unwrap());
     assert_eq!(db.query_one("SELECT count(*) FROM public.app_core_presentationchangeoutbox WHERE key='session:sess_1:subagents'", &[]).unwrap().get::<_, i64>(0), 1);
     assert!(child
@@ -173,7 +187,12 @@ fn postgres_hosted_persistence_fences_late_execution_and_deleted_session_project
 
     let projection = store.subagent_terminal_projection_view("sess_1").unwrap();
     assert!(projection
-        .compare_and_save_agent_runtime_snapshot("sess_1", None, "{}", 6)
+        .compare_and_save_agent_runtime_snapshot(
+            "sess_1",
+            None,
+            &session_snapshot_fixture("sess_1", ""),
+            6
+        )
         .unwrap());
     store.delete_session_data("sess_1").unwrap();
     db.execute(
@@ -209,10 +228,20 @@ fn postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results(
     reset_store(&url);
     let store = PostgresRuntimeStore::new(&url).unwrap();
     assert!(store
-        .compare_and_save_agent_runtime_snapshot("parent", None, "{}", 1)
+        .compare_and_save_agent_runtime_snapshot(
+            "parent",
+            None,
+            &session_snapshot_fixture("parent", ""),
+            1
+        )
         .unwrap());
     assert!(!store
-        .compare_and_save_agent_runtime_snapshot("parent", None, "bad", 2)
+        .compare_and_save_agent_runtime_snapshot(
+            "parent",
+            None,
+            &session_snapshot_fixture("parent", "bad"),
+            2
+        )
         .unwrap());
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let writers: Vec<_> = ["a", "b"]
@@ -226,7 +255,9 @@ fn postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results(
                     .unwrap()
                     .unwrap();
                 barrier.wait();
-                let candidate = serde_json::json!({key:true}).to_string();
+                let mut candidate: serde_json::Value = serde_json::from_str(&expected).unwrap();
+                candidate["metadata"][key] = serde_json::json!("true");
+                let candidate = candidate.to_string();
                 let won = store
                     .compare_and_save_agent_runtime_snapshot(
                         "parent",
@@ -241,7 +272,7 @@ fn postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results(
                         .unwrap()
                         .unwrap();
                     let mut merged: serde_json::Value = serde_json::from_str(&latest).unwrap();
-                    merged[key] = serde_json::json!(true);
+                    merged["metadata"][key] = serde_json::json!("true");
                     assert!(store
                         .compare_and_save_agent_runtime_snapshot(
                             "parent",
@@ -269,9 +300,17 @@ fn postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results(
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(actual, serde_json::json!({"a":true,"b":true}));
+    assert_eq!(
+        actual["metadata"],
+        serde_json::json!({"a":"true","b":"true"})
+    );
     assert!(!store
-        .compare_and_save_agent_runtime_snapshot("missing", Some("{}"), "bad", 5)
+        .compare_and_save_agent_runtime_snapshot(
+            "missing",
+            Some("{}"),
+            &session_snapshot_fixture("missing", "bad"),
+            5
+        )
         .unwrap());
     assert!(store
         .load_agent_runtime_snapshot("missing")

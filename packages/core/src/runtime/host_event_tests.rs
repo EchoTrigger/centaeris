@@ -809,6 +809,7 @@ fn query_loop_user_input_preserves_identity_payload_and_snapshot_contract() {
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from([
+            "history",
             "session_id",
             "messages",
             "context_window",

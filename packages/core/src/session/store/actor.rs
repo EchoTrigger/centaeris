@@ -1336,6 +1336,36 @@ impl RuntimeStoreActor {
 }
 
 impl AgentRuntimeSnapshotStorePort for RuntimeStoreActor {
+    fn save_prepared_agent_runtime_snapshot(
+        &self,
+        prepared: crate::session::history::SessionSnapshotWriteV1,
+        updated_at_ms: i64,
+    ) -> Result<crate::session::state::SessionStateSnapshot, String> {
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::SavePreparedAgentRuntimeSnapshot {
+                prepared,
+                updated_at_ms,
+                reply,
+            },
+        )
+    }
+
+    fn load_session_history_page(
+        &self,
+        session_id: &str,
+        before_position: Option<u64>,
+        limit: usize,
+        selection: crate::session::history::SessionHistorySelectionV1,
+    ) -> Result<Vec<crate::session::history::SessionHistoryRecordV1>, String> {
+        self.send_blocking(|reply| RuntimeStoreActorCommand::LoadSessionHistoryPage {
+            session_id: session_id.into(),
+            before_position,
+            limit,
+            selection,
+            reply,
+        })
+    }
+
     fn save_model_input_image(
         &self,
         session_id: &str,
@@ -1950,6 +1980,13 @@ enum RuntimeStoreActorCommand {
         session_id: String,
         reply: RuntimeStoreActorReply<Option<String>>,
     },
+    LoadSessionHistoryPage {
+        session_id: String,
+        before_position: Option<u64>,
+        limit: usize,
+        selection: crate::session::history::SessionHistorySelectionV1,
+        reply: RuntimeStoreActorReply<Vec<crate::session::history::SessionHistoryRecordV1>>,
+    },
     CompareAndSaveAgentRuntimeSnapshot {
         session_id: String,
         expected_snapshot: Option<String>,
@@ -1962,6 +1999,11 @@ enum RuntimeStoreActorCommand {
         snapshot_json: String,
         updated_at_ms: i64,
         reply: RuntimeStoreActorReply<()>,
+    },
+    SavePreparedAgentRuntimeSnapshot {
+        prepared: crate::session::history::SessionSnapshotWriteV1,
+        updated_at_ms: i64,
+        reply: RuntimeStoreActorReply<crate::session::state::SessionStateSnapshot>,
     },
     DeleteSessionData {
         session_id: String,
@@ -2064,10 +2106,12 @@ impl RuntimeStoreActorCommand {
             Self::SaveModelInputImage { .. } => "save_model_input_image",
             Self::LoadModelInputImage { .. } => "load_model_input_image",
             Self::LoadAgentRuntimeSnapshot { .. } => "load_agent_runtime_snapshot",
+            Self::LoadSessionHistoryPage { .. } => "load_session_history_page",
             Self::CompareAndSaveAgentRuntimeSnapshot { .. } => {
                 "compare_and_save_agent_runtime_snapshot"
             }
             Self::SaveAgentRuntimeSnapshot { .. } => "save_agent_runtime_snapshot",
+            Self::SavePreparedAgentRuntimeSnapshot { .. } => "save_prepared_agent_runtime_snapshot",
             Self::DeleteSessionData { .. } => "delete_session_data",
             Self::CommitTranscriptProjection { .. } => "commit_transcript_projection",
             Self::LoadTranscriptProjectionHead { .. } => "load_transcript_projection_head",
@@ -2535,6 +2579,25 @@ async fn run_runtime_store_actor<S>(
                         .await,
                     );
                 }
+                RuntimeStoreActorCommand::LoadSessionHistoryPage {
+                    session_id,
+                    before_position,
+                    limit,
+                    selection,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), admission, move |store| {
+                            store.load_session_history_page(
+                                &session_id,
+                                before_position,
+                                limit,
+                                selection,
+                            )
+                        })
+                        .await,
+                    );
+                }
                 RuntimeStoreActorCommand::CompareAndSaveAgentRuntimeSnapshot {
                     session_id,
                     expected_snapshot,
@@ -2567,6 +2630,18 @@ async fn run_runtime_store_actor<S>(
                                 snapshot_json.as_str(),
                                 updated_at_ms,
                             )
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::SavePreparedAgentRuntimeSnapshot {
+                    prepared,
+                    updated_at_ms,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), admission, move |store| {
+                            store.save_prepared_agent_runtime_snapshot(prepared, updated_at_ms)
                         })
                         .await,
                     );

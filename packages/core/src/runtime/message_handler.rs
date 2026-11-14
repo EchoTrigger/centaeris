@@ -111,11 +111,11 @@ impl MessageHandler {
     ) -> String {
         let now = now_ms();
         let sanitized = sanitize_message(content, self.config.max_message_chars);
+        // The active view may evict history, so its length cannot identify new facts.
         let message_id = format!(
-            "msg:{}:{}:{}",
+            "msg:{}:{}",
             session.session_id,
-            now,
-            session.messages.len()
+            crate::runtime::contracts::new_turn_id()
         );
         session.messages.push(ChatMessage {
             message_id: message_id.clone(),
@@ -177,7 +177,12 @@ mod tests {
         let second_id = handler.push_user_message(&mut session, "two", JsonMap::new());
 
         assert_ne!(first_id, second_id);
-        assert!(first_id.ends_with(":0"));
-        assert!(second_id.ends_with(":1"));
+        assert!(!first_id.is_empty());
+        assert!(!second_id.is_empty());
+        session.messages.clear();
+        session.model_semantics.clear();
+        let after_eviction = handler.push_user_message(&mut session, "three", JsonMap::new());
+        assert_ne!(after_eviction, first_id);
+        assert_ne!(after_eviction, second_id);
     }
 }

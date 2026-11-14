@@ -153,6 +153,13 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
         self.source_agent_run_id
     }
 
+    fn trusted_session_model_config(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ModelSessionConfig>, String> {
+        self.session_config_store.get_session_config(session_id)
+    }
+
     fn generate_prompt_compaction_summary_async<'b>(
         &'b self,
         request: &'b ModelCompactionSummaryCandidateRequest,
@@ -178,10 +185,13 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
         req: &'b GenerateDriverRequest,
     ) -> super::GenerateDriverFuture<'b, GenerateDriverOutcome> {
         Box::pin(async move {
-            let session_config = self
-                .session_config_store
-                .get_session_config(req.session_id.as_str())?
-                .unwrap_or_else(ModelSessionConfig::default);
+            let session_config = match &req.session_config {
+                Some(config) => config.clone(),
+                None => self
+                    .session_config_store
+                    .get_session_config(req.session_id.as_str())?
+                    .unwrap_or_else(ModelSessionConfig::default),
+            };
             let request = ModelClientRequest {
                 session_id: req.session_id.clone(),
                 turn_id: req.turn_id.clone(),
@@ -220,10 +230,13 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
         sink: &'b mut (dyn FnMut(TurnUpdate) + Send),
     ) -> super::GenerateDriverFuture<'b, GenerateDriverOutcome> {
         Box::pin(async move {
-            let session_config = self
-                .session_config_store
-                .get_session_config(req.session_id.as_str())?
-                .unwrap_or_else(ModelSessionConfig::default);
+            let session_config = match &req.session_config {
+                Some(config) => config.clone(),
+                None => self
+                    .session_config_store
+                    .get_session_config(req.session_id.as_str())?
+                    .unwrap_or_else(ModelSessionConfig::default),
+            };
             let request = ModelClientRequest {
                 session_id: req.session_id.clone(),
                 turn_id: req.turn_id.clone(),
@@ -359,7 +372,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                     error,
                     std::mem::take(&mut visible_stream_content),
                 );
-                if !error.is_output_token_limit() {
+                if !error.is_output_token_limit() && !error.is_context_overflow() {
                     sink(TurnUpdate::RuntimeError {
                         session_id: req.session_id.clone(),
                         turn_id: req.turn_id.clone(),
@@ -507,7 +520,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
         .unwrap_or(DEFAULT_MODEL_OUTPUT_TOKENS);
     if request.max_output_tokens == 0 || request.max_output_tokens > configured_max_output_tokens {
         return super::GenerateDriverPromptCompactionOutcome {
-                    source_request: None,
+            source_request: None,
             result: Err(PromptCompactionError::provider(format!(
                 "model compaction output limit invalid: request={} model={configured_max_output_tokens}",
                 request.max_output_tokens
@@ -539,19 +552,27 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
             };
         }
     };
-    let context_token_estimate = match super::generate_request::estimate_prepared_prompt_input_tokens(&prepared_prompt) {
-        Ok(tokens) if tokens <= request.input_limit_tokens => tokens,
-        Ok(tokens) => return super::GenerateDriverPromptCompactionOutcome {
+    let context_token_estimate =
+        match super::generate_request::estimate_prepared_prompt_input_tokens(&prepared_prompt) {
+            Ok(tokens) if tokens <= request.input_limit_tokens => tokens,
+            Ok(tokens) => {
+                return super::GenerateDriverPromptCompactionOutcome {
                     source_request: None,
-            result: Err(PromptCompactionError::provider(format!(
-                "model compaction input budget exceeded: estimatedTokens={tokens} inputLimitTokens={}", request.input_limit_tokens
-            ))), resource_usage: AgentRunResourceUsageV1::default(),
-        },
-        Err(error) => return super::GenerateDriverPromptCompactionOutcome {
+                    result: Err(PromptCompactionError::provider(format!(
+                        "model compaction input budget exceeded: estimatedTokens={tokens} inputLimitTokens={}",
+                        request.input_limit_tokens
+                    ))),
+                    resource_usage: AgentRunResourceUsageV1::default(),
+                };
+            }
+            Err(error) => {
+                return super::GenerateDriverPromptCompactionOutcome {
                     source_request: None,
-            result: Err(PromptCompactionError::provider(error)), resource_usage: AgentRunResourceUsageV1::default(),
-        },
-    };
+                    result: Err(PromptCompactionError::provider(error)),
+                    resource_usage: AgentRunResourceUsageV1::default(),
+                };
+            }
+        };
     session_config.max_output_tokens = Some(summary_max_output_tokens);
     session_config.timeout_ms = session_config
         .timeout_ms
@@ -590,7 +611,7 @@ async fn generate_prompt_compaction_summary_with_model_client_async<
                     source_request: None,
                     result: Err(PromptCompactionError::durability(error)),
                     resource_usage: AgentRunResourceUsageV1::default(),
-                }
+                };
             }
         };
         let started = ModelRequestStartedV1::from_request(
@@ -797,7 +818,7 @@ pub(super) fn continuation_run_stop(continuation: QueryContinuation) -> Option<A
         QueryContinuation::AwaitRuntimeJob => Some(AgentRunStop::RuntimeJobWait),
         QueryContinuation::CompleteTerminalTool => Some(AgentRunStop::TerminalTool),
         QueryContinuation::Finalize => Some(AgentRunStop::Finalized),
-        QueryContinuation::ExecuteTools => None,
+        QueryContinuation::Continue => None,
     }
 }
 

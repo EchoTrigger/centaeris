@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub mod external_context;
+pub mod history;
 pub mod host_event_input;
 pub mod manager;
 pub mod recovery;
@@ -2435,15 +2436,7 @@ pub fn restore_runtime_snapshot_from_session_records(
     expected_session_id: &str,
     events: &[SessionLogRecord],
 ) -> Result<SessionStateSnapshot, String> {
-    let references = events.iter().collect::<Vec<_>>();
-    let inactive = active_tombstone_targets(expected_session_id, &references)?;
-    let mut recovery = recovery::SessionRecoveryAccumulator::new(expected_session_id);
-    for record in events.iter().filter(|record| {
-        record.event_type != SessionRecordType::Tombstone && !inactive.contains(&record.event_id)
-    }) {
-        recovery.push(record.clone())?;
-    }
-    Ok(recovery.finish()?.snapshot)
+    Ok(recovery::recover_session_records(expected_session_id, events)?.snapshot)
 }
 
 fn restore_active_runtime_snapshot(

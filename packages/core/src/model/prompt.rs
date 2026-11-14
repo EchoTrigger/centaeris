@@ -1,6 +1,6 @@
 pub mod system;
 
-mod compaction;
+pub(crate) mod compaction;
 
 pub use compaction::{
     run_one_turn_model_compaction, run_one_turn_model_compaction_and_pre_hook,

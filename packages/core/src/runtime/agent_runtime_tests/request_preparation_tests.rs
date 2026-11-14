@@ -8,6 +8,277 @@ use crate::execution::{
 };
 use base64::Engine as _;
 
+#[tokio::test]
+async fn compaction_replays_original_user_requests_from_archived_history() {
+    let store = AgentRuntimeTestStore::new();
+    let session_id = "archived-user-replay";
+    let mut session = model_prompt_compaction_session(session_id);
+    let original_id = session.messages[0].message_id.clone();
+    let original_content = "Keep the original acceptance requirement.";
+    session.messages[0].content = original_content.into();
+    session.messages[0].metadata.insert(
+        MESSAGE_SEMANTIC_KIND_META_KEY.into(),
+        MESSAGE_SEMANTIC_USER_REQUEST.into(),
+    );
+    let manager = SessionManager::new(store.clone());
+    manager.save_session(&session).unwrap();
+    let mut config = AgentRuntimeConfig::default();
+    force_prompt_compaction_for_tests(&mut config);
+    config.model_context_tokens = 12_000;
+    config.model_max_output_tokens = 4_096;
+    config.prompt_compaction_summary_max_tokens = 2_000;
+    config.prompt_compaction_user_replay_tokens = 0;
+    AgentRuntime::new_for_test(store.clone(), config.clone())
+        .build_generate_driver_request_with_compaction_mode(
+            session_id,
+            "without-replay",
+            &mut TurnInput::UserMessage("Continue without replay".into()),
+            0,
+            PromptCompactionScopeV1::main(),
+            None,
+            None,
+            &TestPromptCompactionAsyncDriver,
+            None,
+            crate::runtime::generate_request::GenerateCompactionMode::ContextOverflow,
+        )
+        .await
+        .unwrap();
+    let bounded = manager.load_or_create_session(session_id).unwrap();
+    assert!(bounded
+        .messages
+        .iter()
+        .all(|message| message.message_id != original_id));
+    assert!(bounded
+        .messages
+        .iter()
+        .all(|message| message.content != original_content));
+    config.prompt_compaction_user_replay_tokens = 128;
+    let request = AgentRuntime::new_for_test(store, config)
+        .build_generate_driver_request_with_compaction_mode(
+            session_id,
+            "with-replay",
+            &mut TurnInput::UserMessage("Continue with the original requirement".into()),
+            1,
+            PromptCompactionScopeV1::main(),
+            None,
+            None,
+            &TestPromptCompactionAsyncDriver,
+            None,
+            crate::runtime::generate_request::GenerateCompactionMode::ContextOverflow,
+        )
+        .await
+        .unwrap();
+    assert!(request
+        .prepared_prompt
+        .messages
+        .iter()
+        .any(|message| message.content == original_content));
+    let replayed = manager.load_or_create_session(session_id).unwrap();
+    assert!(replayed.messages.iter().any(|message| {
+        message.metadata.get("source_message_id") == Some(&original_id)
+            && message.content == original_content
+    }));
+}
+
+#[tokio::test]
+async fn model_config_changes_at_intake_rebuild_and_dispatch_the_frozen_binding() {
+    struct MutableConfigStore(Mutex<ModelSessionConfig>);
+    impl ModelSessionConfigStore for MutableConfigStore {
+        fn get_session_config(&self, _: &str) -> Result<Option<ModelSessionConfig>, String> {
+            Ok(Some(self.0.lock().unwrap().clone()))
+        }
+    }
+    let config_store = MutableConfigStore(Mutex::new(ModelSessionConfig::default()));
+    let model_client = OnlinePromptCompactionModelClient::new(PromptCompactionModelBehavior::Valid);
+    let driver = ModelClientGenerateDriver::new(&model_client, &config_store);
+    let projections = Arc::new(AtomicUsize::new(0));
+    let observed = projections.clone();
+    let engine = AgentRuntime::new_for_test(
+        AgentRuntimeTestStore::new(),
+        AgentRuntimeConfig {
+            enable_prompt_compaction: false,
+            ..Default::default()
+        },
+    )
+    .with_request_preparation_observer(Arc::new(move |timing| {
+        if timing.completed && timing.stage == crate::runtime::RequestPreparationStage::Projection {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    let mut intake = |_: &mut TurnInput| {
+        config_store.0.lock().unwrap().model = "model-at-intake".into();
+        Ok(None)
+    };
+    let request = engine
+        .build_generate_driver_request_with_async_driver_and_runtime_scope(
+            "frozen-model-config",
+            "frozen-model-turn",
+            &mut TurnInput::UserMessage("Inspect the source".into()),
+            0,
+            PromptCompactionScopeV1::main(),
+            None,
+            None,
+            &driver,
+            Some(&mut intake),
+        )
+        .await
+        .unwrap();
+    assert_eq!(projections.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        request.session_config.as_ref().unwrap().model,
+        "model-at-intake"
+    );
+    assert!(request.prompt_usage_basis.is_some());
+    config_store.0.lock().unwrap().model = "model-after-preparation".into();
+    driver.generate_next_async(&request).await.unwrap();
+    driver
+        .generate_next_with_sink_async(&request, &mut |_| {})
+        .await
+        .unwrap();
+    let dispatched = model_client.requests();
+    assert_eq!(dispatched.len(), 2);
+    assert!(dispatched
+        .iter()
+        .all(|request| request.session_config.model == "model-at-intake"));
+}
+
+struct ContextOverflowTestDriver {
+    calls: AtomicUsize,
+    summaries: AtomicUsize,
+    always_overflow: bool,
+    code: &'static str,
+    observed_inputs: Mutex<Vec<Vec<String>>>,
+}
+
+impl AsyncGenerateDriver for ContextOverflowTestDriver {
+    fn generate_next_async<'a>(
+        &'a self,
+        request: &'a GenerateDriverRequest,
+    ) -> GenerateDriverFuture<'a, GenerateDriverOutcome> {
+        Box::pin(async move {
+            self.observed_inputs.lock().unwrap().push(
+                request
+                    .prepared_prompt
+                    .messages
+                    .iter()
+                    .map(|message| message.content.clone())
+                    .collect(),
+            );
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 || self.always_overflow {
+                Err(GenerateDriverError {
+                    message: "context_length_exceeded".into(),
+                    provider_code: Some(self.code.into()),
+                    provider_attempts: 1,
+                    partial_content: String::new(),
+                    truncated_tool_calls: Vec::new(),
+                })
+            } else {
+                TestPromptCompactionAsyncDriver
+                    .generate_next_async(request)
+                    .await
+            }
+        })
+    }
+
+    fn generate_prompt_compaction_summary_async<'a>(
+        &'a self,
+        request: &'a ModelCompactionSummaryCandidateRequest,
+    ) -> GenerateDriverPromptCompactionFuture<'a> {
+        Box::pin(async move {
+            self.summaries.fetch_add(1, Ordering::SeqCst);
+            TestPromptCompactionAsyncDriver
+                .generate_prompt_compaction_summary_async(request)
+                .await
+        })
+    }
+}
+
+#[tokio::test]
+async fn query_loop_context_overflow_changes_context_once_then_succeeds_or_fails_explicitly() {
+    for (
+        seed_history,
+        initial_compaction,
+        repeated,
+        code,
+        expected_calls,
+        expected_summaries,
+        success,
+    ) in [
+        (true, false, false, "context_length_exceeded", 2, 1, true),
+        (true, false, true, "context_length_exceeded", 2, 1, false),
+        (true, true, false, "context_length_exceeded", 1, 1, false),
+        (true, false, false, "invalid_request_error", 1, 0, false),
+        (false, false, false, "context_length_exceeded", 1, 0, false),
+    ] {
+        let store = AgentRuntimeTestStore::new();
+        let session_id = "context-overflow-bounded";
+        if seed_history {
+            SessionManager::new(store.clone())
+                .save_session(&model_prompt_compaction_session(session_id))
+                .unwrap();
+        }
+        let mut config = AgentRuntimeConfig::default();
+        if initial_compaction {
+            force_prompt_compaction_for_tests(&mut config);
+            config.model_context_tokens = 12_000;
+            config.model_max_output_tokens = 4_096;
+            config.prompt_compaction_summary_max_tokens = 2_000;
+        }
+        let engine = AgentRuntime::new_for_test(store, config);
+        let driver = ContextOverflowTestDriver {
+            calls: AtomicUsize::new(0),
+            summaries: AtomicUsize::new(0),
+            always_overflow: repeated,
+            code,
+            observed_inputs: Mutex::new(Vec::new()),
+        };
+        let result = engine
+            .process_turn_loop_with_async_driver_and_sink_cancellable(
+                AgentRunRequest {
+                    session_id: session_id.into(),
+                    initial_turn_id: "overflow-turn".into(),
+                    initial_input: AgentRunInitialInput::UserMessage(
+                        "Continue after overflow".into(),
+                    ),
+                    agent_run_identity: None,
+                    runtime_scope: PromptCompactionScopeV1::main(),
+                    resume_from_turn_id: None,
+                    auto_continue_after_resume_wait: None,
+                },
+                &driver,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.is_ok(),
+            success,
+            "initial={initial_compaction}, repeated={repeated}, code={code}: {result:?}"
+        );
+        assert_eq!(driver.calls.load(Ordering::SeqCst), expected_calls);
+        assert_eq!(driver.summaries.load(Ordering::SeqCst), expected_summaries);
+        if !seed_history {
+            assert!(result
+                .unwrap_err()
+                .contains("model_context_overflow_compaction_did_not_change_context"));
+        }
+        assert!(driver
+            .observed_inputs
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|messages| {
+                messages
+                    .iter()
+                    .any(|message| message == "Continue after overflow")
+            }));
+    }
+}
+
 struct ChangingToolCatalog {
     revision: AtomicUsize,
     refreshes: AtomicUsize,
@@ -377,7 +648,7 @@ fn instruction_read_tools(cwd: &Path, host: Arc<InstructionReadHost>) -> ToolLay
 }
 
 #[tokio::test]
-async fn agents_observation_reuse_is_request_local_and_requires_host_revision() {
+async fn agents_observation_is_read_once_per_request_and_reopened_for_the_next_request() {
     for trusted in [false, true] {
         let cwd = temp_dir_path("request_local_agents");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -395,7 +666,7 @@ async fn agents_observation_reuse_is_request_local_and_requires_host_revision() 
                 ..Default::default()
             },
         );
-        let reads_per_request = if trusted { 1 } else { 2 };
+        let reads_per_request = 1;
         let mut previous_key = None;
         for (index, content) in [
             None,
@@ -448,6 +719,79 @@ async fn agents_observation_reuse_is_request_local_and_requires_host_revision() 
             .await
             .unwrap_err()
             .contains("valid UTF-8"));
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unchanged_intake_reuses_projection_and_changed_input_rebuilds_it() {
+    for trusted in [false, true] {
+        let cwd = temp_dir_path("unchanged_intake_projection");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "Read the current instructions").unwrap();
+        let host = Arc::new(InstructionReadHost {
+            trusted,
+            revision: AtomicUsize::new(1),
+            reads: AtomicUsize::new(0),
+            image_reads: AtomicUsize::new(0),
+        });
+        let projections = Arc::new(AtomicUsize::new(0));
+        let observed = projections.clone();
+        let engine = AgentRuntime::new_for_test_with_tools(
+            AgentRuntimeTestStore::new(),
+            instruction_read_tools(&cwd, host.clone()),
+            AgentRuntimeConfig {
+                enable_prompt_compaction: false,
+                ..Default::default()
+            },
+        )
+        .with_request_preparation_observer(Arc::new(move |timing| {
+            if timing.completed
+                && timing.stage == crate::runtime::RequestPreparationStage::Projection
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        for changed in [false, true] {
+            projections.store(0, Ordering::SeqCst);
+            host.reads.store(0, Ordering::SeqCst);
+            let mut intake = |input: &mut TurnInput| {
+                if changed {
+                    *input = TurnInput::UserMessage("Input accepted at the safe point".into());
+                }
+                Ok(None)
+            };
+            let request = engine
+                .build_generate_driver_request_with_async_driver_and_runtime_scope(
+                    "projection-intake",
+                    if changed { "changed" } else { "unchanged" },
+                    &mut TurnInput::UserMessage("Initial input".into()),
+                    0,
+                    PromptCompactionScopeV1::main(),
+                    None,
+                    None,
+                    &TestPromptCompactionAsyncDriver,
+                    Some(&mut intake),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                projections.load(Ordering::SeqCst),
+                if changed { 2 } else { 1 }
+            );
+            assert_eq!(
+                host.reads.load(Ordering::SeqCst),
+                if trusted { 1 } else { 2 }
+            );
+            assert!(request.prepared_prompt.messages.iter().any(|message| {
+                message.content
+                    == if changed {
+                        "Input accepted at the safe point"
+                    } else {
+                        "Initial input"
+                    }
+            }));
+        }
         std::fs::remove_dir_all(cwd).unwrap();
     }
 }

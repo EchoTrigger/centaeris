@@ -326,7 +326,16 @@ async fn assert_prepared_receipt_recovery(pending_index: usize, mode: &str) {
             1,
             "real producer must persist its hook context"
         );
-        restored.messages.extend(contexts);
+        for context in contexts {
+            let semantics = native
+                .model_semantics_for(&context.message_id)
+                .unwrap()
+                .clone();
+            restored
+                .model_semantics
+                .insert(context.message_id.clone(), semantics);
+            restored.messages.push(context);
+        }
         refresh_session_context_window(&mut restored);
     }
     let original_user_count = restored

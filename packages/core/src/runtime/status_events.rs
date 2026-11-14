@@ -20,7 +20,7 @@ pub(super) fn continuation_event_status(continuation: &QueryContinuation) -> &'s
         QueryContinuation::CompleteTerminalTool | QueryContinuation::Finalize => "done",
         QueryContinuation::AwaitQuestion
         | QueryContinuation::AwaitRuntimeJob
-        | QueryContinuation::ExecuteTools => "running",
+        | QueryContinuation::Continue => "running",
     }
 }
 
@@ -29,7 +29,7 @@ pub(super) fn should_emit_model_process_summary(continuation: &QueryContinuation
         continuation,
         QueryContinuation::AwaitQuestion
             | QueryContinuation::AwaitRuntimeJob
-            | QueryContinuation::ExecuteTools
+            | QueryContinuation::Continue
     )
 }
 
