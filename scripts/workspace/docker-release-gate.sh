@@ -109,26 +109,7 @@ target.write_text("\n".join(rendered) + "\n", encoding="utf-8")
 PY
 
 "${compose[@]}" config --quiet
-"${compose[@]}" config --format json | WORKSPACE_ROOT="$workspace_root" python3 -c '
-import json, os, pathlib, sys
-config = json.load(sys.stdin)
-assert config["name"] == "centaeris-workspace"
-required_builds = {"api", "document-processor", "runtime", "web", "workspace-general"}
-assert required_builds <= {name for name, service in config["services"].items() if "build" in service}
-for service_name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
-    service = config["services"][service_name]
-    assert not service.get("profiles")
-    assert service_name in config["services"][consumer]["depends_on"]
-workspace = pathlib.Path(os.environ["WORKSPACE_ROOT"]).resolve()
-for name in required_builds:
-    assert pathlib.Path(config["services"][name]["build"]["context"]).resolve() == workspace
-for name in ("runtime", "workspace-general"):
-    assert not config["services"][name]["build"].get("additional_contexts")
-expected_volumes = {"agent-memory", "material-broker-data", "plugin-data", "postgres-data", "runtime-data", "storage-data", "upload-temp"}
-assert set(config["volumes"]) == expected_volumes
-for key, value in config["volumes"].items():
-    assert value["name"] == f"centaeris-workspace_{key}"
-'
+"${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-compose.py
 
 for service in document-processor workspace-general runtime api web; do
   "${builder_compose[@]}" build --pull "$service"

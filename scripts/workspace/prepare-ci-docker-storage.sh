@@ -40,6 +40,9 @@ pathlib.Path("/run/centaeris-builder/docker.json").write_text(json.dumps({"featu
 # No running containers belong to the stock daemon. Its ext4 data root becomes
 # the builder; the default client socket belongs only to the XFS runtime.
 systemctl stop docker.service docker.socket
+ip link add name ct-build0 type bridge
+ip address add 172.30.0.1/24 dev ct-build0
+ip link set ct-build0 up
 systemd-run --unit=centaeris-ci-builder-containerd --service-type=exec --property=Delegate=yes \
   containerd --root "$builder_containerd_root" --state /run/centaeris-builder/containerd \
   --address "$builder_containerd_socket"
@@ -50,7 +53,7 @@ systemd-run --unit=centaeris-ci-builder-docker --service-type=exec --property=De
   dockerd --host "$builder_socket" --config-file /run/centaeris-builder/docker.json \
   --data-root "$builder_root" --exec-root /run/centaeris-builder/exec \
   --pidfile /run/centaeris-builder/docker.pid --storage-driver overlay2 \
-  --bridge ct-build0 --bip 172.30.0.1/24 --containerd "$builder_containerd_socket"
+  --bridge ct-build0 --containerd "$builder_containerd_socket"
 systemd-run --unit=centaeris-ci-runtime-docker --service-type=exec --property=Delegate=yes \
   dockerd --host unix:///var/run/docker.sock --config-file /run/centaeris-runtime-containerd/docker.json \
   --data-root "$runtime_root/docker" --pidfile /run/docker.pid --storage-driver overlay2 \

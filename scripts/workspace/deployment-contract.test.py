@@ -268,13 +268,10 @@ sys.stdout.write(re.sub(pattern,replace,text))
         self.assertFalse(any("*" in value for value in allowed))
 
     def test_docker_release_gate_accepts_current_processor_ownership(self):
-        source = (ROOT / "scripts/workspace/docker-release-gate.sh").read_text(encoding="utf-8")
-        validator = source.split("python3 -c '\n", 1)[1].split("\n'\n", 1)[0]
         config = compose_config()
-        env = {**os.environ, "WORKSPACE_ROOT": str(ROOT)}
         def validate(value):
-            return subprocess.run([os.sys.executable, "-c", validator],
-                                  input=json.dumps(value), env=env, capture_output=True, text=True)
+            return subprocess.run([os.sys.executable, str(ROOT / "scripts/workspace/verify-deployment-compose.py")],
+                                  input=json.dumps(value), capture_output=True, text=True)
         accepted = validate(config)
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
         del config["services"]["material-worker"]["depends_on"]["document-processor"]
