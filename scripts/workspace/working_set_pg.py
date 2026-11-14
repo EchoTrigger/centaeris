@@ -498,6 +498,7 @@ def run(args):
                       releaseReceipts=list(release.cache.values()), status="observed")
     except Exception as error:
         report["failureType"] = type(error).__name__
+        report["failureMessage"] = str(error)
         if setup.get("agentRunId"):
             try:
                 model_control(args.model_control, "/cancel", {"cancel": True})
