@@ -405,7 +405,16 @@ def compare(paths):
     if len(arms) != 4 or {(arm["version"], arm["history"]) for arm in arms} != {
             (version, history) for version in ("baseline", "candidate") for history in HISTORIES}:
         raise ValueError("exact four frozen arms required")
-    report = {"schema": "runtime.working_set.pg_comparison.v1", "pairs": []}
+    report = {"schema": "runtime.working_set.pg_comparison.v1", "pairs": [],
+              "arms": [{"version": arm["version"], "history": arm["history"],
+                        "sourceRevision": arm["sourceRevision"], "status": arm["status"],
+                        "stage": arm.get("stage"), "failureType": arm.get("failureType"),
+                        "collectionRepair": arm.get("collectionRepair")}
+                       for arm in arms]}
+    for arm in arms:
+        if arm["status"] == "failedPreserved" and arm.get("stage") == "historySetup":
+            for field in ("client", "boundaries", "preparation"):
+                arm.setdefault(field, [])
     for version in ("baseline", "candidate"):
         left, right = [next(arm for arm in arms if arm["version"] == version and arm["history"] == history)
                        for history in HISTORIES]

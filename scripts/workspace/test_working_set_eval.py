@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -46,6 +47,37 @@ class WorkingSetEvidenceTests(unittest.TestCase):
         manifest = EVAL.manifest(root, harness)
         self.assertIn(str(root / "packages/core").replace("\\", "/"), manifest)
         self.assertIn(str(harness).replace("\\", "/"), manifest)
+
+
+class WorkingSetComparisonTests(unittest.TestCase):
+    def test_failed_history_setup_keeps_missing_pair_unknown(self):
+        arms = []
+        for version in ("baseline", "candidate"):
+            for history in (1000, 10000):
+                arm = {"version": version, "history": history, "sourceRevision": version,
+                       "status": "observed", "stage": "timingObservation",
+                       "boundaries": [{"phase": "measurement", "round": 0, "sampleId": "sample",
+                           "messageCount": 1, "contentBytes": 1, "semanticSha256": "content",
+                           "toolsSha256": "tools"}],
+                       "client": [{"phase": "verified", "cohort": "measured", "sampleId": "sample",
+                           "agentRunId": "run", "terminalMs": 3, "admissionMs": 1, "firstTextMs": 2}],
+                       "preparation": []}
+                if version == "baseline" and history == 10000:
+                    arm = {key: value for key, value in arm.items()
+                           if key not in {"client", "boundaries", "preparation"}}
+                    arm.update(status="failedPreserved", stage="historySetup", failureType="RuntimeError")
+                arms.append(arm)
+        with TemporaryDirectory(prefix="working-set-comparison-") as folder:
+            paths = [Path(folder) / f"{index}.json" for index in range(4)]
+            for path, arm in zip(paths, arms):
+                path.write_text(json.dumps(arm), encoding="utf-8")
+            report = PG.compare(paths)
+        self.assertFalse(report["matchedAllMeasuredPairs"])
+        self.assertEqual(report["arms"][1]["status"], "failedPreserved")
+        self.assertEqual(report["pairs"][0]["matchedWorkingSets"], 0)
+        self.assertIsNone(report["pairs"][0]["latency"][0]["terminalMsP95"])
+        self.assertEqual(report["pairs"][1]["matchedWorkingSets"], 1)
+        self.assertEqual(report["pairs"][1]["latency"][1]["terminalMsP95"], 3)
 
 
 class WorkingSetSaturationTests(unittest.TestCase):
