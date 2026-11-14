@@ -861,16 +861,15 @@ mod tests {
     fn redis_live_append_replace_and_reasoning_keep_exact_utf8_and_reset_boundaries() {
         let url = std::env::var("TEST_REASONING_REDIS_URL").expect("isolated test Redis URL");
         let run = format!("live-delta-{}", std::process::id());
+        let message = "message:turn:assistant";
         let mut stream = TransientAgentRunStream::connect(&url, &run, 60, 60).unwrap();
-        stream.live_open("turn", "message", 4, "").unwrap();
-        stream
-            .live_append_delta("turn", "message", "原内容")
-            .unwrap();
+        stream.live_open("turn", message, 4, "").unwrap();
+        stream.live_append_delta("turn", message, "原内容").unwrap();
         stream.live_flush().unwrap();
-        stream.live_replace("turn", "message", "新文本").unwrap();
+        stream.live_replace("turn", message, "新文本").unwrap();
         stream.live_flush().unwrap();
         let replacement = stream.live_revision;
-        stream.live_append_delta("turn", "message", "🚀").unwrap();
+        stream.live_append_delta("turn", message, "🚀").unwrap();
         stream.live_reasoning("turn", "request-1", "考虑").unwrap();
         stream.live_flush().unwrap();
         stream
@@ -902,7 +901,7 @@ mod tests {
             .arg("bad")
             .arg(999)
             .arg("turn")
-            .arg("message")
+            .arg(message)
             .arg(before.revision)
             .arg(before.revision + 1)
             .arg("{}")
