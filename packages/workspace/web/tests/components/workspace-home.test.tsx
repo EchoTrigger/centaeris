@@ -19,12 +19,13 @@ vi.mock("../../src/i18n", () => {
 });
 
 vi.mock("../../src/routes/AppRoute", () => ({
-  AppPageContent({ location, visible, catalogContent, chatFloating, onShowChat, onMinimizeChat, onExpandChat, onDockChat }: { location: { key: string }, visible: boolean, catalogContent?: ReactNode, chatFloating?: boolean, onShowChat?: () => void, onMinimizeChat?: () => void, onExpandChat?: () => void, onDockChat?: () => void }) {
+  AppPageContent({ location, initialSession, visible, catalogContent, chatFloating, onShowChat, onMinimizeChat, onExpandChat, onDockChat }: { location: { key: string, pathname: string, search: string }, initialSession?: { id: string } | null, visible: boolean, catalogContent?: ReactNode, chatFloating?: boolean, onShowChat?: () => void, onMinimizeChat?: () => void, onExpandChat?: () => void, onDockChat?: () => void }) {
     const { workspace } = useRouteLoaderData("workspace");
     const [draft, setDraft] = useState("");
     const search = useWorkspaceSearch(location.key, visible);
     return <>
-      <ShellSidebar workspace={workspace} search={search} />
+      <ShellSidebar workspace={workspace} agentPath={location.pathname + location.search} search={search} />
+      <output aria-label="Conversation session">{initialSession?.id || "draft"}</output>
       <textarea id="messageDraft" hidden={!visible || search.open} aria-label="Session draft" value={draft} onChange={event => setDraft(event.target.value)} />
       {catalogContent}
       <button onClick={onShowChat}>打开浮窗</button><button onClick={onMinimizeChat}>最小化会话</button><button onClick={onExpandChat}>展开会话</button><button onClick={onDockChat}>收起到工具栏</button>
@@ -319,4 +320,42 @@ test("a conversation keeps its draft while floating above work, minimizing and e
   await screen.findByRole("heading", { name: "工作列表" });
   expect(screen.getByText("浮窗已打开")).toBeTruthy();
   expect((screen.getByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("保留这段草稿");
+});
+
+test("Agent returns to the floating conversation while explicit new conversation still opens a draft", async () => {
+  const user = userEvent.setup();
+  const workspace = { id: "bound", name: "Bound" };
+  const session = { id: "kept-session", title: "Retained conversation" };
+  const router = createMemoryRouter([{
+    id: "authenticated", loader: () => ({ user: { id: "bound-user" } }), HydrateFallback: () => null,
+    children: [{
+      id: "workspace", path: "/w/bound", Component: WorkspaceHomeRoute,
+      loader: ({ params }) => ({ workspace, selectedSession: params.sessionId === session.id ? session : null }),
+      shouldRevalidate: () => true,
+      children: [
+        { path: "app", element: <></> },
+        { path: "sessions/:sessionId", element: <></> },
+        { path: "work", element: <h1>工作列表</h1> },
+        { path: "work/home", element: <h1>团队主页</h1> },
+        { path: "library", element: <h1>资料空间</h1> },
+      ],
+    }],
+  }], { initialEntries: ["/w/bound/sessions/kept-session"] });
+  render(<RouterProvider router={router} />);
+  expect((await screen.findByLabelText("Conversation session")).textContent).toBe(session.id);
+  await user.click(screen.getByRole("button", { name: "收起到工具栏" }));
+  await screen.findByRole("heading", { name: "工作列表" });
+
+  for (const destination of ["work.home", "libraryObjectRoute.library"]) {
+    await user.click(screen.getByRole("link", { name: "Agent" }));
+    expect(router.state.location.pathname).toBe("/w/bound/sessions/kept-session");
+    await user.click(screen.getByRole("link", { name: destination }));
+    expect(screen.getByText("浮窗已打开")).toBeTruthy();
+    expect(screen.getByLabelText("Conversation session").textContent).toBe(session.id);
+  }
+
+  await user.click(screen.getByRole("button", { name: "shellSidebar.newConversation" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/w/bound/app"));
+  expect(router.state.location.search).toBe("?new=1");
+  expect(screen.getByLabelText("Conversation session").textContent).toBe("draft");
 });

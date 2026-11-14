@@ -351,6 +351,10 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
   const recordRunTerminal = useCallback((target) => {
     const key = JSON.stringify([target.sessionId, target.agentRunId]);
     terminalFactsRef.current.set(key, target);
+    setPendingSupplements(items => {
+      const remaining = items.filter(item => item.sessionId !== target.sessionId || item.agentRunId !== target.agentRunId);
+      return remaining.length === items.length ? items : remaining;
+    });
     const pendingOperation = operations.pending();
     if (pendingOperation?.receipt?.sessionId === target.sessionId && pendingOperation.receipt.agentRunId === target.agentRunId) {
       operations.complete(pendingOperation.operationId);
@@ -808,6 +812,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
     const controller = new AbortController();
     const scope = requestScopeRef.current;
     const revision = runControlRevisionRef.current;
+    const pendingAtRead = new Set(pendingSupplements.filter(item => item.sessionId === sessionId).map(item => item.supplementId));
     const isCurrentScope = () => !controller.signal.aborted && scope.active && requestScopeRef.current === scope
       && activeSessionIdRef.current === sessionId;
     const isCurrentRead = () => isCurrentScope() && runControlRevisionRef.current === revision;
@@ -818,11 +823,17 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
         // They fence Run control, but do not invalidate accepted input identities.
         if (!isCurrentScope()) return;
         if (agentRun) setPendingSupplements(items => {
+          if (terminalFactsRef.current.has(JSON.stringify([sessionId, agentRun.agentRunId]))) return items;
           const received = restored.map(item => ({ supplementId: item.supplementId, text: item.message,
             sessionId, agentRunId: agentRun.agentRunId }));
           return [...received, ...items.filter(item => !received.some(other => other.sessionId === item.sessionId
             && other.agentRunId === item.agentRunId && other.supplementId === item.supplementId))]
             .filter(item => !hasCommittedSupplement(item, sessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot));
+        });
+        if (!agentRun && pendingAtRead.size) setPendingSupplements(items => {
+          // An empty read cannot retire input submitted after it started or after a newer Run fact.
+          if (!isCurrentRead()) return items;
+          return items.filter(item => item.sessionId !== sessionId || !pendingAtRead.has(item.supplementId));
         });
         if (!isCurrentRead()) return;
         const currentRun = agentRun && !terminalRunIdsRef.current.has(agentRun.agentRunId) ? agentRun : null;
@@ -1561,6 +1572,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
           onCollapse={compactLayout ? collapseNavigation : undefined}
           onStartNewChat={startNavigationChat}
           recentNavigation={recentNavigation}
+          agentPath={location.pathname + location.search}
           sessionProps={sidebarSessions}
         />
       </SidebarContainer> : null}

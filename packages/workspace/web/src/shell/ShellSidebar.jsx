@@ -79,7 +79,7 @@ function WorkspaceHeader({ onNewConversation, workspace, workspaces, logoutBusy,
   );
 }
 
-export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewChat, onCollapse, search, menuContainer, sessionProps }) {
+export const ShellSidebar = memo(function ShellSidebar({ workspace, agentPath, onStartNewChat, onCollapse, search, menuContainer, sessionProps }) {
   const { user } = useRouteLoaderData("authenticated");
   const navigation = useWorkspaceNavigation(user.id, workspace.id);
   const collapsed = useCollapsedNavigation(navigation);
@@ -145,7 +145,7 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
           <Link className="shRow" to={`${base}/work/reviews`} aria-current={location.pathname === `${base}/work/reviews` ? "page" : undefined}><GitPullRequest aria-hidden="true" /><span>{t("work.reviews")}</span></Link>
           <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><LibraryBig aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
           <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
-          <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MousePointer2 aria-hidden="true" /><span>Agent</span></Link>
+          <Link className="shRow" to={agentPath || `${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MousePointer2 aria-hidden="true" /><span>Agent</span></Link>
         </div>
         <AnimatePresence initial={false}>
         {favoriteSessions.length ? <motion.section key="favorites" className="workRailViews shFavorites"

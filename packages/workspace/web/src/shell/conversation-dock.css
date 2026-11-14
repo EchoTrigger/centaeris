@@ -67,7 +67,6 @@
 .conversationDock .workConversationTab { flex-shrink:1; }
 
 .workspaceWorkbench.isChatFloating { --conversation-float-height:min(520px, calc(100dvh - 140px)); }
-.workspaceWorkbench.isChatFloating:has(.workspaceConversationPlane.isEmpty) { --conversation-float-height:min(180px, calc(100dvh - 140px)); }
 .workspaceWorkbench.isChatFloating .shHome { display:none; }
 .conversationHistory .workspaceSessionRow { height:32px; contain-intrinsic-size:auto 32px; }
 

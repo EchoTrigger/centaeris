@@ -23,15 +23,29 @@ test("shared controls retain Web composer proportions, floating menus, draft and
           await frame();
         };
         await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceComposerThinking button'))"), "composer controls");
-        {
+        if (scenario.floating) {
+          const originalHeight = await evaluate("document.querySelector('.workspaceChatColumn').getBoundingClientRect().height");
+          await click('[data-action="toggle-empty"]');
           assert(await evaluate(`(() => {
+            const header = document.querySelector('.workspaceTopbar').getBoundingClientRect();
+            const panel = document.querySelector('.workspaceChatColumn').getBoundingClientRect();
+            return Math.abs(panel.height - ${originalHeight}) < 1 && header.top >= 0 && panel.bottom <= innerHeight;
+          })()`), "empty floating conversations retain their content height within the viewport");
+          await click('[data-action="toggle-empty"]');
+        }
+        {
+          const titleLayout = await evaluate(`(() => {
             const title = document.querySelector('.conversationSwitcher > span');
             const favorite = document.querySelector('.chatFavorite').getBoundingClientRect();
             const titleControl = document.querySelector('.conversationSwitcher').getBoundingClientRect();
-            const gap = parseFloat(getComputedStyle(document.querySelector('.workspaceConversationHeading')).columnGap);
+            const heading = document.querySelector('.workspaceConversationHeading');
+            const gap = parseFloat(getComputedStyle(heading).columnGap);
             const actions = document.querySelector('.conversationWindowActions').getBoundingClientRect();
-            return title.scrollWidth > title.clientWidth && Math.abs(favorite.left - titleControl.right - gap) < 1 && favorite.right <= actions.left && actions.right <= innerWidth;
-          })()`), "chat actions stay beside truncated titles in full and floating layouts");
+            return { valid: title.scrollWidth > title.clientWidth && Math.abs(favorite.left - titleControl.right - gap) < 1 && favorite.right <= actions.left && actions.right <= innerWidth,
+              titleWidth: title.clientWidth, titleScrollWidth: title.scrollWidth, favorite: favorite.toJSON(), titleControl: titleControl.toJSON(), actions: actions.toJSON(), gap,
+              fontStatus: document.fonts.status, font: getComputedStyle(title).font, children: [...heading.children].map(child => ({ text: child.textContent, bounds: child.getBoundingClientRect().toJSON() })) };
+          })()`);
+          assert(titleLayout.valid, `chat actions stay beside truncated titles in full and floating layouts: ${JSON.stringify({ scenario, ...titleLayout })}`);
         }
         const proportions = await evaluate(`(() => {
           const add = document.querySelector('.workspaceComposerIconButton');
@@ -64,7 +78,7 @@ test("shared controls retain Web composer proportions, floating menus, draft and
         await waitFor(() => evaluate("document.activeElement === document.querySelector('.workspaceComposerThinking button')"), "focus returns to effort trigger");
         assert.deepEqual(await evaluate("frontendControlsFixture.choices"), ["b"]);
         assert.equal(await evaluate("document.querySelector('.workspaceComposer textarea').value"), "Retained Web draft");
-        await click(".workspaceMessages button");
+        await click('[data-action="confirm"]');
         await waitFor(() => evaluate("Boolean(document.querySelector('[role=dialog]'))"), "confirmation");
         await frame();
         const dialog = await evaluate(`(() => {
