@@ -61,7 +61,7 @@ if args[0] == "sudo":
 endpoint = "unix:///var/run/docker.sock"
 if args[0] == "--host":
     endpoint, args = args[1], args[2:]
-event = {"args": args, "endpoint": endpoint}
+event = {"args": args, "endpoint": endpoint, "childHost": os.environ.get("DOCKER_HOST")}
 def record():
     with open(os.environ["GATE_CALLS"], "a") as log:
         log.write(json.dumps(event) + "\n")
@@ -133,6 +133,9 @@ else:
             assert args[1] == "owned-supervisor-container:/src/target/release/environment_host_supervisor"
             pathlib.Path(args[2]).write_text(os.environ["GATE_SUPERVISOR_SOURCE"])
     elif args[:2] == ["image", "inspect"]:
+        if os.environ["GATE_FAIL"] == "image-missing" and endpoint == "unix:///run/centaeris-builder/docker.sock":
+            print("builder image reference does not exist", file=sys.stderr)
+            raise SystemExit(67)
         if "{{.Id}}" in args and os.environ["GATE_FAIL"] == "image-mismatch" and endpoint == "unix:///var/run/docker.sock":
             print("different-runtime-image")
             raise SystemExit
@@ -221,6 +224,8 @@ node() { printf '%s\\n' fixture-revision; }
                     args = event["args"]
                     self.assertEqual(args[args.index("--parallel") + 1], "1")
                     self.assertEqual(event["endpoint"], "unix:///run/centaeris-builder/docker.sock")
+                    self.assertEqual(event["childHost"], "unix:///run/centaeris-builder/docker.sock",
+                                     "Compose's Bake child must inherit the builder endpoint")
                 if fail:
                     self.assertEqual(result.returncode, 23, result.stderr)
                     self.assertEqual(built[-1], fail)
@@ -244,6 +249,13 @@ node() { printf '%s\\n' fixture-revision; }
         self.assertEqual(result.returncode, 66, result.stderr)
         self.assertIn("runtime image differs", result.stderr)
         self.assertFalse(any(event["action"] == "up" for event in events))
+
+    def test_missing_builder_image_stops_before_transfer_and_startup(self):
+        result, events = self._run_release_gate("image-missing")
+        self.assertEqual(result.returncode, 67, result.stderr)
+        self.assertIn("builder image reference does not exist", result.stderr)
+        self.assertFalse(any(event["args"][:2] in (["image", "save"], ["image", "load"])
+                             or event["action"] == "up" for event in events))
 
     def test_storage_preparation_requires_disposable_runner_authorization(self):
         result = subprocess.run(["bash", "scripts/workspace/prepare-ci-docker-storage.sh"], cwd=ROOT,

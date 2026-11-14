@@ -113,7 +113,8 @@ PY
 
 built_services=(postgres document-processor workspace-general runtime api web)
 for service in "${built_services[@]}"; do
-  "${builder_compose[@]}" build --pull "$service"
+  # Compose delegates to Bake, whose child process also needs the builder host.
+  DOCKER_HOST=unix:///run/centaeris-builder/docker.sock "${builder_compose[@]}" build --pull "$service"
 done
 built_image_names="$("${builder_compose[@]}" config --format json | python3 -c '
 import json, sys
@@ -122,6 +123,9 @@ for name in sys.argv[1:]:
     print(services[name]["image"])
 ' "${built_services[@]}")"
 mapfile -t built_images <<< "$built_image_names"
+for image in "${built_images[@]}"; do
+  "${builder[@]}" image inspect --format '{{.Id}}' "$image" >/dev/null
+done
 "${builder[@]}" image save "${built_images[@]}" | docker image load
 for image in "${built_images[@]}"; do
   if [[ "$("${builder[@]}" image inspect --format '{{.Id}}' "$image")" != "$(docker image inspect --format '{{.Id}}' "$image")" ]]; then
