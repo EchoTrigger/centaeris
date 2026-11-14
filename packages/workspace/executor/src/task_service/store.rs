@@ -2,7 +2,7 @@
 use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
 
-const VERSION: i64 = 3;
+const VERSION: i64 = 4;
 fn db(root: &Path, initialize: bool) -> Result<Connection, String> {
     let path = root.join("history.sqlite");
     let exists = path.exists();
@@ -25,7 +25,7 @@ fn db(root: &Path, initialize: bool) -> Result<Connection, String> {
             CREATE TABLE operations(key BLOB PRIMARY KEY,receipt TEXT NOT NULL,task_id BLOB) WITHOUT ROWID;
             CREATE TABLE owner_barriers(owner TEXT PRIMARY KEY,reason TEXT NOT NULL) WITHOUT ROWID;
             CREATE TABLE output_consumptions(id TEXT PRIMARY KEY,receipt TEXT NOT NULL,reclaimed INTEGER NOT NULL CHECK(reclaimed IN (0,1))) WITHOUT ROWID;
-            PRAGMA user_version=3; COMMIT;").map_err(|_|"task_index_unavailable")?;
+            PRAGMA user_version=4; COMMIT;").map_err(|_|"task_index_unavailable")?;
     }
     validate(&connection)?;
     connection
@@ -209,9 +209,25 @@ pub(super) fn record_text(record: &Record) -> Result<String, String> {
         record.snapshot.scope == EnvironmentTaskScope::Environment,
         &record.snapshot.state,
         record.snapshot.exit_code,
-        u8::from(record.snapshot.cleanup_complete)
-            | (u8::from(record.snapshot.output_complete) << 1),
+        snapshot_flags(&record.snapshot),
     ))
+}
+
+fn snapshot_flags(task: &EnvironmentTaskSnapshot) -> u8 {
+    u8::from(task.cleanup_complete)
+        | (u8::from(task.output_complete) << 1)
+        | match task.timed_out {
+            None => 0,
+            Some(false) => 4,
+            Some(true) => 12,
+        }
+}
+
+fn timeout_from_flags(flags: u8) -> Result<Option<bool>, String> {
+    if flags > 15 || flags & 12 == 8 {
+        return Err("task_index_invalid".into());
+    }
+    Ok((flags & 4 != 0).then_some(flags & 8 != 0))
 }
 fn record_value(instance: &str, id: String, value: String) -> Result<Record, String> {
     let (
@@ -235,9 +251,7 @@ fn record_value(instance: &str, id: String, value: String) -> Result<Record, Str
         Option<i32>,
         u8,
     ) = decode(value)?;
-    if flags > 3 {
-        return Err("task_index_invalid".into());
-    }
+    let timed_out = timeout_from_flags(flags)?;
     let scope = if environment {
         EnvironmentTaskScope::Environment
     } else {
@@ -254,6 +268,7 @@ fn record_value(instance: &str, id: String, value: String) -> Result<Record, Str
             scope,
             state,
             exit_code,
+            timed_out,
             cleanup_complete: flags & 1 != 0,
             output_complete: flags & 2 != 0,
         },
@@ -349,7 +364,7 @@ fn receipt_text(receipt: &Receipt) -> Result<String, String> {
             task.task_id.clone(),
             task.state.clone(),
             task.exit_code,
-            u8::from(task.cleanup_complete) | (u8::from(task.output_complete) << 1),
+            snapshot_flags(task),
         )),
         Some(EnvironmentTaskResult::RunEnded {
             task_ids,
@@ -414,9 +429,7 @@ pub(super) fn receipt(root: &Path, key: &str) -> Result<Option<Receipt>, String>
             let mut task = task(root, &id)?.ok_or("task_receipt_invalid")?.snapshot;
             task.state = state;
             task.exit_code = exit_code;
-            if flags > 3 {
-                return Err("task_index_invalid".into());
-            }
+            task.timed_out = timeout_from_flags(flags)?;
             task.cleanup_complete = flags & 1 != 0;
             task.output_complete = flags & 2 != 0;
             Some(EnvironmentTaskResult::Mutated { task })
@@ -826,10 +839,155 @@ mod tests {
                 },
                 state: EnvironmentTaskState::Exited,
                 exit_code: Some(0),
+                timed_out: None,
                 cleanup_complete: true,
                 output_complete: true,
             },
         }
+    }
+    #[test]
+    fn timeout_observations_roundtrip_tasks_and_original_mutation_receipts() {
+        let (root, mut journal) = fixture();
+        for (n, observation) in [None, Some(false), Some(true)].into_iter().enumerate() {
+            let mut record = record(&journal, n);
+            record.snapshot.timed_out = observation;
+            record.snapshot.exit_code = Some(124);
+            let id = record.snapshot.task_id.clone();
+            let original = record.snapshot.clone();
+            journal.tasks.insert(id.clone(), record);
+            journal.receipts.insert(
+                format!("terminate:{id}:1:stop"),
+                Receipt {
+                    digest: "b".repeat(64),
+                    result: Some(EnvironmentTaskResult::Mutated { task: original }),
+                },
+            );
+        }
+        journal.persist(&root).unwrap();
+        let reopened = Journal::open(&root, "instance").unwrap();
+        for (n, observation) in [None, Some(false), Some(true)].into_iter().enumerate() {
+            let id = record(&reopened, n).snapshot.task_id;
+            let stored = super::task(&root, &id).unwrap().unwrap().snapshot;
+            assert_eq!(stored.timed_out, observation);
+            assert_eq!(stored.exit_code, Some(124));
+            let ack = receipt(&root, &format!("terminate:{id}:1:stop"))
+                .unwrap()
+                .unwrap()
+                .result
+                .unwrap();
+            assert!(matches!(ack, EnvironmentTaskResult::Mutated { task }
+                if task.timed_out == observation && task.exit_code == Some(124)));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_three_timeout_migration_preserves_unknown_causes_and_exact_records() {
+        for exit_code in [None, Some(124)] {
+            let (root, mut journal) = fixture();
+            let mut record = record(&journal, 0);
+            record.snapshot.exit_code = exit_code;
+            let id = record.snapshot.task_id.clone();
+            let key = format!("terminate:{id}:1:stop");
+            journal.tasks.insert(id.clone(), record.clone());
+            journal.receipts.insert(
+                key.clone(),
+                Receipt {
+                    digest: "b".repeat(64),
+                    result: Some(EnvironmentTaskResult::Mutated {
+                        task: record.snapshot.clone(),
+                    }),
+                },
+            );
+            journal.persist(&root).unwrap();
+            let connection = Connection::open(root.join("history.sqlite")).unwrap();
+            connection.execute_batch("PRAGMA user_version=3;").unwrap();
+            let original_task: String = connection
+                .query_row("SELECT record FROM tasks WHERE id=?1", [&id], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let original_receipt: String = connection
+                .query_row(
+                    "SELECT receipt FROM operations WHERE key=?1",
+                    [Sha256::digest(key.as_bytes()).as_slice()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            drop(connection);
+            let reopened = Journal::open(&root, "instance").unwrap();
+            assert_eq!(
+                reopened.existing(&id, &record.digest).unwrap(),
+                Some(record.snapshot.clone())
+            );
+            assert!(matches!(receipt(&root, &key).unwrap().unwrap().result,
+                Some(EnvironmentTaskResult::Mutated { task })
+                if task.timed_out.is_none() && task.exit_code == exit_code));
+            let connection = Connection::open(root.join("history.sqlite")).unwrap();
+            assert_eq!(
+                connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .unwrap(),
+                4
+            );
+            assert_eq!(
+                connection
+                    .query_row::<String, _, _>(
+                        "SELECT record FROM tasks WHERE id=?1",
+                        [&id],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                original_task
+            );
+            assert_eq!(
+                connection
+                    .query_row::<String, _, _>(
+                        "SELECT receipt FROM operations WHERE key=?1",
+                        [Sha256::digest(key.as_bytes()).as_slice()],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                original_receipt
+            );
+            drop(connection);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_json_timeout_import_preserves_unknown_task_and_receipt_causes() {
+        let (root, mut journal) = fixture();
+        let mut record = record(&journal, 0);
+        record.snapshot.exit_code = Some(124);
+        let id = record.snapshot.task_id.clone();
+        let key = format!("terminate:{id}:1:stop");
+        journal.tasks.insert(id.clone(), record.clone());
+        journal.receipts.insert(
+            key.clone(),
+            Receipt {
+                digest: "b".repeat(64),
+                result: Some(EnvironmentTaskResult::Mutated {
+                    task: record.snapshot,
+                }),
+            },
+        );
+        let mut legacy = serde_json::to_value(&journal).unwrap();
+        legacy["tasks"][&id]["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("timedOut");
+        legacy["receipts"][&key]["result"]["task"]
+            .as_object_mut()
+            .unwrap()
+            .remove("timedOut");
+        let imported = migration::read_journal(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(imported.tasks[&id].snapshot.timed_out, None);
+        assert_eq!(imported.tasks[&id].snapshot.exit_code, Some(124));
+        assert!(matches!(&imported.receipts[&key].result,
+            Some(EnvironmentTaskResult::Mutated { task })
+            if task.timed_out.is_none() && task.exit_code == Some(124)));
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn input_receipt_query_uses_only_committed_original_ack_and_never_writes() {
@@ -1089,6 +1247,7 @@ mod output_consumption_migration_tests {
                 scope: owner_scope(&fence.controller_owner),
                 state: EnvironmentTaskState::Exited,
                 exit_code: Some(7),
+                timed_out: None,
                 cleanup_complete: true,
                 output_complete: true,
             },
@@ -1136,7 +1295,7 @@ mod output_consumption_migration_tests {
             connection
                 .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            3
+            4
         );
         assert_eq!(
             connection

@@ -264,6 +264,7 @@ fn unavailable_output_reports_gap_without_losing_queryable_control_snapshot() {
         scope: EnvironmentTaskScope::Environment,
         state: EnvironmentTaskState::Exited,
         exit_code: Some(7),
+        timed_out: None,
         cleanup_complete: true,
         output_complete: true,
     };
@@ -480,6 +481,7 @@ fn fixture_record(instance: &str, controller: &str, epoch: u64, alias: &str, liv
                 EnvironmentTaskState::Exited
             },
             exit_code: (!live).then_some(0),
+            timed_out: None,
             cleanup_complete: !live,
             output_complete: !live,
         },

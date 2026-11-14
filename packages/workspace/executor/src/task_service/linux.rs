@@ -691,6 +691,7 @@ impl Manager {
                     scope,
                     state: EnvironmentTaskState::Accepted,
                     exit_code: None,
+                    timed_out: None,
                     cleanup_complete: false,
                     output_complete: false,
                 };
@@ -1407,20 +1408,14 @@ fn supervise(
             let Some(live) = m.live.get_mut(&id) else {
                 break;
             };
-            if !container_absent
-                && (poisoned
-                    || unknown
-                    || input_failed
-                    || (timeout_ms > 0 && began.elapsed() >= Duration::from_millis(timeout_ms)))
-            {
-                let _ = domains::kill(&launcher, &live.cgroup);
-            }
             let input_pending = live.input_worker.is_some();
             let mut lost_wait = false;
+            let mut wait_failed = false;
             let leader = match live.child.try_wait() {
                 Ok(Some(status)) => Some(status.code()),
                 Ok(None) => None,
                 Err(error) => {
+                    wait_failed = true;
                     // Missing wait ownership is not a synthesized exit receipt.
                     lost_wait = error.raw_os_error() == Some(libc::ECHILD);
                     if !container_absent {
@@ -1438,7 +1433,18 @@ fn supervise(
             let empty = container_absent
                 || domains::events(&m.launcher, &m.cgroups.join(&id))
                     .is_ok_and(|s| s.lines().any(|line| line == "populated 0"));
+            let deadline_elapsed =
+                timeout_ms > 0 && began.elapsed() >= Duration::from_millis(timeout_ms);
+            let deadline_termination =
+                !poisoned && !unknown && !input_failed && !wait_failed && deadline_elapsed;
+            let killed = !container_absent
+                && !empty
+                && (poisoned || unknown || input_failed || wait_failed || deadline_elapsed)
+                && domains::kill(&launcher, &m.cgroups.join(&id)).is_ok();
             let snapshot = &mut m.journal.tasks.get_mut(&id).expect("task record").snapshot;
+            if killed && deadline_termination {
+                snapshot.timed_out = Some(true);
+            }
             crate::host_supervisor::physical_snapshot(
                 snapshot,
                 leader,

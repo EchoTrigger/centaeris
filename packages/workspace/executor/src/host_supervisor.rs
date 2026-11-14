@@ -445,6 +445,9 @@ pub(crate) fn physical_snapshot(
     if let Some(exit) = leader {
         if snapshot.state != centaeris_core::execution::EnvironmentTaskState::Unknown {
             snapshot.state = centaeris_core::execution::EnvironmentTaskState::Exited;
+            if snapshot.timed_out.is_none() {
+                snapshot.timed_out = Some(false);
+            }
         }
         snapshot.exit_code = exit;
     }

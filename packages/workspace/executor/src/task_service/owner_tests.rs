@@ -29,6 +29,7 @@ fn record(fence: &EnvironmentTaskFence) -> Record {
             scope: owner_scope(&fence.controller_owner),
             state: EnvironmentTaskState::Running,
             exit_code: None,
+            timed_out: None,
             cleanup_complete: false,
             output_complete: false,
         },
@@ -270,7 +271,10 @@ fn v2_index_forward_import_keeps_original_bytes_and_receipt_history() {
     let Some(EnvironmentTaskResult::Mutated { task }) = receipt.result else {
         panic!("missing historical receipt")
     };
-    assert_eq!(serde_json::to_value(task).unwrap(), snapshot);
+    assert_eq!(task.timed_out, None);
+    let mut expected = snapshot;
+    expected["timedOut"] = serde_json::Value::Null;
+    assert_eq!(serde_json::to_value(task).unwrap(), expected);
     assert!(store::closed(&root, &run_owner("past")).unwrap());
     Journal::open(&root, "i").unwrap();
     assert_eq!(fs::read(root.join("history.v1.sqlite")).unwrap(), original);

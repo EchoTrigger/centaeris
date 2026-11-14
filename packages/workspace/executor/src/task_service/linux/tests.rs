@@ -348,6 +348,7 @@ fn seeded_running_journal(root: &Path) -> Vec<u8> {
                 scope: EnvironmentTaskScope::Environment,
                 state: EnvironmentTaskState::Running,
                 exit_code: None,
+                timed_out: None,
                 cleanup_complete: false,
                 output_complete: false,
             },
@@ -568,6 +569,7 @@ fn corrupt_or_removed_output_does_not_prevent_control_restart_and_queries() {
         scope: EnvironmentTaskScope::Environment,
         state: EnvironmentTaskState::Exited,
         exit_code: Some(7),
+        timed_out: None,
         cleanup_complete: true,
         output_complete: true,
     };
@@ -1134,6 +1136,7 @@ fn task_deadline_exits_before_late_input_without_reserving_a_receipt() {
             snapshot.exit_code, None,
             "deadline kills the owned task tree"
         );
+        assert_eq!(snapshot.timed_out, Some(true));
         assert!(snapshot.cleanup_complete);
         assert!(!manager.journal.poisoned);
     }
@@ -1173,8 +1176,40 @@ fn task_deadline_exits_before_late_input_without_reserving_a_receipt() {
     )
     .unwrap();
     assert!(
-        matches!(result,EnvironmentTaskResult::Task{task,output,..} if task.state==EnvironmentTaskState::Exited && output.is_empty())
+        matches!(result,EnvironmentTaskResult::Task{task,output,..} if task.state==EnvironmentTaskState::Exited && task.timed_out == Some(true) && output.is_empty())
     );
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn ordinary_exit_124_is_not_a_host_deadline() {
+    let f = Fixture::new();
+    let task = id(&Manager::handle(
+        &f.manager,
+        f.start(
+            "ordinary-124",
+            EnvironmentTaskScope::Run {
+                run_id: f.fence.controller_owner.id().to_owned(),
+            },
+            "exit 124",
+        ),
+    )
+    .unwrap());
+    f.await_cleanup(&task);
+    let result = Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Query {
+            fence: f.fence.clone(),
+            task_id: task,
+            cursor: 0,
+            max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
+        },
+    )
+    .unwrap();
+    assert!(matches!(result, EnvironmentTaskResult::Task { task, .. }
+        if task.state == EnvironmentTaskState::Exited
+            && task.exit_code == Some(124) && task.timed_out == Some(false)
+            && task.cleanup_complete && task.output_complete));
 }
 
 #[test]

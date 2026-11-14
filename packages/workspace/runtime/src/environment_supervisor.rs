@@ -762,6 +762,7 @@ mod tests {
             scope: request.scope.clone(),
             state: EnvironmentTaskState::Exited,
             exit_code: Some(0),
+            timed_out: None,
             cleanup_complete: true,
             output_complete: true,
         };
@@ -812,6 +813,7 @@ mod tests {
             scope: helper.scope.clone(),
             state: EnvironmentTaskState::Exited,
             exit_code: Some(0),
+            timed_out: None,
             cleanup_complete: true,
             output_complete: true,
         };

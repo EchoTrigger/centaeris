@@ -72,6 +72,7 @@ impl OutputFixture {
                     scope: owner_scope(&self.fence.controller_owner),
                     state: EnvironmentTaskState::Exited,
                     exit_code: Some(0),
+                    timed_out: None,
                     cleanup_complete: true,
                     output_complete: true,
                 },

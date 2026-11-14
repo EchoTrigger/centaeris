@@ -287,12 +287,14 @@ fn leader_exit_does_not_destroy_a_background_task_domain() {
         scope: EnvironmentTaskScope::Environment,
         state: EnvironmentTaskState::Running,
         exit_code: None,
+        timed_out: None,
         cleanup_complete: false,
         output_complete: false,
     };
     physical_snapshot(&mut task, Some(Some(0)), false, false);
     assert_eq!(task.state, EnvironmentTaskState::Exited);
     assert_eq!(task.exit_code, Some(0));
+    assert_eq!(task.timed_out, Some(false));
     assert!(!task.cleanup_complete);
     assert!(!task.output_complete);
     physical_snapshot(&mut task, Some(Some(0)), true, false);
@@ -300,4 +302,30 @@ fn leader_exit_does_not_destroy_a_background_task_domain() {
     assert!(!task.cleanup_complete);
     physical_snapshot(&mut task, Some(Some(0)), true, true);
     assert!(task.cleanup_complete);
+}
+
+#[test]
+fn physical_exit_observation_preserves_deadline_evidence_and_unknown_history() {
+    use centaeris_core::execution::*;
+    for (state, reason, exit, expected) in [
+        (EnvironmentTaskState::Running, None, Some(124), Some(false)),
+        (EnvironmentTaskState::Running, None, None, Some(false)),
+        (EnvironmentTaskState::Running, Some(true), None, Some(true)),
+        (EnvironmentTaskState::Unknown, None, Some(124), None),
+    ] {
+        let mut task = EnvironmentTaskSnapshot {
+            task_id: "task".into(),
+            operation_id: "1:start".into(),
+            scope: EnvironmentTaskScope::Environment,
+            state,
+            exit_code: None,
+            timed_out: reason,
+            cleanup_complete: false,
+            output_complete: false,
+        };
+        physical_snapshot(&mut task, Some(exit), true, true);
+        assert_eq!(task.exit_code, exit);
+        assert_eq!(task.timed_out, expected);
+        assert!(task.cleanup_complete && task.output_complete);
+    }
 }

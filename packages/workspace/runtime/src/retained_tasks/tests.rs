@@ -83,6 +83,7 @@ fn task(scope: EnvironmentTaskScope) -> EnvironmentTaskSnapshot {
         scope,
         state: EnvironmentTaskState::Running,
         exit_code: None,
+        timed_out: None,
         cleanup_complete: false,
         output_complete: false,
     }
@@ -484,6 +485,7 @@ fn valid_utf8_status_and_empty_output_keep_exact_cursor_and_loss_flags() {
     let mut snapshot = task(EnvironmentTaskScope::Environment);
     snapshot.state = EnvironmentTaskState::Exited;
     snapshot.exit_code = Some(7);
+    snapshot.timed_out = Some(false);
     snapshot.cleanup_complete = true;
     snapshot.output_complete = true;
     let first = EnvironmentTaskResult::Task {
@@ -519,6 +521,7 @@ fn valid_utf8_status_and_empty_output_keep_exact_cursor_and_loss_flags() {
     );
     assert_eq!(response.details["state"], "exited");
     assert_eq!(response.details["exitCode"], 7);
+    assert_eq!(response.details["timedOut"], false);
     assert_eq!(response.details["cleanupComplete"], true);
     assert_eq!(response.details["outputComplete"], true);
     assert_eq!(response.details["gap"], false);
@@ -532,6 +535,17 @@ fn valid_utf8_status_and_empty_output_keep_exact_cursor_and_loss_flags() {
     assert_eq!(empty.details["gap"], true);
     assert_eq!(empty.details["nextCursor"], 16);
     assert_eq!(empty.details["hasMore"], false);
+}
+
+#[test]
+fn background_task_summary_keeps_known_and_unknown_timeout_causes() {
+    for observed in [None, Some(false), Some(true)] {
+        let mut snapshot = task(EnvironmentTaskScope::Environment);
+        snapshot.timed_out = observed;
+        let details = summary(&snapshot);
+        assert!(details.as_object().unwrap().contains_key("timedOut"));
+        assert_eq!(details["timedOut"], serde_json::to_value(observed).unwrap());
+    }
 }
 
 #[test]

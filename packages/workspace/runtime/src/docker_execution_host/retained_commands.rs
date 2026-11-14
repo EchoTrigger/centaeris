@@ -512,7 +512,7 @@ fn run_command_inner(
     let mut cancel_deadline = None;
     let mut cursor = 0;
     let (mut stdout, mut stderr) = (Capture::default(), Capture::default());
-    let exit_code = loop {
+    let (exit_code, host_timed_out) = loop {
         if (io.now)() >= deadline || cancel_deadline.is_some_and(|at| (io.now)() >= at) {
             // A rejected Query is still subject to the original task deadline.
             // EndRun cleanup retains responsibility for unconfirmed termination.
@@ -620,7 +620,7 @@ fn run_command_inner(
             && task.output_complete
             && !has_more
         {
-            break task.exit_code;
+            break (task.exit_code, task.timed_out);
         }
         if !has_more {
             (io.delay)(Duration::from_millis(25));
@@ -638,7 +638,7 @@ fn run_command_inner(
             diagnostics.push(RuntimeOutputDiagnostic {source:"execution_host".into(),stream:name.into(),severity:"warning".into(),code:"output_truncated".into(),message:"Output exceeded the per-stream retention limit".into(),details:Some(serde_json::json!({"retainedBytes":capture.bytes.len(),"rawBytes":capture.total}))});
         }
     }
-    let timed_out = !cancelled && exit_code == Some(124);
+    let timed_out = !cancelled && host_timed_out == Some(true);
     let failure_kind = if cancelled {
         ExecutionHostFailureKind::Cancelled
     } else {
@@ -1403,6 +1403,7 @@ mod tests {
                 EnvironmentTaskState::Running
             },
             exit_code: complete.then_some(0),
+            timed_out: None,
             cleanup_complete: complete,
             output_complete: complete,
         }
@@ -1429,6 +1430,39 @@ mod tests {
             next_cursor: 1,
             gap,
             has_more: false,
+        }
+    }
+    #[test]
+    fn host_deadline_evidence_classifies_timeout_without_guessing_from_exit_status() {
+        for (observed, exit_code, failure) in [
+            (Some(true), None, ExecutionHostFailureKind::TimedOut),
+            (
+                Some(false),
+                Some(124),
+                ExecutionHostFailureKind::CommandFailed,
+            ),
+            (None, Some(124), ExecutionHostFailureKind::CommandFailed),
+            (None, None, ExecutionHostFailureKind::CommandFailed),
+        ] {
+            let mut reply = finished(false);
+            let EnvironmentTaskResult::Task { task, .. } = &mut reply else {
+                unreachable!()
+            };
+            task.exit_code = exit_code;
+            task.timed_out = observed;
+            let out = run_command(&fence(), "tool-1", command(), None, "/bin", |request| {
+                assert!(matches!(request, EnvironmentTaskRequest::Start { .. }));
+                Ok(reply.clone())
+            })
+            .unwrap();
+            assert_eq!(out.failure_kind, failure);
+            assert_eq!(out.process.timed_out, observed == Some(true));
+            assert_eq!(out.process.exit_code, exit_code);
+            assert_eq!(out.process.stdout, "hello");
+            assert_eq!(
+                out.process.stderr.contains("timed out after 1000ms"),
+                observed == Some(true)
+            );
         }
     }
     #[test]
