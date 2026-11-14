@@ -315,6 +315,33 @@ def k6_run(driver, binary, output, session, control, mode, vus):
     return records
 
 
+def retire_released_sessions(driver, cohort, records, report):
+    last_released = {row["sessionId"]: row for row in records if row["phase"] == "released"}
+    report["stage"] = f"{cohort}Retirement"
+    for admitted in last_released.values():
+        observed = driver.paused(f"working-set-{cohort}-{admitted['sessionId']}", admitted)
+        retired = driver.retire(observed)
+        report.setdefault("retirement", []).append({
+            "cohort": cohort, "agentRunId": admitted["agentRunId"], "sessionId": admitted["sessionId"],
+            "observation": {key: observed[key] for key in
+                ("environmentId", "instanceId", "containerId", "hostId", "controllerEpoch")},
+            "receipt": retired,
+        })
+        if (retired.get("status") != "destroyed" or retired.get("containerAbsent") is not True
+                or retired.get("residentHoldingCount") != 0 or retired.get("historyPreserved") is not True):
+            raise RuntimeError("positive product retirement and history evidence required")
+
+
+def saturation_runs(driver, args, output, session, control, release, report, records):
+    retire_released_sessions(driver, "comparison", records, report)
+    for vus in (1, 2, 4, 8):
+        report["stage"] = f"saturationRuns:{vus}"
+        release.vus = vus
+        cohort = k6_run(driver, args.k6, output, session, control, "saturation", vus)
+        records.extend(cohort)
+        retire_released_sessions(driver, f"saturation-{vus}", cohort, report)
+
+
 def preparation_records(driver, since, accepted):
     allowed = {"agent_run.lifecycle:" + row["agentRunId"] for row in accepted}
     command = [*driver.docker, "compose", "-f", str(driver.compose), "logs", "--no-color",
@@ -454,10 +481,7 @@ def run(args):
         report["stage"] = "comparisonRuns"
         records.extend(k6_run(driver, args.k6, output, session, control, "comparison", 1))
         if args.saturation:
-            for vus in (1, 2, 4, 8):
-                report["stage"] = f"saturationRuns:{vus}"
-                release.vus = vus
-                records.extend(k6_run(driver, args.k6, output, session, control, "saturation", vus))
+            saturation_runs(driver, args, output, session, control, release, report, records)
         accepted = [row for row in records if row["phase"] == "accepted"]
         report["stage"] = "timingObservation"
         report.update(client=records, boundaries=model_control(args.model_control, "/boundaries")["records"],

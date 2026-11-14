@@ -1,11 +1,16 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("working_set_eval", Path(__file__).with_name("working_set_eval.py"))
 EVAL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EVAL)
+PG_SPEC = importlib.util.spec_from_file_location("working_set_pg", Path(__file__).with_name("working_set_pg.py"))
+PG = importlib.util.module_from_spec(PG_SPEC)
+PG_SPEC.loader.exec_module(PG)
 
 
 class WorkingSetEvidenceTests(unittest.TestCase):
@@ -41,6 +46,82 @@ class WorkingSetEvidenceTests(unittest.TestCase):
         manifest = EVAL.manifest(root, harness)
         self.assertIn(str(root / "packages/core").replace("\\", "/"), manifest)
         self.assertIn(str(harness).replace("\\", "/"), manifest)
+
+
+class WorkingSetSaturationTests(unittest.TestCase):
+    def driver(self, events, bad_run=None, invalid=None):
+        def paused(label, admitted):
+            events.append(("paused", admitted["sessionId"], admitted["agentRunId"]))
+            return {**admitted, "environmentId": "env-" + admitted["sessionId"],
+                    "instanceId": "instance", "containerId": "container", "hostId": "host",
+                    "controllerEpoch": 1}
+
+        def retire(observed):
+            events.append(("retired", observed["sessionId"], observed["agentRunId"]))
+            return {"environmentId": observed["environmentId"], "status": "destroyed",
+                    "containerAbsent": True, "residentHoldingCount": 0, "historyPreserved": True,
+                    **(invalid if observed["agentRunId"] == bad_run else {})}
+
+        return SimpleNamespace(paused=paused, retire=retire)
+
+    def released(self, session, run):
+        return {"phase": "released", "sessionId": session, "agentRunId": run}
+
+    def test_retirement_uses_only_each_sessions_last_released_run(self):
+        events, report = [], {}
+        rows = [self.released("first", "old"), self.released("second", "other"),
+                self.released("first", "final"),
+                {"phase": "accepted", "sessionId": "first", "agentRunId": "notReleased"},
+                {"phase": "accepted", "sessionId": "unreleased", "agentRunId": "pending"}]
+        PG.retire_released_sessions(self.driver(events), "comparison", rows, report)
+        self.assertEqual(events, [("paused", "first", "final"), ("retired", "first", "final"),
+                                  ("paused", "second", "other"), ("retired", "second", "other")])
+        self.assertEqual([(row["sessionId"], row["agentRunId"]) for row in report["retirement"]],
+                         [("first", "final"), ("second", "other")])
+        self.assertEqual(report["retirement"][0]["observation"]["environmentId"],
+                         report["retirement"][0]["receipt"]["environmentId"])
+
+    def exercise_saturation(self, driver, events, report):
+        records = [self.released("comparison", f"comparison-{index}") for index in range(120)]
+
+        def cohort(_driver, _binary, _output, _session, _control, mode, vus):
+            self.assertEqual(mode, "saturation")
+            events.append(("k6", vus))
+            return [self.released(f"sat{vus}-vu{vu}", f"sat{vus}-vu{vu}-run{iteration}")
+                    for iteration in range(1, 7) for vu in range(1, vus + 1)]
+
+        with mock.patch.object(PG, "k6_run", side_effect=cohort):
+            PG.saturation_runs(driver, SimpleNamespace(k6="unused"), None, "comparison", "unused",
+                               SimpleNamespace(vus=1), report, records)
+        return records
+
+    def test_every_cohort_retires_before_next_cohort_including_final_eight(self):
+        events, report = [], {}
+        records = self.exercise_saturation(self.driver(events), events, report)
+        expected = [("paused", "comparison", "comparison-119"),
+                    ("retired", "comparison", "comparison-119")]
+        for vus in (1, 2, 4, 8):
+            expected.append(("k6", vus))
+            for vu in range(1, vus + 1):
+                expected.extend([(action, f"sat{vus}-vu{vu}", f"sat{vus}-vu{vu}-run6")
+                                 for action in ("paused", "retired")])
+        self.assertEqual(events, expected)
+        self.assertEqual(len(records), 210)
+        self.assertEqual(len(report["retirement"]), 16)
+
+    def test_invalid_retirement_receipt_is_retained_and_stops_next_cohort(self):
+        for invalid in ({"status": "pending"}, {"containerAbsent": False},
+                        {"residentHoldingCount": 1}, {"historyPreserved": False}):
+            with self.subTest(invalid=invalid):
+                events, report = [], {}
+                driver = self.driver(events, "sat1-vu1-run6", invalid)
+                with self.assertRaisesRegex(RuntimeError, "positive product retirement"):
+                    self.exercise_saturation(driver, events, report)
+                self.assertEqual([event for event in events if event[0] == "k6"], [("k6", 1)])
+                receipt = report["retirement"][-1]
+                self.assertEqual(receipt["agentRunId"], "sat1-vu1-run6")
+                for key, value in invalid.items():
+                    self.assertEqual(receipt["receipt"][key], value)
 
 
 if __name__ == "__main__":
