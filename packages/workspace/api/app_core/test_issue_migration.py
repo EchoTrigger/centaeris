@@ -32,4 +32,3 @@ class IssueMigrationTests(TransactionTestCase):
                 issue_id=issue.pk, actor_id=user.pk, type="created", changes={"title": {"before": None, "after": issue.title}})
             self.assertEqual(issue.version, 1)
             self.assertEqual(event.changes["title"]["after"], "First real issue")
-

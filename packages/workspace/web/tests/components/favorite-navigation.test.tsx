@@ -98,4 +98,3 @@ test("favorites open the selected chat content from work and another chat", asyn
   expect(fixture.writes).toEqual([{ isPinned: false }]);
   router.dispose();
 });
-

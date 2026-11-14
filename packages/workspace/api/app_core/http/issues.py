@@ -264,5 +264,3 @@ def list_events(request, workspace_id: str, issue_id: str):
     return {"events": [{"id": event.id, "issueId": issue.id, "actor": _actor(event.actor),
         "type": event.type, "changes": event.changes, "createdAt": event.createdAt.isoformat()}
         for event in events[offset:offset + limit]], "total": events.count()}
-
-

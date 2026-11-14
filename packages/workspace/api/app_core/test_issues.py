@@ -124,5 +124,3 @@ class IssueTests(TestCase):
         self.assertIn(200, path["patch"]["responses"])
         self.assertIn(409, path["patch"]["responses"])
         self.assertEqual(schema["components"]["schemas"]["IssuePatch"]["additionalProperties"], False)
-
-
