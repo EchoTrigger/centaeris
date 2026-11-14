@@ -23,6 +23,7 @@ SUMMARY = ("# Goal\n\nFollow the next synthetic performance task exactly.\n\n"
 SETUP_REPLY = "Working-set setup step observed."
 READY_REPLY = "WORKING_SET_READY"
 MAX_BODY = 2 * 1024 * 1024
+USAGE_MODE = "syntheticNoLlmTokens"
 IMPLEMENTATION_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
@@ -152,7 +153,8 @@ class Control(BaseHTTPRequestHandler):
         with STATE.condition:
             if self.path == "/state":
                 self.reply({"pending": STATE.pending, "mainCalls": STATE.main_calls,
-                            "summaryCalls": STATE.summary_calls, "cancelled": STATE.cancelled})
+                            "summaryCalls": STATE.summary_calls, "cancelled": STATE.cancelled,
+                            "usageMode": USAGE_MODE})
             elif self.path == "/boundaries":
                 self.reply({"records": STATE.boundaries})
             else:
@@ -177,7 +179,8 @@ class Control(BaseHTTPRequestHandler):
                     STATE.condition.notify_all()
                 else:
                     raise ValueError("invalid control operation")
-            self.reply({"ok": True, "implementationSha256": IMPLEMENTATION_SHA256})
+            self.reply({"ok": True, "implementationSha256": IMPLEMENTATION_SHA256,
+                        "usageMode": USAGE_MODE})
         except (ValueError, TypeError, KeyError):
             self.send_error(422, "working-set control rejected")
 
@@ -241,12 +244,15 @@ class Model(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
-        # The fixture has no tokenizer. Omit usage rather than fabricate measured input.
+        # This deterministic Python stub runs no LLM backend or tokenizer. Its
+        # explicit zero LLM usage satisfies the hosted accounting contract;
+        # these values never measure token estimation or real model costs.
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         try:
             if not streaming:
                 self.wfile.write(canonical({"id": identifier, "object": "chat.completion", "created": 0,
                     "model": request.get("model"), "choices": [{"index": 0, "message": message,
-                    "finish_reason": reason}]}).encode())
+                    "finish_reason": reason}], "usage": usage}).encode())
             else:
                 delta = dict(message)
                 if call:
@@ -255,6 +261,9 @@ class Model(BaseHTTPRequestHandler):
                                {"index": 0, "delta": {}, "finish_reason": reason}]:
                     self.wfile.write(("data: " + canonical({"id": identifier, "object": "chat.completion.chunk",
                         "model": request.get("model"), "choices": [choice]}) + "\n\n").encode())
+                self.wfile.write(("data: " + canonical({"id": identifier,
+                    "object": "chat.completion.chunk", "model": request.get("model"),
+                    "choices": [], "usage": usage}) + "\n\n").encode())
                 self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):

@@ -38,6 +38,8 @@ def plan():
             "saturationVus": [1, 2, 4, 8], "saturationIterations": 6, "saturationRunsUpper": 90,
             "setupContextTokens": 131072, "measurementContextTokens": 200000,
             "outputTokens": 32768, "barrierSeconds": 20, "setupDeadlineSeconds": 3600,
+            "usageMode": "syntheticNoLlmTokens",
+            "tokenEstimationAccuracy": "notMeasuredByThisFixture",
             "historyMeaning": "actual admitted historical supplement inputs; canonical event count reported separately",
             "workingSetMeaning": "W(t) observed; equality required at paired iteration, no globally constant W claim"}
 
@@ -87,7 +89,8 @@ print(json.dumps({'configured':True}))
         .replace("INITIAL", repr(initial)).replace("CAPACITY", str(context_tokens)))
 
 
-def wait_gate(base, previous, deadline):
+def wait_gate(base, previous, deadline, driver, run_id, receipt):
+    next_status = time.monotonic() + 1
     while time.monotonic() < deadline:
         state = model_control(base, "/state")
         if state["cancelled"]:
@@ -95,6 +98,12 @@ def wait_gate(base, previous, deadline):
         pending = state["pending"]
         if pending is not None and pending["id"] != previous:
             return pending
+        if time.monotonic() >= next_status:
+            status = driver.status({"agentRunId": run_id})
+            if status["runStatus"] in {"completed", "failed", "cancelled"}:
+                receipt["terminalDuringSetup"] = status
+                raise RuntimeError("actual Run terminated before the next setup gate")
+            next_status = time.monotonic() + 1
         time.sleep(0.05)
     raise RuntimeError("setup deadline")
 
@@ -139,7 +148,10 @@ def seed_history(driver, history, control, receipt):
     expected_model = hashlib.sha256(Path(__file__).with_name("working_set_pg_model.py").read_bytes()).hexdigest()
     if model.get("implementationSha256") != expected_model:
         raise ValueError("running model bytes differ from frozen adapter")
+    if model.get("usageMode") != "syntheticNoLlmTokens":
+        raise ValueError("explicit synthetic LLM usage mode required")
     receipt["modelImplementationSha256"] = expected_model
+    receipt["usageMode"] = model["usageMode"]
     configure_business_model(driver, 131072, initial=True)
     admitted = driver.http(f"/api/workspaces/{driver.seed['workspaceId']}/sessions/new/messages", {
         "operationId": "working-set-setup", "text": "WORKING_SET_SETUP\nFollow the next synthetic performance task exactly.",
@@ -148,7 +160,7 @@ def seed_history(driver, history, control, receipt):
     receipt.update(agentRunId=run, sessionId=session, history=history,
                    mainCallsUpper=math.ceil(history / 8) + 3, summaryCallsUpper=math.ceil(history / 8) + 2)
     deadline = time.monotonic() + 3600
-    gate = wait_gate(control, None, deadline)
+    gate = wait_gate(control, None, deadline, driver, run, receipt)
     if gate["kind"] != "initial":
         raise ValueError("initial setup request not observed")
     first = driver.sql("""import json
@@ -167,7 +179,7 @@ with connection.cursor() as c:
                 raise ValueError("supplement admission not acknowledged")
         previous = gate["id"]
         model_control(control, "/release", {"gateId": previous})
-        gate = wait_gate(control, previous, deadline)
+        gate = wait_gate(control, previous, deadline, driver, run, receipt)
         if gate["kind"] != expected_kind or gate["historyIndices"] != expected_indices:
             raise ValueError("accepted batch differs from actual model input")
         receipt["lastObservedGate"] = {"kind": expected_kind, "id": gate["id"],
