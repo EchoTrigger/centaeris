@@ -18,7 +18,7 @@
 .markdownCodeBlock > .markdownCode { border: 0; border-radius: 0; margin: 0; background: transparent; }
 .markdownContent .markdownCode code { white-space: pre; }
 .markdownMermaid { padding: 16px; overflow-x: auto; text-align: center; }
-.markdownMermaid > svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.markdownMermaid > svg { display: block; width: 100%; max-width: 100%; height: auto; margin: 0 auto; }
 .markdownContent .markdownDiagramError { margin: 0; padding: 8px 14px 12px; color: var(--on-surface-variant); font-size: 13px; }
 .markdownCodeBlock { --md-keyword: #075985; --md-string: #166534; --md-number: #9a3412; --md-comment: #707070; --md-type: #6b21a8; }
 :root[data-theme="dark"] .markdownCodeBlock { --md-keyword: #8ac5fa; --md-string: #a1d4a0; --md-number: #e5b67e; --md-comment: #9b9b9b; --md-type: #d2b3ed; }

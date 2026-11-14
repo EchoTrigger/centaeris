@@ -22,6 +22,19 @@ for (const scenario of scenarios.filter(value => !longOnly || (value.width === 1
         await frame();
       };
       const diagramButton = label => "Array.from(document.querySelectorAll('[aria-label=\"Diagram example\"] button')).find(button => button.textContent === " + JSON.stringify(label) + ")";
+      const assertDiagramSize = async () => {
+        const size = await evaluate(() => {
+          const svg = document.querySelector('[aria-label="Diagram example"] [role=img] > svg');
+          const container = svg.parentElement;
+          const style = getComputedStyle(container);
+          const bounds = svg.getBoundingClientRect();
+          return { width: bounds.width, height: bounds.height,
+            available: container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+            ratio: svg.viewBox.baseVal.height / svg.viewBox.baseVal.width };
+        });
+        assert.ok(size.available > 0 && Math.abs(size.width - size.available) <= 1, "the diagram fills its content area instead of inheriting icon dimensions");
+        assert.ok(Math.abs(size.height - size.width * size.ratio) <= 1, "the diagram preserves its viewBox aspect ratio");
+      };
       if (!longOnly) {
       try {
         await waitFor(() => evaluate("Boolean((document.querySelector('[aria-label=\"Diagram example\"] [role=img] svg') || document.querySelector('[aria-label=\"Diagram example\"] [role=status]')) && document.querySelectorAll('[aria-label=\"Math example\"] math').length === 2)"), "actual Mermaid and KaTeX rendering");
@@ -44,6 +57,7 @@ for (const scenario of scenarios.filter(value => !longOnly || (value.width === 1
         throw new Error(error.message + ": " + JSON.stringify({ ...diagnostics, renderer }));
       }
       await evaluate("document.fonts.ready");
+      await assertDiagramSize();
       assert.deepEqual(await evaluate(() => {
         const section = document.querySelector('[aria-label="AST example"]');
         return {
@@ -83,6 +97,7 @@ for (const scenario of scenarios.filter(value => !longOnly || (value.width === 1
       assert.equal(await evaluate(() => document.querySelector('[aria-label="Diagram example"] [role=img]') === null), true, "a stale valid graph cannot stand in for an invalid final result");
       await click(diagramButton("Replace diagram"));
       await waitFor(() => evaluate(() => document.querySelector('[aria-label="Diagram example"] [role=img]')?.textContent.includes("Replacement")), "replacement diagram");
+      await assertDiagramSize();
       await evaluate(() => { const before = document.getElementById("before-return"); before.scrollIntoView({ block: "center" }); before.focus(); });
       await press("Tab");
       assert.equal(await evaluate(() => document.activeElement?.getAttribute("aria-label")), "Return to latest");

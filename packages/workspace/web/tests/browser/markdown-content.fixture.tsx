@@ -19,7 +19,7 @@ const code = 'const message = "流式🙂";\nconsole.log(message);';
 const diagram = "graph TD\n  A[Start] --> B[Done]";
 const extendedDiagram = diagram + "\n  B --> C[Next]";
 const invalidDiagram = extendedDiagram + "\n  C --> D[";
-const replacementDiagram = "graph TD\n  X[Replacement] --> Y[Ready]";
+const replacementDiagram = "mindmap\n  root((Replacement))\n    Ready";
 const failures: string[] = [];
 const copied: string[] = [];
 let workerReceipts = 0, workerTerminations = 0;
