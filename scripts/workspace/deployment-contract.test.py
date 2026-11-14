@@ -274,6 +274,11 @@ sys.stdout.write(re.sub(pattern,replace,text))
                                   input=json.dumps(value), capture_output=True, text=True)
         accepted = validate(config)
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        for name in ("runtime", "web"):
+            with self.subTest(missing_image=name):
+                image = config["services"][name].pop("image")
+                self.assertNotEqual(validate(config).returncode, 0)
+                config["services"][name]["image"] = image
         del config["services"]["material-worker"]["depends_on"]["document-processor"]
         self.assertNotEqual(validate(config).returncode, 0)
 

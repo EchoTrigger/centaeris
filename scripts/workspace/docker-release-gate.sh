@@ -111,15 +111,16 @@ PY
 "${compose[@]}" config --quiet
 "${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-compose.py
 
-for service in document-processor workspace-general runtime api web; do
+built_services=(postgres document-processor workspace-general runtime api web)
+for service in "${built_services[@]}"; do
   "${builder_compose[@]}" build --pull "$service"
 done
 built_image_names="$("${builder_compose[@]}" config --format json | python3 -c '
 import json, sys
 services = json.load(sys.stdin)["services"]
-for name in ("document-processor", "workspace-general", "runtime", "api", "web"):
+for name in sys.argv[1:]:
     print(services[name]["image"])
-')"
+' "${built_services[@]}")"
 mapfile -t built_images <<< "$built_image_names"
 "${builder[@]}" image save "${built_images[@]}" | docker image load
 for image in "${built_images[@]}"; do
@@ -158,7 +159,7 @@ values = {"ENVIRONMENT_EXECUTION_HELPER": str(root / "execution_agent"),
 path.write_text("\n".join(f"{key}={values[key]}" if (key := line.partition("=")[0]) in values else line
                           for line in path.read_text().splitlines()) + "\n")
 PY
-"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime platform-reconciler material-worker material-scheduler title-worker web
+"${compose[@]}" up -d --no-build --wait --wait-timeout 420 postgres redis api runtime platform-reconciler material-worker material-scheduler title-worker web
 
 for service in postgres redis api runtime platform-reconciler material-broker material-worker material-scheduler title-worker web; do
   "${compose[@]}" ps --status running --services | grep -Fx "$service" >/dev/null

@@ -8,13 +8,15 @@ def verify_compose(config, workspace):
     if config["name"] != "centaeris-workspace":
         raise ValueError("unexpected deployment project")
     services = config["services"]
-    required = {"api", "document-processor", "runtime", "web", "workspace-general"}
+    required = {"api", "document-processor", "postgres", "runtime", "web", "workspace-general"}
     if not required <= {name for name, service in services.items() if "build" in service}:
         raise ValueError("deployment build is incomplete")
     for name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
         if services[name].get("profiles") or name not in services[consumer]["depends_on"]:
             raise ValueError(f"{consumer}: missing required {name} ownership")
     for name in required:
+        if not services[name].get("image"):
+            raise ValueError(f"{name}: explicit deployment image is required")
         if Path(services[name]["build"]["context"]).resolve() != workspace.resolve():
             raise ValueError(f"{name}: build context differs from source")
     for name in ("runtime", "workspace-general"):

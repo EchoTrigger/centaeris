@@ -121,6 +121,7 @@ services:
 
   runtime:
     restart: unless-stopped
+    image: centaeris-workspace-runtime
     build:
       context: .
       dockerfile: packages/workspace/runtime/Dockerfile
@@ -460,6 +461,7 @@ services:
     pids_limit: 64
 
   web:
+    image: centaeris-workspace-web
     build:
       context: .
       dockerfile: packages/workspace/web/Dockerfile

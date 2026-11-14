@@ -77,7 +77,7 @@ if args[0] == "compose":
         if not helper.is_absolute():
             raise SystemExit(78)
         if "--format" in args:
-            names = ["api", "document-processor", "runtime", "web", "platform-reconciler", "workspace-general"]
+            names = ["api", "document-processor", "postgres", "runtime", "web", "platform-reconciler", "workspace-general"]
             services = {name: {"build": {"context": os.environ["GATE_WORKSPACE_ROOT"]}, "image": "built-" + name} for name in names}
             services["workspace-general"]["image"] = "built-workspace-general"
             services["runtime"]["depends_on"] = {"workspace-general": {}}
@@ -115,7 +115,7 @@ else:
             print("fixture-daemon" if "{{.ID}}" in args else '{"runsc": {}}')
     elif args[:2] == ["image", "save"]:
         assert endpoint == "unix:///run/centaeris-builder/docker.sock"
-        assert args[2:] == ["built-" + name for name in ["document-processor", "workspace-general", "runtime", "api", "web"]]
+        assert args[2:] == ["built-" + name for name in ["postgres", "document-processor", "workspace-general", "runtime", "api", "web"]]
         print("owned-image-archive")
     elif args[:2] == ["image", "load"]:
         assert endpoint == "unix:///var/run/docker.sock"
@@ -193,6 +193,7 @@ node() { printf '%s\\n' fixture-revision; }
         self.assertLess(max(i for i, action in enumerate(actions) if action == "build"), actions.index("create"))
         self.assertLess(actions.index("cp"), actions.index("up"))
         started = next(event for event in events if event["action"] == "up")
+        self.assertIn("--no-build", started["args"])
         self.assertIn("material-worker", started["args"])
         self.assertTrue(any(event["action"] == "ps" and "--status" in event["args"] for event in events))
         self.assertEqual([event["args"] for event in events if event["action"] == "rm"], [["rm", "-f", "owned-helper-container"], ["rm", "-f", "owned-supervisor-container"]])
@@ -214,6 +215,7 @@ node() { printf '%s\\n' fixture-revision; }
                 builds = [event for event in events if event["action"] == "build" and event["args"][0] == "compose"]
                 built = [event["args"][-1] for event in builds]
                 self.assertTrue(built)
+                self.assertEqual(built[0], "postgres")
                 self.assertEqual(len(built), len(set(built)))
                 for event in builds:
                     args = event["args"]
