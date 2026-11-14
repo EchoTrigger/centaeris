@@ -27,18 +27,6 @@ const notification = { id: "notification-evidence", workspaceId: workspace.id, i
 window.fetch = async (input, options) => {
   const url = new URL(String(input), location.href);
   if (url.pathname === "/api/csrf") return Response.json({ csrfToken: "fixture" });
-  if (url.pathname.endsWith("/guide")) {
-    if (options?.method === "PATCH") {
-      const body = JSON.parse(String(options.body));
-      if (body.dismissed !== undefined) localStorage.setItem("fixtureGuideDismissed", String(body.dismissed));
-      if (body.manualSteps) localStorage.setItem("fixtureGuideSteps", JSON.stringify({ ...JSON.parse(localStorage.getItem("fixtureGuideSteps") || "{}"), ...body.manualSteps }));
-    }
-    const manualSteps = JSON.parse(localStorage.getItem("fixtureGuideSteps") || "{}");
-    return Response.json({ guide: { dismissed: localStorage.getItem("fixtureGuideDismissed") === "true", steps: [
-      { id: "models", completed: false }, { id: "materials", completed: true }, { id: "plugins", completed: true },
-      { id: "connections", completed: false }, { id: "conversation", completed: false }, { id: "issue", completed: true },
-    ].map(step => ({ ...step, completed: manualSteps[step.id] ?? step.completed })) } });
-  }
   if (url.pathname.endsWith("/notifications/notification-evidence")) {
     if (options?.method === "PATCH") {
       const body = JSON.parse(String(options.body));
