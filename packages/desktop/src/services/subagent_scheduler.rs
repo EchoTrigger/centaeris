@@ -763,7 +763,7 @@ impl ElectronSubagentRunner {
                     req.job.job_id.as_str(),
                 )),
             })?;
-        runtime.validate_subagent_tool_contracts(&binding)?;
+        runtime.prepare_subagent_tool_contracts(&binding).await?;
         let (model_config, registry) =
             agent_runtime::model_session_config_and_registry(&runtime_config)?;
         let wire_api = agent_runtime::model_config_wire_api(&registry, &model_config)?;

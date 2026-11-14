@@ -2,17 +2,22 @@ import { i18n } from "../i18n";
 import { t } from "../i18n";
 import { useTranslation } from "../i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useRouteLoaderData, useSearchParams } from "react-router";
+import { Link, Outlet, useNavigate, useParams, useRouteLoaderData, useSearchParams } from "react-router";
 import {
-  BookOpen, ChevronDown, ChevronRight, Download, FileText, Folder, FolderInput,
+  BookOpen, ChevronDown, Download, FileText, Folder, FolderInput,
   Image as ImageIcon, LoaderCircle, MessageSquarePlus, Minus,
-  Search, Trash2, Upload, X,
+  Trash2, Upload, X,
 } from "lucide-react";
 import { ApiError, apiJson as api, apiUrl, jsonOptions } from "../api";
 import { OperationClient } from "../chat/operationReceipts";
 import { LibraryTemplatesDialog } from "./LibraryTemplatesDialog";
 import { useModalDialog } from "../components/useModalDialog";
 import { ShellPage } from "../shell/ShellPage";
+import { CatalogDetailView } from "../components/CatalogDetailView";
+import { Menu } from "@centaeris/ui/primitives/menu";
+import { SpaceSources } from "./SpaceSources";
+import { WorkBreadcrumb } from "../work/WorkBreadcrumb";
+import "../catalog.css";
 import { MAX_UPLOAD_BATCH_FILES } from "../upload";
 
 function isImage(item) {
@@ -45,13 +50,14 @@ function statusLabel(item) {
 
 const LIBRARY_VIEWS = new Set(["materials", "knowledge"]);
 const LIBRARY_TABS = () => ([
-  ["materials", t("libraryRoute.materials"), Folder],
-  ["knowledge", t("libraryRoute.knowledgeBases"), BookOpen],
+  ["materials", t("space.materials")],
+  ["knowledge", t("space.sources")],
 ]);
 
 function LibraryPageContent({ embedded = false } = {}) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { libraryObjectId } = useParams();
   const { workspace } = useRouteLoaderData("workspace");
   const { user } = useRouteLoaderData("authenticated");
   const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "createSession" }), [user.id, workspace.id]);
@@ -71,7 +77,6 @@ function LibraryPageContent({ embedded = false } = {}) {
   const [objects, setObjects] = useState([]);
   const [folderPath, setFolderPath] = useState([]);
   const [filter, setFilter] = useState("all");
-  const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(false);
@@ -112,7 +117,7 @@ function LibraryPageContent({ embedded = false } = {}) {
     return path;
   }
 
-  async function loadLibrary() {
+  async function loadLibrary({ preserveSelection = false } = {}) {
     setLoading(true);
     setError("");
     setLoadError(false);
@@ -123,7 +128,7 @@ function LibraryPageContent({ embedded = false } = {}) {
       ]);
       setObjects(library.objects);
       setFolderPath(path);
-      setSelectedIds([]);
+      if (!preserveSelection) setSelectedIds([]);
     } catch (requestError) {
       if (requestError.status === 404 && folderId) {
         navigate(`${base}/library`, { replace: true });
@@ -135,14 +140,17 @@ function LibraryPageContent({ embedded = false } = {}) {
     }
   }
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: The primitive folder route is the load trigger; the render-local command must not retrigger itself.
+  const previousDirectory = useRef({ folderId: null, objectId: null });
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Refresh the directory after closing an editor, while preserving its selection.
   useEffect(() => {
-    loadLibrary();
-  }, [folderId]);
+    const previous = previousDirectory.current;
+    if (previous.folderId !== folderId) { setObjects([]); setFolderPath([]); }
+    if (previous.folderId !== folderId || (previous.objectId && !libraryObjectId)) void loadLibrary({ preserveSelection: previous.folderId === folderId });
+    previousDirectory.current = { folderId, objectId: libraryObjectId };
+  }, [folderId, libraryObjectId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Changing catalogs intentionally clears view-local search and selection state.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Changing catalogs intentionally clears view-local selection state.
   useEffect(() => {
-    setQuery("");
     setSelectedIds([]);
   }, [libraryView]);
 
@@ -410,13 +418,12 @@ function LibraryPageContent({ embedded = false } = {}) {
   }
 
   const visibleObjects = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase();
     return objects.filter((item) => {
       if (filter === "images" && !isImage(item)) return false;
       if (filter === "files" && (isImage(item) || isFolder(item))) return false;
-      return !normalizedQuery || item.displayName.toLocaleLowerCase().includes(normalizedQuery);
+      return true;
     });
-  }, [filter, objects, query]);
+  }, [filter, objects]);
   const visibleObjectIds = visibleObjects.map((item) => item.id);
   const allVisibleSelected = visibleObjectIds.length > 0 && visibleObjectIds.every((itemId) => selectedIds.includes(itemId));
   const selectionContainsFolder = selectedItems.some(isFolder);
@@ -442,36 +449,42 @@ function LibraryPageContent({ embedded = false } = {}) {
     });
   }
 
+  if (libraryView === "knowledge") {
+    const sources = <SpaceSources workspace={workspace} />;
+    return embedded ? sources : <ShellPage>{sources}</ShellPage>;
+  }
+
   const content = (
     <>
-      <div className="libraryWorkspace">
-        <section className="libraryMain shEmbeddedLibrary" aria-labelledby="library-title">
-        <header className="libraryHeader">
-          <h1 id="library-title">{t("workspaceContextPanel.library")}</h1>
+      <div className="libraryWorkspace spaceWorkspace">
+        <section className="libraryMain shEmbeddedLibrary catalogPage" aria-label={t("libraryObjectRoute.library")}>
+        <header className="libraryHeader workHeader catalogHeader">
+          <WorkBreadcrumb parents={folderPath.length ? [{ label: t("libraryObjectRoute.library"), to: `${base}/library` }, ...folderPath.slice(0, -1).map(folder => ({ label: folder.displayName, to: libraryUrl(folder.id) }))] : []} current={folderPath.at(-1)?.displayName || t("libraryObjectRoute.library")} />
           {libraryView === "materials" ? <div className="libraryHeaderActions">
-            <div className="libraryNewMenu">
-              <button className="libraryNewButton" type="button" aria-expanded={newMenuOpen} aria-haspopup="menu" onClick={() => setNewMenuOpen((open) => !open)}>{t("libraryRoute.new")}<ChevronDown aria-hidden="true" /></button>
-              {newMenuOpen && <div className="libraryNewMenuPanel" role="menu">
-                <button type="button" role="menuitem" disabled={uploading} onClick={openUploadDialog}><Upload aria-hidden="true" />{t("libraryRoute.uploadFiles")}</button>
-                <button type="button" role="menuitem" onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setError(""); setDialog("folder"); }}><Folder aria-hidden="true" />{t("libraryRoute.folder")}</button>
-                <button type="button" role="menuitem" onClick={() => createNote()}><FileText aria-hidden="true" />{t("libraryRoute.note")}</button>
-                <button type="button" role="menuitem" onClick={() => { setNewMenuOpen(false); setTemplatesOpen(true); }}><BookOpen aria-hidden="true" />{t("shellSidebar.templates")}</button>
-              </div>}
-            </div>
+            <Menu.Root open={newMenuOpen} onOpenChange={setNewMenuOpen}>
+              <Menu.Trigger className="workspacePagePrimaryButton">{t("libraryRoute.new")}<ChevronDown aria-hidden="true" /></Menu.Trigger>
+              <Menu.Portal><Menu.Positioner className="workMenuPositioner" side="bottom" align="end" sideOffset={6}><Menu.Popup className="workMenu libraryCreateMenu">
+                <Menu.Item className="workMenuItem" disabled={uploading} onClick={openUploadDialog}><Upload aria-hidden="true" />{t("libraryRoute.uploadFiles")}</Menu.Item>
+                <Menu.Item className="workMenuItem" onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setError(""); setDialog("folder"); }}><Folder aria-hidden="true" />{t("libraryRoute.folder")}</Menu.Item>
+                <Menu.Item className="workMenuItem" onClick={() => createNote()}><FileText aria-hidden="true" />{t("libraryRoute.note")}</Menu.Item>
+                <Menu.Item className="workMenuItem" onClick={() => { setNewMenuOpen(false); setTemplatesOpen(true); }}><BookOpen aria-hidden="true" />{t("shellSidebar.templates")}</Menu.Item>
+              </Menu.Popup></Menu.Positioner></Menu.Portal>
+            </Menu.Root>
           </div> : null}
         </header>
 
         <div className="libraryContent">
-          <nav className="libraryCatalogTabs" role="tablist" aria-label={t("libraryRoute.libraryType")}>
-            {LIBRARY_TABS().map(([value, label, Icon]) => <Link
+          <nav className="libraryCatalogTabs catalogTabs" role="tablist" aria-label={t("libraryRoute.libraryType")}>
+            {LIBRARY_TABS().map(([value, label]) => <Link
               className={libraryView === value ? "isActive" : ""}
               role="tab"
               aria-selected={libraryView === value}
               to={value === "materials" ? `${base}/library` : `${base}/library?view=${value}`}
               key={value}
-            ><Icon aria-hidden="true" />{label}</Link>)}
+            >{label}</Link>)}
           </nav>
 
+          <div className={`catalogWorkspace spaceContents${libraryObjectId ? " hasDetail" : ""}`}><div className="catalogDirectory" hidden={Boolean(libraryObjectId)}>
           <div className="libraryCatalogTools">
             {libraryView === "materials" && selectedItems.length ? <div className="librarySelectionBar" aria-label={t("libraryRoute.selectedFileActions")}>
               <span>{t("library.selected", { count: selectedItems.length })}</span>
@@ -482,22 +495,21 @@ function LibraryPageContent({ embedded = false } = {}) {
             </div> : libraryView === "materials" ? <div className="libraryFilters" role="tablist" aria-label={t("libraryRoute.materialType")}>
               {[["all", t("libraryRoute.all")], ["images", t("attachmentCard.image")], ["files", t("libraryRoute.files")]].map(([value, label]) => <button className={filter === value ? "active" : ""} type="button" key={value} role="tab" aria-selected={filter === value} onClick={() => setFilter(value)}>{label}</button>)}
             </div> : <span className="libraryCatalogAll">{t("libraryRoute.all")}</span>}
-            <label className="librarySearch"><Search aria-hidden="true" /><span className="srOnly">{t("libraryRoute.searchThisLibrary")}</span><input aria-label={t("libraryRoute.searchThisLibrary")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("libraryRoute.search")} /></label>
+            {libraryView === "materials" && filter !== "all" && !visibleObjects.length && !loading && !loadError ? <small role="status">{t("common.resultCount", { count: visibleObjects.length })}</small> : null}
           </div>
 
           {libraryView === "materials" ? <>
             {error && !dialog ? <p className="libraryOperationResult error" role="alert">{error} <button className="pluginEnableButton" type="button" disabled={working} onClick={() => operations.pending() ? void openPendingChat() : void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></p> : null}
-            {folderPath.length > 0 && <nav className="libraryBreadcrumb" aria-label={t("libraryRoute.currentFolder")}><button type="button" onClick={() => navigate(`${base}/library`)}>{t("libraryObjectRoute.library")}</button>{folderPath.map((folder) => <span key={folder.id}><ChevronRight aria-hidden="true" /><button type="button" onClick={() => navigate(libraryUrl(folder.id))}>{folder.displayName}</button></span>)}</nav>}
             {loadError ? <div className="settingsPanel libraryEmptyState" role="alert">{t("libraryRoute.unableToLoadLibrary")}<button className="pluginEnableButton" type="button" onClick={() => void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></div> : <>
-            <div className={`settingsPanel settingsListPanel libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-label={t("libraryRoute.personalLibraryFiles")}>
+            <div className={`settingsPanel settingsListPanel libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-busy={loading} aria-label={t("libraryRoute.personalLibraryFiles")}>
               <div className="libraryListHeader" role="row">
                 <button className="librarySelect librarySelectAll" type="button" role="checkbox" aria-checked={allVisibleSelected} aria-label={allVisibleSelected ? t("libraryRoute.deselectAll") : t("libraryRoute.selectAllListedItems")} onClick={toggleAllVisible}>{allVisibleSelected ? <Minus aria-hidden="true" /> : null}</button>
                 <span role="columnheader">{t("libraryRoute.name")}</span><span role="columnheader">{t("libraryRoute.modified")}</span><span role="columnheader">{t("libraryRoute.size")}</span>
               </div>
-              {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingLibrary")}</div> : visibleObjects.length === 0 ? <div className="libraryEmptyState">{objects.length === 0 ? t("libraryRoute.noMaterialsYetConversationAttachmentsWillBeSavedHere") : t("libraryRoute.noMaterialsMatchYourFilters")}</div> : visibleObjects.map((item) => {
+              {loading && !objects.length ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingLibrary")}</div> : visibleObjects.map((item) => {
                 const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText;
                 const itemStatus = statusLabel(item);
-                return <div className={`libraryRow ${selectedIds.includes(item.id) ? "selected" : ""}`} role="row" key={item.id}>
+                return <div className={`libraryRow ${selectedIds.includes(item.id) || libraryObjectId === item.id ? "selected" : ""}`} role="row" key={item.id}>
                   <label className="librarySelect"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /><span className="srOnly">{t("libraryRoute.select")}{" "}{item.displayName}</span></label>
                   <button className="libraryName" type="button" role="cell" onClick={() => navigate(isFolder(item) ? libraryUrl(item.id) : `${base}/library/${item.id}?folder=${encodeURIComponent(folderId)}`)}>
                     {isImage(item) && item.status === "ready" ? <img className="libraryThumbnail" src={apiUrl(`/api/library/${item.id}/preview`)} alt="" loading="lazy" /> : <ItemIcon aria-hidden="true" />}<span>{item.displayName}</span>{itemStatus && <small>{itemStatus}</small>}
@@ -507,7 +519,10 @@ function LibraryPageContent({ embedded = false } = {}) {
               })}
             </div>
             </>}
-          </> : <div className="settingsPanel libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>{t("libraryRoute.noKnowledgeBasesYet")}</strong><span>{t("libraryRoute.connectedSourcesWillAppearHere")}</span></div>}
+          </> : null}
+          </div>
+          {libraryObjectId ? <CatalogDetailView className="libraryFileView" hideTitle backLabel={t("space.backTo", { name: folderPath.at(-1)?.displayName || t("space.materials") })} title={t("space.fileDetails")} backTo={libraryUrl(folderId)}><Outlet /></CatalogDetailView> : null}
+          </div>
         </div>
         </section>
       </div>

@@ -243,7 +243,7 @@ export default function WorkspaceGroupsRoute({ embedded = false } = {}) {
                 return <label key={member.membershipId}><input type="checkbox" checked={checked} disabled={selected.kind === "all_members" || rowBusy} onChange={() => void toggleMember(member)} /><span className="shWorkspaceMemberAvatar" aria-hidden="true">{member.email.slice(0, 1).toUpperCase()}</span><span><strong>{member.email}</strong><small>{roleLabel(member.role)}</small></span></label>;
               })}
             </div>}
-          </> : <div className="settingsPanel shWorkspaceSettingsEmpty">{t("workspaceGroupsRoute.noGroupsYet")}</div>}
+          </> : null}
         </section>
       </div> : null}
     </div>

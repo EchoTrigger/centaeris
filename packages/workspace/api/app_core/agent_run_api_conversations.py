@@ -58,12 +58,15 @@ def message_session(credential, conversation_id, now):
     )
     if session.agent_runs.filter(status__in={"queued", "running"}).exists():
         raise HostedOperationError(409, "session_has_active_agent_run")
-    if session.agent_runs.filter(
+    pending_preservation = session.agent_runs.filter(
         environment_id=session.current_environment_id,
         status__in={"completed", "failed", "cancelled"},
         preAdmissionCancelledAt__isnull=True,
         environment_release__isnull=True,
-    ).exists():
+    )
+    if pending_preservation.filter(transitionReason="workspace_preservation_blocked").exists():
+        raise HostedOperationError(409, "session_workspace_preservation_blocked")
+    if pending_preservation.exists():
         raise HostedOperationError(409, "session_workspace_preservation_pending")
     previous_scope = session.agent_runs.order_by("-createdAt", "-pk").values_list(
         "authorization__payload__pluginActivation__digest", flat=True,

@@ -669,6 +669,7 @@ mod tests {
                 },
                 state: EnvironmentTaskState::Exited,
                 exit_code: Some(0),
+                timed_out: None,
                 cleanup_complete: true,
                 output_complete: true,
             },

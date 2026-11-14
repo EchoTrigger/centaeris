@@ -16,9 +16,11 @@ import {
   type Ref,
 } from "react";
 import { useTranscriptTurnMetadata } from "./useTranscriptTurnMetadata";
-import { WorkProgress } from "./WorkProgress";
+import { WorkProgress, type WorkProgressSegment } from "./WorkProgress";
+import { TranscriptSupplement } from "./TranscriptSupplement";
+import { FileLinkCard } from "./FileLinkCard";
 import { TranscriptActivity, type TranscriptActivityState } from "./TranscriptActivity";
-import { groupTranscriptTurns, hasCommittedPendingMessage, shouldLoadEarlier, shouldReleaseLoadedHistory, type PendingTranscriptMessage } from "./transcriptTurns";
+import { groupTranscriptTurns, hasCommittedPendingMessage, hasCommittedSupplement, shouldLoadEarlier, shouldReleaseLoadedHistory, type PendingTranscriptMessage, type PendingSupplement } from "./transcriptTurns";
 import { ChevronDown } from "lucide-react";
 import { useTranslation } from "../i18n";
 import { TranscriptBlockRow, TranscriptFailureNotice, TranscriptLiveTail, TranscriptToolGroupCard } from "./TranscriptBlockContent";
@@ -40,6 +42,7 @@ type Props = Readonly<{
   olderHistoryError?: boolean;
   emptyState?: ReactNode;
   pendingUserMessage?: PendingTranscriptMessage | null;
+  pendingSupplements?: readonly PendingSupplement[];
   submissionRejected?: boolean;
   historyMemoryPressure?: boolean;
   onReleaseLoadedHistory?(): void;
@@ -120,6 +123,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   olderHistoryError = false,
   emptyState,
   pendingUserMessage,
+  pendingSupplements = [],
   submissionRejected = false,
   historyMemoryPressure: reportedMemoryPressure = false,
   onReleaseLoadedHistory,
@@ -203,6 +207,8 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     && (pendingUserMessage.sessionId === null || pendingUserMessage.sessionId === sessionId)
     && !hasCommittedPendingMessage(pendingUserMessage, sessionId, blockIds, store.getBlockSnapshot);
   const pendingTerminal = pendingUserMessage?.status === "completed" || pendingUserMessage?.status === "failed" || pendingUserMessage?.status === "cancelled";
+  const visibleSupplements = pendingSupplements.filter(item => item.sessionId === sessionId
+    && !hasCommittedSupplement(item, sessionId, blockIds, store.getBlockSnapshot));
   const renderedTurns = pendingVisible
     ? [...turns, { id: "pending:user", userBlockId: null, processIds: [], answerIds: [] }]
     : turns;
@@ -622,32 +628,44 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
             const runEnded = typeof turnCompletedAt === "number";
             const hasWork = isPending || submitted !== undefined || (isLast && running) || turnLive !== null || turn.processIds.length > 0
               || turn.answerIds.length > 0 || time !== undefined;
+            const segments: WorkProgressSegment[] = [];
+            let processIds: string[] = [];
+            const flushProcess = () => {
+              if (!processIds.length) return;
+              segments.push({ key: processIds[0], kind: "process", content: groupTranscriptBlocks(store, processIds).map(entry => entry.kind === "tool"
+                ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} subagents={subagents} onOpenSubagent={onOpenSubagent} key={`tool:${entry.blockIds[0]}`} />
+                : <TranscriptBlockRow store={store} blockId={entry.blockId} searchQuery={entry.blockId === targetBlockId ? targetQuery : undefined} key={entry.blockId} />) });
+              processIds = [];
+            };
+            for (const blockId of turn.processIds) {
+              const body = store.getBlockSnapshot(blockId)?.body;
+              if (body?.kind === "notice" && body.noticeType === "turn_supplement") {
+                flushProcess();
+                segments.push({ key: blockId, kind: "input", content: <TranscriptBlockRow store={store} blockId={blockId} searchQuery={blockId === targetBlockId ? targetQuery : undefined} /> });
+              } else processIds.push(blockId);
+            }
+            flushProcess();
+            if (turnLive?.reasoning?.text) segments.push({ key: "live-reasoning", kind: "process", content: <TranscriptLiveTail live={turnLive} mode="reasoning" /> });
             return <div className="workspaceTranscriptTurn" data-send-anchor={turn.userBlockId || isPending ? "" : undefined} key={rowKey}>
               {isPending ? <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id="pending:user">
                 <div className="workspaceUserMessage">{pendingUserMessage?.text}</div>
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
               </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} searchQuery={turn.userBlockId === targetBlockId ? targetQuery : undefined} /> : null}
-              {hasWork ? <WorkProgress key="work" revealKey={turn.processIds.includes(targetBlockId) ? targetBlockId : undefined} running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
+              {hasWork ? <WorkProgress key="work" hasProcess={segments.some(segment => segment.kind === "process")} segments={segments} revealKey={turn.processIds.includes(targetBlockId) ? targetBlockId : undefined} running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
                 startedAtMs={isPending || (runKey && runKey === pendingRunKey) ? pendingStartedAt : submitted?.startedAtMs ?? time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : turnCompletedAt}>
-                {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
-                  ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} subagents={subagents} onOpenSubagent={onOpenSubagent} key={`tool:${entry.blockIds[0]}`} />
-                  : <TranscriptBlockRow store={store} blockId={entry.blockId} searchQuery={entry.blockId === targetBlockId ? targetQuery : undefined} key={entry.blockId} />)}
-                {turnLive ? <TranscriptLiveTail live={turnLive} mode="reasoning" /> : null}
               </WorkProgress> : null}
               {turn.answerIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} searchQuery={blockId === targetBlockId ? targetQuery : undefined} key={blockId} />)}
               {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>
-                {time.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}>
-                  <span className="workspaceArtifactPlus" aria-hidden="true">+</span>
-                  <a id={`artifact:${artifact.artifactRef}`} href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => {
+                {time.artifacts.map((artifact) => <FileLinkCard key={artifact.artifactRef} id={`artifact:${artifact.artifactRef}`} filename={artifact.filename} href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => {
                     event.preventDefault();
                     onShowArtifact(artifact, { elementId: event.currentTarget.id });
-                  } : undefined}>{artifact.filename}</a>
-                </span>)}
+                  } : undefined} />)}
               </div> : null}
               {isLast && (isPending ? !pendingTerminal : running) ? <TranscriptActivity activity={activity} /> : null}
             </div>;
           })}
+          {visibleSupplements.map(item => <TranscriptSupplement key={item.supplementId} blockId={`pending:supplement:${item.supplementId}`}>{item.text}</TranscriptSupplement>)}
           {submissionRejected ? <TranscriptFailureNotice message={t("appRoute.messageNotSent")} /> : null}
         </div>
         <div ref={spacerRef} aria-hidden="true" style={{ height: 0, flexShrink: 0, transitionProperty: "none" }} />

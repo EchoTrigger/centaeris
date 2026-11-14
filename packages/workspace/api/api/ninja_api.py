@@ -70,3 +70,33 @@ api.add_router("/api", workspace_resources_router)
 
 from app_core.http.agent_run_api import router as agent_run_api_router
 api.add_router("/api", agent_run_api_router)
+
+from app_core.http.issues import router as issues_router
+api.add_router('/api', issues_router)
+
+from app_core.http.notifications import router as notifications_router
+api.add_router("/api", notifications_router)
+
+from app_core.http.workspace_guide import router as workspace_guide_router
+api.add_router("/api", workspace_guide_router)
+
+from app_core.http.issue_executions import router as issue_executions_router
+api.add_router("/api", issue_executions_router)
+
+from app_core.http.issue_materials import router as issue_materials_router
+api.add_router("/api", issue_materials_router)
+
+from app_core.http.issue_execution_read import router as issue_execution_read_router
+api.add_router("/api", issue_execution_read_router)
+
+from app_core.http.model_defaults import router as model_defaults_router
+api.add_router("/api", model_defaults_router)
+
+from app_core.http.issue_templates import router as issue_templates_router
+api.add_router("/api", issue_templates_router)
+
+from app_core.http.issue_deliverables import router as issue_deliverables_router
+api.add_router("/api", issue_deliverables_router)
+
+from app_core.http.workspace_search import router as workspace_search_router
+api.add_router("/api", workspace_search_router)

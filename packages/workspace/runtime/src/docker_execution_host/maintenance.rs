@@ -79,6 +79,7 @@ fn physical_identity(
         && facts["Config"]["User"].as_str() == Some(&profile.user)
         && facts["Config"]["WorkingDir"].as_str() == Some("/")
         && facts["HostConfig"]["Memory"].as_u64() == Some(profile.resources.memory_bytes)
+        && environment_container::storage_matches(facts, profile)
         && facts["HostConfig"]["CpuQuota"].as_u64()
             == Some(u64::from(profile.resources.cpu_milli) * 100)
         && facts["HostConfig"]["CpuPeriod"] == 100000
@@ -205,6 +206,7 @@ pub(crate) fn observe_environment(
     if a.container_id.as_deref() != facts["Id"].as_str()
         || facts["Image"].as_str() != Some(&a.image_digest)
         || facts["State"]["Running"] != true
+        || !environment_container::storage_matches(&facts, &target.profile)
         || labels["centaeris.environment_id"].as_str() != Some(&a.environment_id)
         || labels["centaeris.instance_id"].as_str() != Some(&a.instance_id)
         || labels["centaeris.environment_profile_digest"].as_str() != Some(&a.profile_digest)

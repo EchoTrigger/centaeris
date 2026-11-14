@@ -53,8 +53,39 @@ scope. Storage restrictions retain usable state in the current document.
 
 ## Web interface roles
 
-This document defines the intended roles and host boundaries. Exact color values
-come from `packages/ui/src/theme.css`. Web control geometry comes from
+Home owns the removable getting-started guide. Its steps link to real features,
+use server-reported completion and reflect the current member's role. Each step
+has a separate checkbox; manual checked and unchecked values persist and take
+precedence over automatic completion. Dismissal
+is stored per user and Workspace, changes only after server acknowledgement, and
+is restored explicitly through Home's Help menu. Navigation, refresh and releases
+do not reset it. Empty business lists keep their existing controls without empty
+state copy; active searches report a compact result count beside the query.
+Loading, errors and actionable configuration or authorization blockers remain
+separate feedback. Guide actions do not generate sample business records.
+
+Workspace Models exposes one optional Default purpose model selection. Clearing
+it disables asynchronous session titles; selecting it uses low reasoning when
+supported, independently of conversation model preferences. Issue execution opens
+a caller-owned interactive conversation through the same acceptance and navigation
+contracts as chat. Delegation accepts optional instructions; continuing or
+answering an Agent reopens that same conversation and reuses its existing question
+interaction. The authorized Issue origin provides a return link that restores the
+selected execution's results. Execution status follows the latest Run, while Issue
+status and human ownership remain independent. Result sharing is optional, and
+business-specific fields and rules remain installed template data.
+Generated titles preserve the first prompt's language, never
+replace manual names, and do not change navigation order. Archive titles stay on
+one line and fade at the end while their action buttons remain visible.
+
+This document defines the intended roles and host boundaries. Shared color defaults
+come from `packages/ui/src/theme.css`. Web overrides surface roles in its own
+`styles/theme.css`: rail, reading canvas, static cards, and raised/input surfaces
+form distinct luminance layers. Cards use fill and spacing without perimeter
+outlines; keyboard controls retain a thin neutral focus outline, while text entry
+uses its caret without an additional focus frame. Catalog and Home entries
+use full-width single-column cards, including on wide screens. Selected and hovered
+navigation retains text/icon emphasis without a background fill. Web control geometry comes from
 `packages/workspace/web/src/styles/theme.css`; conversation type values come from
 `styles/chat-typography.css` and map to elements in `styles/transcript-theme.css`.
 `docs/workspace/reference/WebChatPresentation.md` describes those reading roles
@@ -76,7 +107,12 @@ Web's settings and member-administration surfaces use these control roles:
 The page heading stays left aligned and entry actions share its header. Personal
 settings forms use a 720px maximum content column; member lists retain the wider
 Web content column. Narrow layouts reflow the existing content and actions.
-Keyboard focus uses the shared semantic focus color in both themes. Existing
+Web hover, current and selected states do not add a background fill. Use text
+weight, a check or the existing icon state to distinguish the current entry.
+Keyboard focus uses a thin neutral outline in both themes, without an accent
+glow. Catalogs in Plugins and Home use permanently visible bordered cards with
+gaps; Inbox uses the same treatment in a single column. Card collections do not
+also draw separators between adjacent entries. Existing
 dialog focus containment, opener restoration and busy dismissal rules remain
 owned by their current components.
 

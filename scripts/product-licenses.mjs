@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 
 const files = [
   ["LICENSE", "LICENSE.centaeris.txt"],
-  ["LICENSE-APACHE", "LICENSE-APACHE"],
   ["LICENSING.md", "LICENSING.md"],
   ["COPYRIGHT", "COPYRIGHT"],
   ["packages/model-catalog/centaeris_model_catalog/logos/LICENSE",

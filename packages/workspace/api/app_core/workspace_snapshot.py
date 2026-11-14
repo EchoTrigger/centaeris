@@ -32,7 +32,7 @@ def validate_snapshot_stream(source, candidate, *, output=None, on_read=None):
 
     ``on_read(count)`` observes actual source bytes including an EOF probe. The
     caller supplies policy/admission limits and a fenced private staging sink.
-    A successful return contains the existing v1 manifest, or None for no object.
+    A successful return contains the explicitly versioned manifest, or None for no object.
     """
     _validate_descriptor(candidate)
     source = _StoredReader(source, candidate, output, on_read)
@@ -73,7 +73,11 @@ def _validate_descriptor(candidate):
 
 
 def manifest_files(manifest_bytes, candidate, *, canonical_order=False):
-    """Shared v1 rules; old frame readers retain their existing key-order policy."""
+    """Project regular files after checking all nodes and the stored descriptor.
+
+    Released v1 frames retain their existing key-order policy. V2 has an exact
+    canonical order so directory/link metadata shares the manifest identity.
+    """
     return _manifest(manifest_bytes, candidate, canonical_order=canonical_order)["files"]
 
 
@@ -82,43 +86,87 @@ def _manifest(manifest_bytes, candidate, *, canonical_order=False):
         if not 0 < len(manifest_bytes) <= MAX_MANIFEST_BYTES:
             raise ValueError("snapshot manifest size is invalid")
         manifest = json.loads(manifest_bytes.decode("utf-8"))
-        if not isinstance(manifest, dict) or set(manifest) != {"schema", "files"}:
+        if not isinstance(manifest, dict):
+            raise ValueError("snapshot manifest fields are invalid")
+        schema = manifest.get("schema")
+        if schema == "workspace.snapshot.v1":
+            fields = {"schema", "files"}
+            directories, symlinks = [], []
+        elif schema == "workspace.snapshot.v2":
+            fields = {"schema", "files", "directories", "symlinks"}
+            directories, symlinks = manifest.get("directories"), manifest.get("symlinks")
+        else:
+            raise ValueError("snapshot manifest schema is invalid")
+        if set(manifest) != fields:
             raise ValueError("snapshot manifest fields are invalid")
         files = manifest["files"]
-        if (manifest["schema"] != "workspace.snapshot.v1" or not isinstance(files, list)
-                or not files or len(files) != candidate["fileCount"]):
-            raise ValueError("snapshot manifest schema or file count is invalid")
+        if (not all(isinstance(nodes, list) for nodes in (files, directories, symlinks))
+                or not (len(files) + len(directories) + len(symlinks))
+                or len(files) + len(directories) + len(symlinks) != candidate["fileCount"]):
+            raise ValueError("snapshot manifest node count is invalid")
         previous = None
         expanded = 0
+        paths, leaves = set(), set()
         for file in files:
             if not isinstance(file, dict) or set(file) != {"path", "sizeBytes", "sha256", "executable"}:
                 raise ValueError("snapshot file fields are invalid")
-            validate_virtual_path(file["path"])
+            _node_path(file["path"])
             require_sha256("workspace snapshot file sha256", file["sha256"])
-            if (len(file["path"].encode("utf-8")) > MAX_PATH_BYTES
-                    or len(file["path"].split("/")) > MAX_PATH_DEPTH
-                    or type(file["sizeBytes"]) is not int or file["sizeBytes"] < 0
+            if (type(file["sizeBytes"]) is not int or file["sizeBytes"] < 0
                     or type(file["executable"]) is not bool
-                    or previous is not None and (previous >= file["path"]
-                        or file["path"].startswith(previous + "/"))):
+                    or previous is not None and previous >= file["path"]):
                 raise ValueError("snapshot file metadata is invalid")
             expanded += file["sizeBytes"]
             if expanded > candidate["expandedSizeBytes"]:
                 raise ValueError("snapshot expanded size exceeds descriptor")
             previous = file["path"]
+            paths.add(file["path"])
+            leaves.add(file["path"])
+        for nodes, links in ((directories, False), (symlinks, True)):
+            previous = None
+            for node in nodes:
+                if links:
+                    if not isinstance(node, dict) or set(node) != {"path", "target"}:
+                        raise ValueError("snapshot symlink fields are invalid")
+                    path, target = node["path"], node["target"]
+                    if (not isinstance(target, str) or not target or "\0" in target
+                            or len(target.encode("utf-8")) > MAX_PATH_BYTES):
+                        raise ValueError("snapshot symlink target is invalid")
+                else:
+                    path = node
+                _node_path(path)
+                if path in paths or previous is not None and previous >= path:
+                    raise ValueError("snapshot node paths are invalid")
+                paths.add(path)
+                if links:
+                    leaves.add(path)
+                previous = path
+        for path in paths:
+            components = path.split("/")
+            if any("/".join(components[:depth]) in leaves for depth in range(1, len(components))):
+                raise ValueError("snapshot node parent is not a directory")
         if expanded != candidate["expandedSizeBytes"]:
             raise ValueError("snapshot expanded size does not match descriptor")
         document = manifest
-        if canonical_order:
+        if canonical_order or schema == "workspace.snapshot.v2":
             document = {"schema": manifest["schema"], "files": [
                 {name: file[name] for name in ["path", "sizeBytes", "sha256", "executable"]}
                 for file in files]}
+            if schema == "workspace.snapshot.v2":
+                document["directories"] = directories
+                document["symlinks"] = [{"path": link["path"], "target": link["target"]} for link in symlinks]
         canonical = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if canonical != manifest_bytes:
             raise ValueError("snapshot manifest is not canonical")
     except (TypeError, ValueError) as error:
         raise SnapshotValidationError(str(error)) from error
     return manifest
+
+
+def _node_path(path):
+    validate_virtual_path(path)
+    if len(path.encode("utf-8")) > MAX_PATH_BYTES or len(path.split("/")) > MAX_PATH_DEPTH:
+        raise ValueError("snapshot node path is invalid")
 
 
 class _StoredReader:

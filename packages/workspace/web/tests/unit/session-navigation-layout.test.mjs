@@ -15,7 +15,7 @@ const appLoader = subjectLoader({ extraOverrides: [
   ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useId} from ${JSON.stringify(harness)}; import {useEffect} from ${JSON.stringify(harness)}; export const useLayoutEffect=useEffect; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,getSnapshot)=>getSnapshot();`)],
   ["../chat/operationReceipts", stub("export class OperationClient {pending(){return null;}} export const acceptedConversationReviewLink=()=>null; export const consumeReviewedOperation=()=>{}; export const isDefiniteSubmissionRejection=()=>false; export const isWorkspacePreservationPending=()=>false; export const loadAcceptedConversation=()=>{};")],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
-  ["../chat/transcriptTransport", stub("export const createWorkspaceTranscriptTransport=()=>({});")],
+  ["../chat/transcriptTransport", stub("export const createWorkspaceTranscriptTransport=()=>({loadActiveAgentRun:async()=>({agentRun:null})});")],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.presentation?.(options)??new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));`)],
   ...["../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(specifier => [specifier, stub(`export const ${specifier.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
@@ -157,5 +157,31 @@ test("pushed workspace navigation updates sessions without rereading the list or
     props.presentationNavigation = [{ ...item, title: "Renamed by stream" }]; await subject.settle();
     assert.equal(nodes(subject.tree, node => node.type.name === "ShellSidebar")[0].props.recentNavigation.sessions[0].title, "Renamed by stream");
     assert.equal(calls.length, 1);
+  } finally { subject.unmount(); }
+});
+
+
+test("floating chats suppress the context sidebar and restore it when expanded", async context => {
+  const previousStorage = globalThis.sessionStorage;
+  globalThis.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  context.after(() => { globalThis.sessionStorage = previousStorage; });
+  const previousWindow = globalThis.window;
+  globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
+  context.after(() => { globalThis.window = previousWindow; });
+  const env = environment({ request: async path => path.includes("session-projects") ? { projects: [] } : path.includes("models") ? { models: [] } : { sessions: [session] } });
+  const props = { initialSession: session, workspaceDraft: false, location: env.location, modelsVersion: 0, chatFloating: false };
+  const subject = renderer(AppPageContent, props, env);
+  try {
+    await subject.settle();
+    component(subject.tree, "TranscriptBlockList").props.onOpenSubagent({ id: "child", description: "Child task" }, { elementId: "child-trigger" });
+    await subject.settle();
+    assert.equal(component(subject.tree, "WorkspaceContextPanel").props.open, true);
+    props.chatFloating = true; await subject.settle();
+    assert.equal(component(subject.tree, "WorkspaceContextPanel"), undefined);
+    component(subject.tree, "TranscriptBlockList").props.onOpenSubagent({ id: "other", description: "Other task" }, { elementId: "other-trigger" });
+    await subject.settle();
+    assert.equal(component(subject.tree, "WorkspaceContextPanel"), undefined, "content actions cannot open the sidebar inside a floating chat");
+    props.chatFloating = false; await subject.settle();
+    assert.equal(component(subject.tree, "WorkspaceContextPanel").props.open, true);
   } finally { subject.unmount(); }
 });

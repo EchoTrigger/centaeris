@@ -336,6 +336,96 @@ remaining `runtime.await_question.v1` wait. Those old records have no authoritat
 question body to copy; they must be resolved or reconstructed from authoritative
 records before upgrading. New pending records use `runtime.await_question.v2`.
 
+## Workspace Issues
+
+Issues are durable Workspace business records. Django owns their fields and
+change history; Agent Run execution and Session events retain their separate
+contracts. Completing a Run does not complete an Issue. These routes do not
+create Runs, Reviews or business Projects. Assignment and status events create
+personal Inbox notifications in the same transaction.
+
+All Issue routes require a signed-in current member of an active Workspace.
+Owner, admin and member roles can create and edit records in that Workspace.
+An Issue identifier does not grant access across Workspaces. Mutation requests
+use the existing browser CSRF contract. Assignees must be current members of
+the same Workspace; `null` clears the assignment.
+
+| Action | Method and path | Input / response |
+| --- | --- | --- |
+| List Issues | `GET /api/workspaces/{workspaceId}/issues` | `mine`, `archived`, `limit`, `offset`; `{issues, total}` |
+| Create Issue | `POST /api/workspaces/{workspaceId}/issues` | `title`, optional `description`, `status`, `assigneeId`; HTTP 201 `{issue}` |
+| Read Issue | `GET /api/workspaces/{workspaceId}/issues/{issueId}` | `{issue}` |
+| Edit or archive Issue | `PATCH /api/workspaces/{workspaceId}/issues/{issueId}` | Required `version`; optional `title`, `description`, `status`, `assigneeId`, `archived`; `{issue}` |
+| Read activity | `GET /api/workspaces/{workspaceId}/issues/{issueId}/events` | `limit`, `offset`; `{events, total}` |
+| List assignees | `GET /api/workspaces/{workspaceId}/issues/assignees` | `{assignees: [{id, name}]}` |
+
+An Issue contains `id`, `workspaceId`, `title`, `description`, `status`,
+`assigneeId`, `creatorId`, `version`, `archivedAt`, `createdAt` and `updatedAt`.
+Timestamps use ISO 8601. `assigneeId` and `archivedAt` can be null. Status is one
+of `backlog`, `todo`, `inProgress`, `done`, `canceled`; creation defaults to
+`todo`, an empty description and no assignee. Titles must be nonblank after
+trimming and at most 240 characters. Unknown input fields are rejected.
+
+List requests default to unarchived records and 50 results from offset zero.
+`mine=true` selects records assigned to the signed-in user; `archived=true`
+selects archived records only. Lists sort by update time descending, then ID.
+Archive and restore retain the record and its history; there is no hard-delete
+endpoint.
+
+A successful change increments `version` and writes an immutable Issue event
+in the same database transaction. A stale version returns HTTP 409 without
+changing the record or history. A patch that changes no values creates no event
+and does not increment the version. Events carry `id`, `issueId`, `actor`
+(`id`, `name`), `type`, `changes` and `createdAt`. Types are `created`, `updated`,
+`archived`, `restored`; changes map each affected field to `{before, after}`.
+The activity endpoint returns chronological events with deterministic ordering.
+No API permits editing or deleting an event.
+
+Web Issues and My issues use these records and URL-selected details. Browser
+refresh and navigation reload authoritative records; local browser storage is
+not the business-data store.
+
+## Personal Inbox notifications
+
+Inbox notifications are durable per-recipient projections of Issue events.
+Creating an Issue with an assignee, or assigning an existing Issue, notifies the
+new assignee. Status changes notify the creator and current assignee. The actor
+and users without current Workspace membership are excluded. When both rules
+select the same recipient for the same event, one notification is stored, with
+assignment taking precedence. Title-only edits, archive/restore and no-op edits
+do not create notifications. Existing historical events are not backfilled.
+
+Issue changes, their event and recipient notifications commit together. Each
+notification retains the event reference and the Issue title at creation.
+The database enforces one notification per event and recipient. Notifications
+have independent read and archive timestamps; archiving a notification never
+archives its Issue or changes another recipient's Inbox.
+
+| Action | Method and path | Input / response |
+| --- | --- | --- |
+| List own notifications | `GET /api/workspaces/{workspaceId}/notifications` | `view`, `limit`, `offset`; `{notifications, total, unreadCount}` |
+| Read own notification | `GET /api/workspaces/{workspaceId}/notifications/{notificationId}` | `{notification}` |
+| Update receipt | `PATCH /api/workspaces/{workspaceId}/notifications/{notificationId}` | One or both of `read`, `archived` as booleans; `{notification}` |
+
+`view` accepts `inbox` (default, unarchived), `unread` (unarchived and unread),
+or `archived`. Lists sort newest first with an ID tiebreak. Pagination defaults
+to 50 rows and offset zero, with a maximum limit of 100. `unreadCount` counts all
+unarchived unread notifications for this recipient in this Workspace.
+
+A notification contains `id`, `workspaceId`, `issueId`, `issueTitle`, `kind`,
+`event`, `readAt`, `archivedAt` and `createdAt`. `kind` is `assigned` or
+`statusChanged`; `event` uses the existing Issue event representation.
+Receipt timestamps are generated by the server. Repeating an already-applied
+boolean state preserves its timestamp. Empty, null and unknown patch fields are
+rejected. All endpoints require current active Workspace membership and restrict
+records to the signed-in recipient, including for Workspace administrators.
+Mutations use the browser CSRF contract.
+
+Web Inbox replaces sample notifications with these records. Selection and
+filters live in the URL; acknowledgement changes appear after server acceptance.
+Reloading or returning focus fetches current notifications. The linked Issue
+keeps a return destination to the originating Inbox selection and filter.
+
 ## Hosted command acceptance
 
 `POST /api/workspaces/{workspaceId}/sessions` (`createSession`) and
@@ -634,6 +724,15 @@ domain `workspace:agent-run-authorization:v2`, signing `environmentProfile` and
 records are preserved by explicit migrations. Administrators configure defaults through
 `GET/PATCH /api/workspaces/{workspaceId}/environment-settings`; see
 [environment network policy](../architecture/EnvironmentNetwork.md).
+GET returns, for example,
+`{"network":"disabled","cpuMilli":2000,"memoryBytes":4294967296,"workspaceBytes":10737418240,"revision":2}`.
+PATCH accepts any nonempty subset of the four policy fields; `revision` is not
+writable. CPU uses positive integer milli-cores through `4294967295`. Memory
+and workspace space use positive integer bytes through `9007199254740991`.
+Nulls, booleans, fractional values and unknown fields are rejected. Only an
+actual policy change advances the revision. Workspace space is a data budget,
+not a live filesystem quota. Existing environment and authorization snapshots
+remain unchanged.
 Knowledge processing
 specifications use the immutable Centaeris processor version `1.0.0`.
 
@@ -895,3 +994,163 @@ through their existing authenticated download endpoints.
 The response carries `resultRef`, `resultSha256`, and `continuation` (either null or an exact `tool` / `arguments` pair). `read_material_result(result_ref, cursor)` retrieves the next page of the same saved result. Treat its cursor as opaque. It does not rerun a search. When a document window is exhausted, continuation can point to `read_material` with the next zero-based line offset. Single long lines are paged at UTF-8 character boundaries. Only the returned content is eligible for a citation.
 
 Snapshots remain with the source SessionEvent and survive API/runtime restarts. Every continuation rechecks the current run's source permissions, generation, processing identity, and session ownership. Corrupt snapshots, revoked access, and invalid cursors fail explicitly; they are not reported as a successful partial result. Existing citation projections are retained during the schema migration. Roll out API migrations and the matching Runtime tool catalog together, after active runs drain.
+
+## Workspace guide
+
+`GET /api/workspaces/{workspaceId}/guide` returns
+`{ "guide": { "dismissed": false, "steps": [{ "id": "materials", "completed": false }] } }`.
+Owners and administrators receive steps in this order: `models`, `materials`,
+`plugins`, `connections`, `conversation`, `issue`. Members receive `materials`,
+`conversation`, `issue`. Both methods require browser session authentication and
+current membership in an active workspace; missing membership returns
+`404 workspace_not_found`, including for platform operators.
+
+`PATCH` on the same URL accepts `dismissed` and/or `manualSteps` (for example
+`{ "manualSteps": { "materials": false } }`) and requires CSRF. It returns the
+same envelope. Unknown fields or step IDs, query parameters, empty requests and
+non-boolean values are rejected. Members cannot change administrator-only steps.
+Manual values, including false, persist and override automatic completion. The user is
+always the authenticated recipient. Dismissal persists independently for each
+user/workspace and survives application updates. Repeated identical PATCHes
+preserve the dismissal timestamp. GET never creates a state record.
+
+Completion is recomputed from authoritative records:
+
+- `models`: a current, enabled workspace model with an enabled, unarchived
+  provider and a saved provider credential; diagnostic models do not count.
+- `materials`: a non-deleted personal file/image owned by the recipient, or a
+  non-deleted file in a ready workspace source that the recipient may read.
+  Owner/admin source access and member group grants follow existing source rules.
+- `plugins`: an installed, enabled package with readable, valid package and
+  connector metadata.
+- `connections`: an installed service whose declaration requires no credentials,
+  or whose required credential is saved in this workspace. This indicates
+  configuration only; no live service connection is tested.
+- `conversation`: an interactive AgentRun by the recipient in an active session
+  they own in this workspace. Empty sessions and Agent Run API sessions do not count.
+- `issue`: an issue created by the recipient in this workspace.
+
+Invalid package metadata returns `503 plugin_catalog_invalid`; an enablement
+without an installation returns `409 workspace_plugin_enablement_invalid`.
+Failed completion checks or persistence do not acknowledge a dismissal.
+
+
+## Issue executions
+
+`POST /api/workspaces/{workspaceId}/issues/{issueId}/executions` accepts strict
+`{operationId, version, modelConfigRef, thinkingMode?, instructions?}` and returns the existing
+202 hosted operation receipt (`submitMessage`, `sessionId`, `agentRunId`, `turnId`).
+It requires browser authentication, CSRF and current workspace membership. Issue
+version conflicts and archived Issues reject new acceptance. Replaying accepted
+input returns its original receipt despite later Issue edits; changed input
+conflicts. The immutable Issue snapshot, caller-owned interactive Session,
+AgentRun, authorization and receipt commit together. The shared message admission
+path owns execution and lifecycle scheduling. Issue status is not completed by
+starting or finishing an AgentRun.
+
+`GET` on the same URL accepts `limit` and `offset`, returning `{executions,total}`.
+Each entry contains `id`, `sessionId`, `agentRunId`, `latestAgentRunId`, `title`,
+`status`, `waitingForInput`, `createdAt`. `agentRunId` identifies the immutable
+initial execution; status and `latestAgentRunId` describe the latest Run in the
+same conversation. `waitingForInput` reuses the current Runtime question authority
+and response receipt; a historical pause event does not establish a current wait.
+Only the requesting user's accessible active, unarchived linked conversations are
+returned. Issue visibility does not grant access to another member's transcript.
+
+Execution creation also accepts optional `instructions`, at most 8192 characters,
+appended to the accepted Issue context. Empty instructions preserve the existing
+operation identity. Ordinary follow-up messages and question responses use the
+existing conversation endpoints, retaining the same Session and Issue origin.
+Agent results are readable through the linked execution without submitting a
+deliverable. Sharing a selected result remains an optional separate action.
+
+`GET /api/workspaces/{workspaceId}/sessions/{sessionId}/issue-origin` returns
+`{origin:{issueId,executionId,title}}`, or `{origin:null}` for an unrelated or no
+longer visible Issue. It requires browser authentication, current membership and
+an owned active, unarchived interactive Session. The title is read from the
+currently visible Issue, not from an old snapshot. Web uses this origin to return
+to the Issue and expand the corresponding execution's results after refresh.
+
+## Workspace model defaults
+
+`GET /api/workspaces/{workspaceId}/model-defaults` returns
+`{defaults:{titleModelConfigRef:null,titleThinkingMode:"low"}}` when unconfigured.
+`PATCH` accepts those two fields and returns the same envelope. Both operations
+require current owner/admin membership and browser authentication; PATCH also
+requires CSRF. References must select an available authorized current model and
+supported reasoning mode. Stored selection follows the same model family's
+revisions, never a different model or provider. Web exposes one optional
+**Default purpose** selector, using low reasoning (or no reasoning for models
+without that capability), independently of chat preferences.
+
+Null selection creates no title job or provider call. The first accepted message
+can create one asynchronous job after commit; it reads at most 2048 characters
+from that prompt, has no tools, and preserves its language/script. Queue wait and
+model generation share the ten-second deadline. Expiry or failure retains the
+initial title. Clearing the selection, losing authority or manually renaming the
+session prevents pending publication. Successful title publication updates the
+existing navigation stream without changing session ordering. Existing named
+sessions are protected by the forward migration.
+
+The title worker runs `celery -A api.title_queue:app worker -Q session_titles`,
+using `MATERIAL_BROKER_URL` and its own queue. `SESSION_TITLE_TIMEOUT_SECONDS`
+defaults to 10. It requires the same database and credential-encryption settings
+as the API; it does not start agent execution environments.
+Outcome logs include the job ID, status, reason, queue wait and processing time;
+failures include the exception class and HTTP status when available. Prompts,
+generated titles, credentials and raw provider errors are excluded.
+
+## Workspace work forms and submitted results
+
+`GET /api/workspaces/{workspaceId}/issue-templates` lists installed forms.
+Owner/admin members can install one with `POST`, supplying `key`, `name` and a
+strict `definition`. Definitions support text, textarea, date, decimal money and
+bounded item lists, required fields, money minima and date ordering. Business
+definitions are Workspace data, not built-in financial policy. Issue creation
+accepts `templateKey` and `properties`, captures the definition revision, validates
+the values and derives record visibility. Later edits use that captured definition.
+`participants` records are visible only to their creator and current assignee;
+ordinary records retain Workspace visibility. Listing, activity, notifications,
+material links and execution entry points use the same record visibility.
+Execution prompts include the captured form and its instructions.
+
+`GET /api/workspaces/{workspaceId}/issues/{issueId}/deliverables` lists submissions
+visible to the caller. `POST` accepts `version`, `executionId`, `agentRunId`,
+`summary`, selected `artifactIds`, `recipientId` and optional `replacesId`.
+The caller must own the linked execution and its Run; selected artifacts must be
+published current files from that Run. A submission captures immutable summary,
+file identities, recipient and revision. A replacement preserves author and
+recipient. Participants-only records restrict recipients to their participants.
+
+`POST .../deliverables/{deliverableId}/responses` accepts `version`, `action`
+(`feedback` or `accept`) and `text`. Feedback requires text; acceptance belongs
+to the recipient. Replaced submissions cannot receive new responses. These
+operations advance the Issue version and notify the other participant without
+marking the Issue done. Concurrent writes return a version conflict.
+
+`GET .../deliverables/{deliverableId}/artifacts/{artifactId}` checks current
+membership, record visibility, submission author/recipient and captured file
+identity before streaming. Sharing a submission grants no access to the private
+execution conversation or its unselected files. Deleted or changed files are
+unavailable. Artifact references do not create a new independent file copy.
+
+## Authorized browser resource search
+
+`GET /api/workspaces/{workspaceId}/search?query=...&limit=20&cursor=...` searches
+current personal materials, granted Workspace source objects and summaries
+explicitly submitted to the caller. Responses contain `matches` (`id`, `kind`,
+`title`, bounded `snippet`, `href`) and `nextCursor`. Cursors bind caller,
+Workspace, query and page size. Every page checks current authorization.
+Existing private conversation search remains a separate authorized endpoint.
+
+Body matches use existing `DerivedRepresentation` and `KnowledgeSegment` data
+bound to the owner's current content generation and hash. Unindexed objects can
+match names; search neither scans original files nor creates an Agent Run or a
+synchronous extraction task. Submitted summaries retain their explicit audience.
+
+`GET /api/workspaces/{workspaceId}/search/materials/{kind}/{objectId}` accepts
+optional `representationId` and `offset`. It rechecks membership, ownership or
+source grants and current content identity, then reads verified canonical text.
+Pages contain at most 200 lines and 50 KiB, with `nextOffset`. Search links carry
+real segment line offsets where available. Stale versions, denied sources and
+missing representations are rejected rather than rendered from a cached result.

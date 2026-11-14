@@ -113,7 +113,14 @@ mod tests {
         let path = root.join("mcp/tools.json");
         fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
         assert!(build_catalog(std::slice::from_ref(&root)).is_ok());
-        for field in ["description", "inputSchema", "modelContractDigest"] {
+        for (field, expected_error) in [
+            ("description", "missing field `description`"),
+            ("inputSchema", "missing field `inputSchema`"),
+            (
+                "modelContractDigest",
+                "MCP pinned tools require modelContractDigest",
+            ),
+        ] {
             let mut invalid = valid.clone();
             let server = &mut invalid["servers"][0];
             let object = if field == "modelContractDigest" {
@@ -124,9 +131,8 @@ mod tests {
             object.as_object_mut().unwrap().remove(field);
             fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
             assert!(build_plugin_activation_snapshot(std::slice::from_ref(&root)).is_ok());
-            assert!(build_catalog(std::slice::from_ref(&root))
-                .unwrap_err()
-                .contains(&format!("missing field `{field}`")));
+            let error = build_catalog(std::slice::from_ref(&root)).unwrap_err();
+            assert!(error.contains(expected_error), "{field}: {error}");
         }
         let mut tampered = valid;
         tampered["servers"][0]["tools"][0]["description"] = "Changed without repinning.".into();

@@ -15,6 +15,18 @@ pub const PREPARED_PROMPT_SCHEMA: &str = "prepared_prompt.v1";
 pub const MODEL_INPUT_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 pub const MODEL_INPUT_IMAGE_MAX_PIXELS: u64 = 100_000_000;
 
+/// Verify bytes at the immutable image-store ingestion boundary.
+pub fn validate_model_input_image_content(digest: &str, bytes: &[u8]) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    if bytes.is_empty()
+        || bytes.len() > MODEL_INPUT_IMAGE_MAX_BYTES
+        || digest != format!("sha256:{:x}", Sha256::digest(bytes))
+    {
+        return Err("model_input_image_content_identity_mismatch".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelMessageRoleV1 {

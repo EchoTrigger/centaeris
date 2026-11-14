@@ -383,6 +383,7 @@ test("active AgentRun discovery is bound to the page waterline", async () => {
       return new Response(JSON.stringify({
         schema: "workspace.transcript.active_agent_run.v1",
         sessionId,
+        pendingSupplements: [{ supplementId: "accepted-input", message: "直接交付" }],
         agentRun: {
           agentRunId: "run:1",
           status: "running",
@@ -398,6 +399,7 @@ test("active AgentRun discovery is bound to the page waterline", async () => {
     sourceHighWater: "10",
   }, new AbortController().signal);
   assert.equal(active.agentRun.agentRunId, "run:1");
+  assert.deepEqual(active.pendingSupplements, [{ supplementId: "accepted-input", message: "直接交付" }]);
   assert.deepEqual(paths, [
     `/api/sessions/${sessionId}/transcript/active-agent-run?sourceHighWater=10`,
   ]);
@@ -408,10 +410,25 @@ test("current queued Run discovery works before a transcript page is available",
   const transport=createWorkspaceTranscriptTransport({request:async path=>{
     paths.push(path);
     return new Response(JSON.stringify({schema:"workspace.transcript.active_agent_run.v1",sessionId,
-      agentRun:{agentRunId:"queued-run",status:"queued",streamCursor:"cursor:0"}}));
+      pendingSupplements: [], agentRun:{agentRunId:"queued-run",status:"queued",streamCursor:"cursor:0"}}));
   }});
   const result=await transport.loadActiveAgentRun({sessionId,sourceHighWater:"0"},new AbortController().signal);
   assert.equal(result.agentRun.agentRunId,"queued-run");
   assert.equal(result.agentRun.status,"queued");
   assert.deepEqual(paths,[`/api/sessions/${sessionId}/transcript/active-agent-run?sourceHighWater=0`]);
+});
+
+test("active Run discovery rejects unbound, duplicate, and malformed restored Steer", async () => {
+  const entry = { supplementId: "accepted", message: "Keep this input" };
+  const base = { schema: "workspace.transcript.active_agent_run.v1", sessionId,
+    agentRun: { agentRunId: "run:1", status: "running", streamCursor: "cursor:0" }, pendingSupplements: [entry] };
+  for (const envelope of [
+    { ...base, agentRun: null },
+    { ...base, pendingSupplements: [entry, entry] },
+    { ...base, pendingSupplements: [{ ...entry, status: "received" }] },
+    { ...base, pendingSupplements: [{ ...entry, message: "" }] },
+  ]) {
+    const transport = createWorkspaceTranscriptTransport({ request: async () => Response.json(envelope) });
+    await assert.rejects(transport.loadActiveAgentRun({ sessionId, sourceHighWater: "0" }, new AbortController().signal));
+  }
 });

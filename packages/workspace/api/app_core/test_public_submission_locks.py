@@ -198,6 +198,13 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
                 self.assertEqual((AgentRun.objects.count(), AgentRunAuthorization.objects.count(),
                     HostedOperationReceipt.objects.count()), counts)
 
+                AgentRun.objects.filter(pk=run.pk).update(transitionReason="workspace_preservation_blocked")
+                blocked = self.submit(client, session=target.pk, operation=operation)
+                self.assertEqual((blocked.status_code, blocked.json()),
+                    (409, {"error": "session_workspace_preservation_blocked"}))
+                self.assertEqual((AgentRun.objects.count(), AgentRunAuthorization.objects.count(),
+                    HostedOperationReceipt.objects.count()), counts)
+
                 identity = {'started': Event()}
                 with ThreadPoolExecutor(max_workers=1) as pool:
                     with transaction.atomic(), connection.cursor() as cursor:

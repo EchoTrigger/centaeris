@@ -104,7 +104,7 @@ function ArchivedSessions({ workspace, returnTo }) {
           <button type="button" className="pluginEnableButton" disabled={Boolean(busy)} aria-label={t("archive.restoreTitle", { title: session.title })}
             onClick={() => void restore(session)}>{t("archive.restore")}</button>
         </li>)}
-      </ul> : <div className="settingsPanel" role="status">{t("archive.empty")}</div>}
+      </ul> : null}
     <ConfirmDialog open={Boolean(deleteTarget)} title={t(deleteTarget?.all ? "archive.confirmDeleteAll" : "appRoute.deleteThisConversation")}
       message={t(deleteFailed ? deleteErrorMessage : "archive.deleteConfirmDescription")}
       confirmLabel={t("appRoute.delete")} popupClassName="settingsArchiveConfirm" busy={Boolean(busy)}

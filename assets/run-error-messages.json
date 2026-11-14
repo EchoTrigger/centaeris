@@ -1,5 +1,9 @@
 {
   "messages": {
+    "workspace_snapshot_failed": {
+      "translationKey": "modelErrors.workspaceSnapshotFailed",
+      "english": "The workspace could not be saved. Its environment is retained for recovery; completed commands will not be repeated automatically."
+    },
     "provider_authentication_failed": {
       "translationKey": "modelErrors.authenticationFailed",
       "english": "Model account authentication failed. Update its API key and retry."

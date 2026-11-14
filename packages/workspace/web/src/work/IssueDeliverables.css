@@ -1,0 +1,22 @@
+.issueDeliverables { display:grid; gap:10px; margin-block:24px; min-width:0; }
+.issueDeliverables > h2 { font-size:14px; font-weight:500; margin:0 0 2px; }
+.issueDeliverableCard { display:grid; gap:12px; min-width:0; padding:14px; border:0; border-radius:8px; background:var(--surface-raised); scroll-margin-top:16px; }
+.issueDeliverableCard > header,.issueDeliverableResponses li > div { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px; color:var(--process-text); }
+.issueDeliverableCard strong { font-weight:500; }
+.issueDeliverableCard > header time,.issueDeliverableResponses time { margin-left:auto; }
+.issueDeliverableCard p { overflow-wrap:anywhere; }
+.issueDeliverableFiles,.issueDeliverableResponses { display:grid; gap:8px; list-style:none; padding:0; margin:0; }
+.issueDeliverableFiles a { overflow-wrap:anywhere; }
+.issueDeliverableResponses li { display:grid; gap:6px; }
+.issueDeliverableResponses p { white-space:pre-wrap; margin:0; }
+.issueDeliverableActions,.issueDeliverableForm footer { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+.issueSubmitDeliverable { display:inline-flex; align-items:center; justify-content:center; min-height:32px; padding:6px 12px; border:0; border-radius:6px; background:var(--solid-surface); color:var(--solid-text); font-size:13px; }
+.issueSubmitDeliverable:hover { opacity:.9; }
+.issueDeliverableForm { display:grid; gap:14px; min-width:0; padding-block:12px; font-size:14px; }
+.issueDeliverableForm > label { display:grid; gap:6px; }
+.issueDeliverableForm select { width:100%; min-width:0; min-height:32px; border:0; border-radius:6px; padding:6px 8px; color:var(--on-surface); background:var(--surface-input); font:inherit; }
+.issueDeliverableForm fieldset { display:grid; gap:8px; min-width:0; padding:0; border:0; }
+.issueDeliverableForm legend { margin-bottom:8px; }
+.issueDeliverableFile { display:flex; align-items:center; gap:8px; }
+.issueDeliverableFile span { overflow-wrap:anywhere; min-width:0; }
+.issueDeliverableFile input { width:14px; height:14px; min-height:0; flex:none; margin:0; accent-color:var(--process-text); }

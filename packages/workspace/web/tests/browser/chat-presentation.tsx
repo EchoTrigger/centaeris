@@ -100,7 +100,7 @@ try {
   render(<AnimatedDisclosure key="history" expanded><Detail /></AnimatedDisclosure>);
   check("history does not replay entry animation", host.getAnimations({ subtree: true }).length, 0);
 
-  const progress = (finalStarted: boolean, key = "turn") => <WorkProgress key={key} running={!finalStarted} finalStarted={finalStarted}><p>Process</p></WorkProgress>;
+  const progress = (finalStarted: boolean, key = "turn") => <WorkProgress hasProcess key={key} running={!finalStarted} finalStarted={finalStarted}><p>Process</p></WorkProgress>;
   render(progress(false));
   check("running WorkProgress uses body type", getComputedStyle(host.querySelector(".workProgressStatus")!).fontSize, "14px");
   render(progress(true));
@@ -117,11 +117,22 @@ try {
     const [open, setOpen] = useState(false);
     return <button aria-expanded={open} onClick={() => setOpen(!open)}>Thoughts</button>;
   }
-  const reading = (finalStarted: boolean) => <WorkProgress key="reading" running={!finalStarted} finalStarted={finalStarted}><ReadingDetail /></WorkProgress>;
+  const reading = (finalStarted: boolean) => <WorkProgress hasProcess key="reading" running={!finalStarted} finalStarted={finalStarted}><ReadingDetail /></WorkProgress>;
   render(reading(false));
   flushSync(() => (host.querySelector("button") as HTMLButtonElement).click());
   render(reading(true));
   check("final answer preserves actively opened details", host.querySelector(".workProgressSummary")?.getAttribute("aria-expanded"), "true");
+
+  render(<WorkProgress key="final-only" hasProcess={false} running={false} finalStarted response={<p id="finalOnlyAnswer">Final answer</p>} />);
+  const finalOnlyHeight = host.getBoundingClientRect().height;
+  const answerTop = host.querySelector("#finalOnlyAnswer")!.getBoundingClientRect().top;
+  const header = host.querySelector<HTMLElement>(".workProgressHeader")!;
+  check("final-only response has no expansion control", host.querySelector("button[aria-expanded]"), null);
+  check("work header has no divider", getComputedStyle(header).borderBottomWidth, "0px");
+  header.click();
+  await finishAnimations();
+  check("clicking a final-only work label preserves height", host.getBoundingClientRect().height, finalOnlyHeight);
+  check("clicking a final-only work label preserves answer position", host.querySelector("#finalOnlyAnswer")!.getBoundingClientRect().top, answerTop);
 
   const preview = (open: boolean) => <div className="workspaceWorkbench withSidebar" style={{ "--workspace-preview-progress": open ? 1 : 0 } as React.CSSProperties}><div className="workspaceChatColumn" /><WorkspaceContextPanel
     panel={open ? { mode: "filePreview", status: "ready", displayName: "Evidence.txt", preview: { kind: "text", content: "Evidence", contentType: "text/plain" } } : { mode: "closed" }}

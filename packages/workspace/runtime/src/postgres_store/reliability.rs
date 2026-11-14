@@ -127,12 +127,24 @@ impl PostgresRuntimeStore {
         job_kinds: &[String],
         max_wait: Duration,
     ) -> Result<RuntimeJobWaitResult, String> {
+        self.wait_for_runtime_jobs_observed(job_kinds, max_wait, || {})
+    }
+
+    pub(crate) fn wait_for_runtime_jobs_observed(
+        &self,
+        job_kinds: &[String],
+        max_wait: Duration,
+        on_wake: impl Fn() + Sync,
+    ) -> Result<RuntimeJobWaitResult, String> {
         self.with_listener_client(|client| {
             let max_wait = super::remaining_request_time()?
                 .map_or(max_wait, |remaining| max_wait.min(remaining));
             client
                 .batch_execute("LISTEN runtime_job_ready_v1")
                 .map_err(|error| format!("listen for Postgres runtime jobs failed: {error}"))?;
+            // Also wake local control/child consumers after (re)registration.
+            // They inspect durable rows; notifications carry no authority.
+            on_wake();
             let deadline = Instant::now() + max_wait;
             loop {
                 let (now_ms, next_run_at_ms) = next_runtime_job(
@@ -164,13 +176,16 @@ impl PostgresRuntimeStore {
                     .unwrap_or(remaining);
                 // A timeout or disconnect returns no notification. Re-querying either
                 // observes due work or exposes the broken connection to the worker.
-                let _ = client
+                let notification = client
                     .notifications()
                     .timeout_iter(remaining.min(until_next_job))
                     .next()
                     .map_err(|error| {
                         format!("wait for Postgres runtime job notification failed: {error}")
                     })?;
+                if notification.is_some() {
+                    on_wake();
+                }
             }
         })
     }

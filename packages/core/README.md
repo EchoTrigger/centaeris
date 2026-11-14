@@ -38,5 +38,5 @@ quality policy.
 ## License
 
 Copyright (C) 2026 EchoTrigger. Original source code and documentation in this
-package are licensed under Apache-2.0; see [LICENSE](LICENSE). Third-party
+package are licensed under AGPL-3.0-only; see [LICENSE](LICENSE). Third-party
 materials retain their stated licenses and notices.

@@ -496,6 +496,9 @@ pub struct EnvironmentTaskSnapshot {
     pub scope: EnvironmentTaskScope,
     pub state: EnvironmentTaskState,
     pub exit_code: Option<i32>,
+    /// Host-attested deadline termination; null when the cause is not known.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub timed_out: Option<bool>,
     pub cleanup_complete: bool,
     pub output_complete: bool,
 }
@@ -595,6 +598,26 @@ impl EnvironmentTaskResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_timeout_observation_is_required_nullable_and_never_inferred_from_exit_code() {
+        let mut value = serde_json::json!({
+            "taskId":"task", "operationId":"1:start", "scope":{"kind":"run","runId":"run"},
+            "state":"exited", "exitCode":124, "timedOut":null,
+            "cleanupComplete":true,"outputComplete":true
+        });
+        for observed in [None, Some(false), Some(true)] {
+            value["timedOut"] = serde_json::to_value(observed).unwrap();
+            let task: EnvironmentTaskSnapshot = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(task.timed_out, observed);
+            assert_eq!(task.exit_code, Some(124));
+            assert_eq!(serde_json::to_value(task).unwrap(), value);
+        }
+        value.as_object_mut().unwrap().remove("timedOut");
+        assert!(serde_json::from_value::<EnvironmentTaskSnapshot>(value.clone()).is_err());
+        value["timed_out"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<EnvironmentTaskSnapshot>(value).is_err());
+    }
+
     #[test]
     fn output_consumption_is_an_explicit_fenced_request_with_exact_fields() {
         let mut value = serde_json::json!({
@@ -843,6 +866,7 @@ mod tests {
             scope: scope.clone(),
             state: EnvironmentTaskState::Running,
             exit_code: None,
+            timed_out: None,
             cleanup_complete: false,
             output_complete: false,
         };

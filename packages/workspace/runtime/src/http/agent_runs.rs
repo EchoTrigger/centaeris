@@ -351,7 +351,7 @@ fn step_response(
 mod cleanup_receipt_http_tests {
     use super::*;
     #[test]
-    fn host_admission_busy_cleanup_is_an_exact_conflict_without_a_false_receipt() {
+    fn cleanup_errors_distinguish_capacity_waits_blocked_data_and_transient_failures() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         for (reason, expected_status, expected_code) in [
             ("environment_host_busy", 409, "environment_host_busy"),
@@ -398,6 +398,76 @@ mod cleanup_receipt_http_tests {
             ),
             (
                 "environment_host_transport_unavailable",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "stopped_workspace_node_unsupported",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "stopped_workspace_archive_path_rejected",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "stopped_workspace_logical_budget_exceeded",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "stopped_workspace_archive_unavailable",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "stopped_workspace_node_unsupported:untrusted-detail",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "stopped_input_inventory_invalid",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "stopped_input_inventory_schema_rejected",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "stopped_input_inventory_archive_invalid",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "stopped_input_inventory_path_rejected",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "stopped_workspace_profile_or_budget_rejected",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "stopped_workspace_mounted_root_rejected",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "snapshot manifest path is invalid",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "snapshot manifest link metadata is invalid",
+                422,
+                "workspace_preservation_blocked",
+            ),
+            (
+                "snapshot download is truncated",
                 503,
                 "retained_cleanup_unconfirmed",
             ),

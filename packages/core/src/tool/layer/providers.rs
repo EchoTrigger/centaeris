@@ -67,8 +67,27 @@ pub struct DynamicToolPendingPoll {
     pub spec: DynamicToolPollingSpec,
 }
 
+/// A request-boundary catalog refresh, absent for fixed providers.
+pub type DynamicToolCatalogFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<Option<Vec<crate::tool::DynamicToolContract>>, String>>
+            + Send
+            + 'a,
+    >,
+>;
+
 pub trait DynamicToolProvider: Send + Sync {
     fn provider_id(&self) -> &str;
+
+    /// Whether this provider owns a directory refreshed at model-request boundaries.
+    fn has_dynamic_catalog(&self) -> bool {
+        false
+    }
+
+    /// Returns the current validated directory, or None for a fixed provider.
+    fn refresh_catalog<'a>(&'a self) -> crate::tool::layer::DynamicToolCatalogFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
     fn execute<'a>(
         &'a self,
         req: DynamicToolProviderRequest,

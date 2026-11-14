@@ -2,6 +2,192 @@
 use super::retained_instance_tests as fixture;
 use super::*;
 
+fn preservation_target(store: &PostgresRuntimeStore, db: &mut Client) -> fixture::Run {
+    db.batch_execute("ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS \"transitionReason\" text NOT NULL DEFAULT ''; CREATE TABLE IF NOT EXISTS public.app_core_agentrunenvironmentrelease(agent_run_id text PRIMARY KEY,environment_id text NOT NULL,authorization_digest text NOT NULL,controller_epoch bigint NOT NULL); DELETE FROM public.app_core_agentrunenvironmentrelease").unwrap();
+    let run = fixture::run(store, db, "workspace-preservation-run", 3);
+    fixture::prepare(
+        store,
+        &run,
+        "execution-preservation",
+        &std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    )
+    .unwrap();
+    store
+        .session_log("ws_1".into(), "sess_1".into(), "preservation-test".into())
+        .commit_pre_admission_failure(
+            &run.original.agent_run_id,
+            &run.original.digest().unwrap(),
+            &run.fence,
+        )
+        .unwrap();
+    db.execute(
+        "UPDATE public.app_core_agentrun SET status='failed' WHERE id=$1",
+        &[&run.original.agent_run_id],
+    )
+    .unwrap();
+    db.execute("UPDATE public.app_core_sessionenvironment SET controller_purpose='cleanup' WHERE controller_run_id=$1", &[&run.original.agent_run_id]).unwrap();
+    run
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_workspace_preservation_blocks_automatic_claims_until_same_job_repair_retry() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (url, store, mut db) = fixture::setup();
+    let run = preservation_target(&store, &mut db);
+    let environment_before: String = db.query_one("SELECT row_to_json(e)::text FROM public.app_core_sessionenvironment e WHERE id='environment'", &[]).unwrap().get(0);
+    assert!(store
+        .block_workspace_preservation(&run.fence.job_id, "stale-owner")
+        .is_err());
+    assert!(store
+        .retry_workspace_preservation(&run.fence.job_id)
+        .is_err());
+    // The first failure may hold an execute lease; cleanup recovery holds a
+    // control lease. Both park only their own canonical terminal Job.
+    store
+        .block_workspace_preservation(&run.fence.job_id, &run.fence.lease_owner)
+        .unwrap();
+    let original = store.get_runtime_job(&run.fence.job_id).unwrap().unwrap();
+    assert_eq!(original.status, RuntimeJobStatus::Queued);
+    assert_eq!(
+        original.last_error.as_deref(),
+        Some("workspace_preservation_blocked")
+    );
+    assert!(original.lease_owner.is_none());
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.runtime_job_outbox WHERE job_id=$1",
+            &[&run.fence.job_id]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0,
+        "paused preservation is not a terminal Job fact"
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT \"transitionReason\" FROM public.app_core_agentrun WHERE id=$1",
+            &[&run.original.agent_run_id]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        "workspace_preservation_blocked"
+    );
+    drop(store);
+    let reopened = PostgresRuntimeStore::new(&url).unwrap();
+    assert!(!reopened.control_ready("cleanup").unwrap());
+    assert!(claim(&reopened, &run.fence.job_id, "cleanup").is_empty());
+    assert!(claim(&reopened, &run.fence.job_id, "advance").is_empty());
+    let invoke = |job_id: &str| {
+        crate::runtime_http_tests::stored_request(reopened.clone(), "POST", "/internal/jobs/control/retry-workspace-preservation", &serde_json::to_vec(&serde_json::json!({"schema":"runtime.job.workspace_preservation.retry.v1","jobId":job_id})).unwrap())
+    };
+    assert_eq!(invoke("worker.noop:other").0, 400);
+    assert_eq!(invoke("agent_run.lifecycle:foreign-run").0, 409);
+    let (status, body) = invoke(&run.fence.job_id);
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"jobId":run.fence.job_id,"disposition":"queued"})
+    );
+    let queued = reopened
+        .get_runtime_job(&run.fence.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (queued.retry_count, queued.max_retries),
+        (original.retry_count, original.max_retries)
+    );
+    assert_eq!(
+        invoke(&run.fence.job_id).0,
+        409,
+        "retry does not replay an acknowledgement"
+    );
+    let claimed = claim(&reopened, &run.fence.job_id, "cleanup");
+    assert_eq!(claimed.len(), 1);
+    let owner = claimed[0].lease_owner.as_ref().unwrap();
+    assert!(reopened
+        .require_execute_lease(&run.fence.job_id, owner)
+        .is_err());
+    reopened
+        .start_control_job(&run.fence.job_id, owner)
+        .unwrap();
+    assert!(reopened
+        .block_workspace_preservation(&run.fence.job_id, &run.fence.lease_owner)
+        .is_err());
+    reopened
+        .block_workspace_preservation(&run.fence.job_id, owner)
+        .unwrap();
+    assert!(claim(&reopened, &run.fence.job_id, "cleanup").is_empty());
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.runtime_jobs", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(db.query_one("SELECT controller_run_id,controller_released FROM public.app_core_sessionenvironment WHERE id='environment'", &[]).unwrap().get::<_, String>(0), run.original.agent_run_id);
+    assert!(!db.query_one("SELECT controller_released FROM public.app_core_sessionenvironment WHERE id='environment'", &[]).unwrap().get::<_, bool>(0));
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM public.app_core_agentrunenvironmentrelease",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(db.query_one("SELECT row_to_json(e)::text FROM public.app_core_sessionenvironment e WHERE id='environment'", &[]).unwrap().get::<_, String>(0), environment_before);
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.execution_instances", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM public.app_core_sessionevent", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_workspace_preservation_repair_rejects_changed_responsibility_and_live_leases() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    for invalid in [
+        "UPDATE public.app_core_sessionenvironment SET controller_released=true",
+        "UPDATE public.app_core_sessionenvironment SET controller_run_id='foreign-run'",
+        "UPDATE runtime.runtime_jobs SET status='running',lease_owner='unexpected-active-owner',lease_expires_at_ms=4000000000000",
+        "UPDATE runtime.runtime_jobs SET payload_ref='record:agent_run:foreign-run'",
+        "UPDATE public.app_core_agentrunauthorization SET digest='foreign-digest'",
+    ] {
+        let (_url, store, mut db) = fixture::setup();
+        let run = preservation_target(&store, &mut db);
+        store
+            .block_workspace_preservation(&run.fence.job_id, &run.fence.lease_owner)
+            .unwrap();
+        db.batch_execute(invalid).unwrap();
+        let before =
+            serde_json::to_value(store.get_runtime_job(&run.fence.job_id).unwrap()).unwrap();
+        assert!(
+            store
+                .retry_workspace_preservation(&run.fence.job_id)
+                .is_err(),
+            "must reject {invalid}"
+        );
+        assert_eq!(
+            serde_json::to_value(store.get_runtime_job(&run.fence.job_id).unwrap()).unwrap(),
+            before
+        );
+    }
+}
+
 fn claim(store: &PostgresRuntimeStore, id: &str, stage: &str) -> Vec<RuntimeJobRecord> {
     store
         .claim_control_jobs(

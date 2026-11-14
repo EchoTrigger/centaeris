@@ -177,11 +177,12 @@ source generation, consistency method and covered filesystem scopes. Read-only
 mounting alone does not establish a consistent point in time. Existing active
 writer checks remain until a tested replacement covers the same boundary.
 
-The deployed snapshot representation is the uncompressed
-`workspace.snapshot.v1` manifest-and-content frame. Tar plus zstd is the selected
-candidate representation, not an existing production codec. Introducing it
-requires explicit encoding identification and tested reads of retained v1
-snapshots; changing the writer does not migrate previously published objects.
+Snapshot transports identify their encoding explicitly: `frameV1`, `tarZstdV1`
+or `fileManifestV1`. New canonical `workspace.snapshot.v2` manifests retain
+regular files, directories and literal symlink targets; released v1 manifests
+remain readable without changing their stored byte identities. Transport names
+do not imply the manifest schema version. Changing the writer does not migrate
+previously published objects.
 
 Implement bounded streaming tar plus zstd
 from a supported consistent view through tar encoding and zstd compression,

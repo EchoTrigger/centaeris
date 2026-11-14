@@ -58,7 +58,10 @@ if args[0] == "sudo":
                   {"runtimeRoot": "/run/docker/runtime-runc/moby", "controllerUid": 0},
                   parent=pathlib.Path(os.environ["GATE_FIXTURE_BASE"]), startup_timeout=.4, stop_timeout=.4)
     raise SystemExit
-event = {"args": args}
+endpoint = "unix:///var/run/docker.sock"
+if args[0] == "--host":
+    endpoint, args = args[1], args[2:]
+event = {"args": args, "endpoint": endpoint, "childHost": os.environ.get("DOCKER_HOST")}
 def record():
     with open(os.environ["GATE_CALLS"], "a") as log:
         log.write(json.dumps(event) + "\n")
@@ -74,8 +77,8 @@ if args[0] == "compose":
         if not helper.is_absolute():
             raise SystemExit(78)
         if "--format" in args:
-            names = ["api", "document-processor", "runtime", "web", "platform-reconciler", "workspace-general"]
-            services = {name: {"build": {"context": os.environ["GATE_WORKSPACE_ROOT"]}} for name in names}
+            names = ["api", "document-processor", "postgres", "runtime", "web", "platform-reconciler", "workspace-general"]
+            services = {name: {"build": {"context": os.environ["GATE_WORKSPACE_ROOT"]}, "image": "built-" + name} for name in names}
             services["workspace-general"]["image"] = "built-workspace-general"
             services["runtime"]["depends_on"] = {"workspace-general": {}}
             services["material-worker"] = {"depends_on": {"document-processor": {}}}
@@ -99,15 +102,24 @@ if args[0] == "compose":
     elif args[0] == "build" and args[-1] == os.environ["GATE_FAIL"]:
         raise SystemExit(23)
     elif args[0] == "ps" and "--status" in args:
-        print("postgres\nredis\napi\nruntime\nplatform-reconciler\nmaterial-broker\nmaterial-worker\nmaterial-scheduler\nweb")
+        print("postgres\nredis\napi\nruntime\nplatform-reconciler\nmaterial-broker\nmaterial-worker\nmaterial-scheduler\ntitle-worker\nweb")
 else:
     event["action"] = args[0]
     record()
     if args[0] == "info":
         if "{{.Driver}}" in args:
             print("overlay2")
+        elif "{{json .DriverStatus}}" in args:
+            print(json.dumps([["Backing Filesystem", "xfs"], ["Supports d_type", "true"]]))
         else:
             print("fixture-daemon" if "{{.ID}}" in args else '{"runsc": {}}')
+    elif args[:2] == ["image", "save"]:
+        assert endpoint == "unix:///run/centaeris-builder/docker.sock"
+        assert args[2:] == ["built-" + name for name in ["postgres", "document-processor", "workspace-general", "runtime", "api", "web"]]
+        print("owned-image-archive")
+    elif args[:2] == ["image", "load"]:
+        assert endpoint == "unix:///var/run/docker.sock"
+        assert sys.stdin.read().strip() == "owned-image-archive"
     elif args[0] == "create":
         name = "owned-helper-container" if args[-1] == "built-workspace-general" else "owned-supervisor-container"
         pathlib.Path(args[args.index("--cidfile") + 1]).write_text(name)
@@ -121,6 +133,12 @@ else:
             assert args[1] == "owned-supervisor-container:/src/target/release/environment_host_supervisor"
             pathlib.Path(args[2]).write_text(os.environ["GATE_SUPERVISOR_SOURCE"])
     elif args[:2] == ["image", "inspect"]:
+        if os.environ["GATE_FAIL"] == "image-missing" and endpoint == "unix:///run/centaeris-builder/docker.sock":
+            print("builder image reference does not exist", file=sys.stderr)
+            raise SystemExit(67)
+        if "{{.Id}}" in args and os.environ["GATE_FAIL"] == "image-mismatch" and endpoint == "unix:///var/run/docker.sock":
+            print("different-runtime-image")
+            raise SystemExit
         print("AGPL-3.0-only" if "licenses" in args[args.index("--format") + 1] else "fixture-revision")
 '''
 
@@ -178,6 +196,7 @@ node() { printf '%s\\n' fixture-revision; }
         self.assertLess(max(i for i, action in enumerate(actions) if action == "build"), actions.index("create"))
         self.assertLess(actions.index("cp"), actions.index("up"))
         started = next(event for event in events if event["action"] == "up")
+        self.assertIn("--no-build", started["args"])
         self.assertIn("material-worker", started["args"])
         self.assertTrue(any(event["action"] == "ps" and "--status" in event["args"] for event in events))
         self.assertEqual([event["args"] for event in events if event["action"] == "rm"], [["rm", "-f", "owned-helper-container"], ["rm", "-f", "owned-supervisor-container"]])
@@ -199,10 +218,14 @@ node() { printf '%s\\n' fixture-revision; }
                 builds = [event for event in events if event["action"] == "build" and event["args"][0] == "compose"]
                 built = [event["args"][-1] for event in builds]
                 self.assertTrue(built)
+                self.assertEqual(built[0], "postgres")
                 self.assertEqual(len(built), len(set(built)))
                 for event in builds:
                     args = event["args"]
                     self.assertEqual(args[args.index("--parallel") + 1], "1")
+                    self.assertEqual(event["endpoint"], "unix:///run/centaeris-builder/docker.sock")
+                    self.assertEqual(event["childHost"], "unix:///run/centaeris-builder/docker.sock",
+                                     "Compose's Bake child must inherit the builder endpoint")
                 if fail:
                     self.assertEqual(result.returncode, 23, result.stderr)
                     self.assertEqual(built[-1], fail)
@@ -211,11 +234,35 @@ node() { printf '%s\\n' fixture-revision; }
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue(any(event["action"] == "up" for event in events))
+                    self.assertEqual(sum(event["args"][:2] == ["image", "save"] for event in events), 1)
+                    self.assertEqual(sum(event["args"][:2] == ["image", "load"] for event in events), 1)
+                    self.assertTrue(all(event["endpoint"] == "unix:///run/centaeris-builder/docker.sock"
+                                        for event in events if event["action"] == "build"))
 
     def test_release_gate_kills_and_reaps_unresponsive_supervisor(self):
         result, events = self._run_release_gate("supervisor-ignore-stop")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(sum(event["action"] == "down" for event in events), 1)
+
+    def test_transferred_image_mismatch_stops_before_startup(self):
+        result, events = self._run_release_gate("image-mismatch")
+        self.assertEqual(result.returncode, 66, result.stderr)
+        self.assertIn("runtime image differs", result.stderr)
+        self.assertFalse(any(event["action"] == "up" for event in events))
+
+    def test_missing_builder_image_stops_before_transfer_and_startup(self):
+        result, events = self._run_release_gate("image-missing")
+        self.assertEqual(result.returncode, 67, result.stderr)
+        self.assertIn("builder image reference does not exist", result.stderr)
+        self.assertFalse(any(event["args"][:2] in (["image", "save"], ["image", "load"])
+                             or event["action"] == "up" for event in events))
+
+    def test_storage_preparation_requires_disposable_runner_authorization(self):
+        result = subprocess.run(["bash", "scripts/workspace/prepare-ci-docker-storage.sh"], cwd=ROOT,
+                                env={**os.environ, "CENTAERIS_CI_DESTRUCTIVE_DOCKER": "0"},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("explicitly disposable GitHub-hosted runner", result.stderr)
 
     def test_release_gate_reaps_supervisor_on_failed_readiness(self):
         for fail in ("supervisor-exit", "supervisor-timeout"):

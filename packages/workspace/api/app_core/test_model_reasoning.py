@@ -124,15 +124,17 @@ class ModelReasoningTests(SimpleTestCase):
         from . import agent_run_stream
 
         reasoning = json.loads(core_fixture("live_reasoning.json").read_text(encoding="utf-8"))
-        meta = {"messageId": "message:turn-1:assistant", "turnId": "turn-1", "afterSequence": "4", "revision": "2", "reasoning": json.dumps(reasoning)}
-        state = agent_run_stream._live_state(meta, "answer")
+        identity = {key: reasoning[key] for key in ("blockId", "requestId")}
+        meta = {"messageId": "message:turn-1:assistant", "turnId": "turn-1", "afterSequence": "4", "revision": "2",
+            "textResetRevision": "0", "reasoningResetRevision": "1", "reasoning": json.dumps(identity)}
+        state = agent_run_stream._live_state(meta, "answer", reasoning["text"])
         self.assertEqual(state["reasoning"], reasoning)
         self.assertEqual((state["revision"], state["text"]), (2, "answer"))
         signal = {"schema": "agent_run.transient.signal.v1", "kind": "live", "agentRunId": "run-1", **{key: value for key, value in state.items() if key not in {"text", "reasoning"}}}
         self.assertEqual(agent_run_stream._decode_signal(SimpleNamespace(id="run-1"), {"signal": json.dumps(signal)}), signal)
         for invalid in ({**reasoning, "duration": 1}, {**reasoning, "blockId": "wrong"}, {**reasoning, "text": 3}):
             with self.subTest(invalid=invalid), self.assertRaises((ValueError, RuntimeError)):
-                agent_run_stream._live_state({**meta, "reasoning": json.dumps(invalid)}, "answer")
+                agent_run_stream._live_state({**meta, "reasoning": json.dumps(invalid)}, "answer", reasoning["text"])
 
     def test_api_result_keeps_display_and_continuation_separate(self):
         with patch.object(model_adapter.ModelConfig.objects, "get", return_value=Mock()), patch.object(model_adapter.ModelRunLog.objects, "create"), patch.object(model_adapter, "call_model", return_value={

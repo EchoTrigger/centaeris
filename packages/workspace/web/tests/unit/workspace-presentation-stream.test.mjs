@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { WorkspacePresentationController } from '../../src/chat/workspacePresentationController.ts';
-import { readPresentationSseBlock } from '../../src/chat/workspacePresentationProtocol.ts';
+import { readPresentationSseBlock, PresentationProtocolError } from '../../src/chat/workspacePresentationProtocol.ts';
 import { streamWorkspacePresentation } from '../../src/chat/workspacePresentationTransport.ts';
 import { createTranscriptViewStore } from '../../src/chat/transcriptViewStore.ts';
 import { ApiError } from '../../src/api.ts';
@@ -31,6 +31,10 @@ const checkpoint = (water = '0', generation = 'generation', status = 'running') 
   agentRun: { agentRunId: 'run', status, startedAt: '2026-10-23T10:00:00Z', completedAt: status === 'running' ? null : '2026-10-23T10:00:01Z' },
 });
 const live = (text = 'Live answer') => ({ agentRunId: 'run', live: { afterSequence: 0, revision: 1, turnId: 'turn', messageId: 'answer', text, reasoning: null } });
+const liveDelta = (extra = {}) => ({ agentRunId: 'run', delta: {
+  afterSequence: 0, turnId: 'turn', messageId: 'answer', baseRevision: 1, revision: 2,
+  textOffset: 7, text: '尾', reasoning: null, ...extra,
+} });
 const wire = (frames) => frames.map(({ item, cursor }) => `${cursor === null ? '' : `id: ${cursor}\n`}data: ${JSON.stringify(item)}\n\n`).join('');
 function fixture(options = {}) {
   const store = createTranscriptViewStore();
@@ -46,6 +50,85 @@ test('presentation protocol rejects unknown fields, mismatched binding and non-c
     assert.throws(() => readPresentationSseBlock(wire([value]), identity));
   }
   assert.equal(readPresentationSseBlock(': heartbeat\n\n', identity), null);
+});
+
+test('live deltas append exact UTF-8 text and reasoning while leaving durable cursors unchanged', async () => {
+  const { store, controller } = fixture();
+  await controller.acceptWithBackpressure(entry('checkpoint', checkpoint(), 'applied:0'));
+  const initial = entry('live', { ...live('流🙂'), live: { ...live('流🙂').live,
+    reasoning: { blockId: 'reasoning:req', requestId: 'req', text: '想' } } });
+  await controller.acceptWithBackpressure(readPresentationSseBlock(wire([initial]), identity));
+  await controller.acceptWithBackpressure(readPresentationSseBlock(wire([entry('liveDelta', liveDelta({
+    revision: 9, reasoning: { blockId: 'reasoning:req', requestId: 'req', offset: 3, text: '法' },
+  }))]), identity));
+  assert.equal(store.getLiveSnapshot().text, '流🙂尾');
+  assert.equal(store.getLiveSnapshot().reasoning.text, '想法');
+  assert.equal(store.getLiveSnapshot().revision, 9);
+  assert.equal(controller.lastCursor, 'applied:0');
+  assert.equal(store.getListSnapshot().appliedSourceHighWater, '0');
+  const previous = store.getLiveSnapshot();
+  await assert.rejects(controller.acceptWithBackpressure(entry('liveDelta', liveDelta())), error =>
+    !(error instanceof PresentationProtocolError) && /baseline/.test(error.message));
+  assert.equal(store.getLiveSnapshot(), previous);
+  await controller.acceptWithBackpressure(entry('live', { ...live('更正'), live: { ...live('更正').live, revision: 10 } }));
+  await controller.acceptWithBackpressure(entry('liveDelta', liveDelta({ baseRevision: 10, revision: 11, textOffset: 6, text: '。' })));
+  assert.equal(store.getLiveSnapshot().text, '更正。');
+  assert.equal(store.getLiveSnapshot().reasoning, null);
+});
+
+test('live delta protocol rejects malformed offsets, identities, revisions and acknowledgement attempts', async () => {
+  const { controller } = fixture();
+  const invalid = [
+    { textOffset: -1 }, { textOffset: 0.5 }, { textOffset: Number.MAX_SAFE_INTEGER + 1 },
+    { baseRevision: 0 }, { revision: 1 }, { afterSequence: -1 }, { unexpected: true },
+    { messageId: '' }, { turnId: '' }, { reasoning: undefined },
+    { reasoning: { blockId: 'wrong', requestId: 'req', offset: 0, text: 'a' } },
+    { reasoning: { blockId: 'reasoning:req', requestId: 'req', offset: -1, text: 'a' } },
+  ].map(changes => entry('liveDelta', liveDelta(changes)));
+  invalid.push(entry('liveDelta', liveDelta(), 'must-not-ack'));
+  for (const value of invalid) {
+    assert.throws(() => readPresentationSseBlock(wire([value]), identity), PresentationProtocolError);
+    await assert.rejects(controller.acceptWithBackpressure(value), PresentationProtocolError);
+  }
+  assert.equal(controller.lastCursor, null);
+});
+
+test('a lost live baseline reconnects from the durable cursor and restores a complete replacement', async () => {
+  const { store, controller } = fixture();
+  const abort = new AbortController();
+  const cursors = [];
+  const wrapped = {
+    get lastCursor() { return controller.lastCursor; },
+    async acceptWithBackpressure(value) {
+      await controller.acceptWithBackpressure(value);
+      if (value.item.kind === 'liveDelta' && store.getLiveSnapshot()?.text === '重新开始🙂尾') abort.abort();
+    },
+  };
+  await streamWorkspacePresentation({ ...identity, controller: wrapped, signal: abort.signal,
+    onConnection() {}, wait: async () => {}, retryLimit: 1,
+    request: async (_path, options) => {
+      cursors.push(options.headers?.['Last-Event-ID']);
+      const frames = cursors.length === 1
+        ? [entry('checkpoint', checkpoint(), 'applied:0'), entry('live', live('流🙂')),
+          entry('liveDelta', liveDelta({ textOffset: 6 }))]
+        : [entry('live', { ...live('重新开始🙂'), live: { ...live('重新开始🙂').live, revision: 5 } }),
+          entry('liveDelta', liveDelta({ baseRevision: 5, revision: 6, textOffset: 16 }))];
+      return new Response(wire(frames), { headers: { 'content-type': 'text/event-stream' } });
+    },
+  }).catch(error => assert.equal(error.name, 'AbortError'));
+  assert.deepEqual(cursors, [undefined, 'applied:0']);
+  assert.equal(store.getLiveSnapshot().text, '重新开始🙂尾');
+  assert.equal(controller.lastCursor, 'applied:0');
+});
+
+test('clear and projection reset invalidate live delta baselines without erasing readable text early', async () => {
+  for (const reset of [entry('live', { agentRunId: 'run', live: null }), entry('reset', { reason: 'projectionInvalidated' })]) {
+    const { store, controller } = fixture();
+    await controller.acceptWithBackpressure(entry('live', live('流🙂')));
+    await controller.acceptWithBackpressure(reset);
+    await assert.rejects(controller.acceptWithBackpressure(entry('liveDelta', liveDelta())), /baseline/);
+    assert.equal(store.getLiveSnapshot().text, '流🙂');
+  }
 });
 
 test('direct snapshot and patch frames render without any follow-up HTTP request', async () => {

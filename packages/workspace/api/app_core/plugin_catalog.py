@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
@@ -151,7 +152,7 @@ def _verified_mcp_documents(package: dict) -> list[tuple[dict, dict]]:
         for server in payload["servers"]:
             if not isinstance(server, dict) or set(server) - {
                 "id", "transport", "modelContractDigest", "lifecycle",
-                "startupTimeoutMs", "toolTimeoutMs", "tools",
+                "startupTimeoutMs", "toolTimeoutMs", "tools", "toolDiscovery",
             }:
                 raise ValueError("MCP credential server fields mismatch")
             transport = server.get("transport")
@@ -326,15 +327,17 @@ def _is_lower_kebab(value) -> bool:
 
 def _require_version(value) -> None:
     if not isinstance(value, str):
-        raise ValueError("plugin version must be major.minor.patch")
-    parts = value.split(".")
-    if len(parts) != 3 or any(
-        not part.isascii()
-        or not part.isdigit()
-        or (len(part) > 1 and part.startswith("0"))
-        for part in parts
-    ):
-        raise ValueError("plugin version must be major.minor.patch")
+        raise ValueError("plugin version must be a valid SemVer version")
+    number = r"(?:0|[1-9][0-9]*)"
+    prerelease = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    match = re.fullmatch(
+        rf"({number})\.({number})\.({number})"
+        rf"(?:-{prerelease}(?:\.{prerelease})*)?"
+        r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+        value,
+    )
+    if match is None or any(int(part) > 2**64 - 1 for part in match.groups()):
+        raise ValueError("plugin version must be a valid SemVer version")
 
 
 def _require_resource_path(value) -> None:

@@ -8,13 +8,13 @@ from contextlib import aclosing, contextmanager
 import redis
 from django.contrib.auth import get_user_model
 from django.db import connection, transaction
-from django.db.models import QuerySet
+from django.db.models import Exists, OuterRef, QuerySet
 from django.http import JsonResponse, QueryDict
 from ninja import Router
 
-from app_core.agent_run_stream import _load_live_text_state_async, _capture_signal_tail, _redis_stream_client, agent_run_signal_key
+from app_core.agent_run_stream import LiveTextRead, load_live_text_update, _capture_signal_tail, _redis_stream_client, agent_run_signal_key
 from app_core.app_delegations import session_authority_is_current
-from app_core.models import AgentRun, Session, SessionEvent
+from app_core.models import AgentRun, Session, SessionEvent, WorkspaceMembership
 from app_core.operation_presentation import operation_records, operation_detail
 from app_core.presentation_activity import presentation_activity, presentation_question
 from app_core.presentation_stream import PresentationScope, PROJECTION_VERSION, stream_presentation
@@ -22,7 +22,7 @@ from app_core.presentation_service import create_presentation_hub
 from app_core.runtime_client import request_transcript_page, request_transcript_patches
 from app_core.session_event import committed_session_terminal_state, project_committed_agent_run
 from app_core.transcript_content_relay import stream_transcript_content
-from app_core.workspace_access import workspace_membership_for
+from app_core.workspace_access import WORKSPACE_ROLES, workspace_membership_for
 
 from .query import valid_query_fields
 from .response_schema import COMMON_ERROR_RESPONSES, PresentationOperationResponse
@@ -59,9 +59,14 @@ class PresentationLoader:
     def authorized(self):
         with _database_deadline():
             if self.scope.session_id is not None:
-                if not Session.objects.filter(id=self.scope.session_id, workspace_id=self.scope.workspace_id, purpose="interactive").exists():
-                    return False
-                return session_authority_is_current(self.user_id, self.scope.session_id)
+                membership = WorkspaceMembership.objects.filter(
+                    user_id=OuterRef("owner_id"), workspace_id=OuterRef("workspace_id"),
+                    role__in=WORKSPACE_ROLES)
+                return Session.objects.filter(
+                    id=self.scope.session_id, workspace_id=self.scope.workspace_id,
+                    owner_id=self.user_id, owner__is_active=True, status="active",
+                    purpose="interactive", workspace__status="active",
+                ).filter(Exists(membership)).exists()
             user = get_user_model().objects.filter(id=self.user_id, is_active=True).first()
             if user is None:
                 return False
@@ -132,14 +137,14 @@ class PresentationLoader:
             batches = await _redis_stream_client.xread({agent_run_signal_key(run_id): cursor}, count=100, block=30000)
         return batches[-1][1][-1][0] if batches else cursor
 
-    async def live(self, run_id):
+    async def live(self, run_id, cursor=None):
         try:
             # Ephemeral Redis loss must never prevent the next authoritative
             # Postgres observation. A hung read is treated as unavailable too.
             async with asyncio.timeout(.5):
-                return await _load_live_text_state_async(run_id)
+                return await load_live_text_update(run_id, cursor)
         except (redis.RedisError, TimeoutError):
-            return None
+            return LiveTextRead("live", None, None)
 
 
 @router.get("/workspaces/{workspace_id}/presentation/events", auth=usage_auth("sessions:read"),

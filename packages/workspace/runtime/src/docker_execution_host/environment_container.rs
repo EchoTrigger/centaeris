@@ -6,6 +6,7 @@ pub(super) const WORKSPACE_BACKING_LABEL: &str = "centaeris.workspace_backing";
 pub(super) const WORKSPACE_BACKING_DOCKER_OVERLAYFS: &str = "dockerOverlayfs";
 
 pub(super) const HELPER_DESTINATION: &str = super::AGENT_BINARY;
+pub(super) const RUNSC_TMP_ROOTFS_MARKER: &str = "/tmp/.centaeris-rootfs";
 
 pub(super) fn create_body(
     expected: &ContainerExpectation<'_>,
@@ -50,6 +51,10 @@ pub(super) fn create_body_with_proxy_environment(
     }
     let mut mounts=expected.plugin_mounts.iter().map(|mount|serde_json::json!({"Type":"volume","Source":expected.plugin_volume_name,"Target":mount.destination,"ReadOnly":true,"VolumeOptions":{"Subpath":mount.source_subpath}})).collect::<Vec<_>>();
     mounts.push(serde_json::json!({"Type":"bind","Source":helper_path,"Target":HELPER_DESTINATION,"ReadOnly":true}));
+    if expected.oci_runtime == OciRuntime::Runsc {
+        // A read-only child mount prevents runsc from replacing empty /tmp with tmpfs.
+        mounts.push(serde_json::json!({"Type":"bind","Source":helper_path,"Target":RUNSC_TMP_ROOTFS_MARKER,"ReadOnly":true}));
+    }
     let mut body = serde_json::json!({
         "Image":profile.image_digest, "Labels":labels, "User":profile.user,
         "WorkingDir":"/","Entrypoint":[],
@@ -60,11 +65,17 @@ pub(super) fn create_body_with_proxy_environment(
             "ReadonlyRootfs":false,"CapDrop":["ALL"],"CapAdd":[],"SecurityOpt":["no-new-privileges"],
             "Memory":profile.resources.memory_bytes, "CpuPeriod":100000,
             "CpuQuota":u64::from(profile.resources.cpu_milli)*100,
-            "PidsLimit":profile.resources.pids_limit,"Mounts":mounts
+            "PidsLimit":profile.resources.pids_limit,"Mounts":mounts,
+            "StorageOpt":{"size":profile.resources.storage_bytes.to_string()}
         }
     });
     network::apply_proxy_environment(&mut body, expected.network, proxy_environment);
     Ok(body)
+}
+
+pub(super) fn storage_matches(facts: &serde_json::Value, profile: &EnvironmentProfile) -> bool {
+    facts["HostConfig"]["StorageOpt"]["size"].as_str()
+        == Some(profile.resources.storage_bytes.to_string().as_str())
 }
 
 pub(super) fn helper_path() -> Result<String, String> {
@@ -106,6 +117,47 @@ mod tests {
                 workspace_bytes: 64 * 1024 * 1024,
                 storage_bytes: 10 * 1024 * 1024 * 1024,
             },
+        }
+    }
+
+    #[test]
+    fn signed_storage_limit_controls_the_writable_layer_independently_of_workspace_budget() {
+        let mut runner = super::super::tests::retained_test_runner();
+        let mut profile = profile();
+        runner.image_digest.clone_from(&profile.image_digest);
+        runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
+        for storage_bytes in [128 * 1024 * 1024_u64, 23 * 1024 * 1024 * 1024_u64 + 4096] {
+            profile.resources.storage_bytes = storage_bytes;
+            let body = create_body_with_proxy_environment(
+                &runner.container_expectation(),
+                &profile,
+                "/srv/helpers/execution_agent",
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                body["HostConfig"]["StorageOpt"]["size"],
+                storage_bytes.to_string()
+            );
+            assert_eq!(
+                body["Labels"]["centaeris.data_budget"],
+                profile.resources.workspace_bytes.to_string()
+            );
+            let facts = serde_json::json!({"Id":"physical","Image":body["Image"],"Config":body,"HostConfig":body["HostConfig"]});
+            crate::docker_engine::verify_created(&facts, &body).unwrap();
+            assert!(storage_matches(&facts, &profile));
+            for actual in [
+                serde_json::Value::Null,
+                serde_json::json!({}),
+                serde_json::json!({"size":storage_bytes}),
+                serde_json::json!({"size":(storage_bytes + 4096).to_string()}),
+            ] {
+                let mut mismatched = facts.clone();
+                mismatched["HostConfig"]["StorageOpt"] = actual;
+                assert!(crate::docker_engine::verify_created(&mismatched, &body).is_err());
+                assert!(!storage_matches(&mismatched, &profile));
+            }
         }
     }
 
@@ -257,6 +309,27 @@ mod tests {
         let mut facts = serde_json::json!({"Id":"physical","Image":body["Image"],"Config":body,"HostConfig":body["HostConfig"]});
         crate::docker_engine::verify_created(&facts, &body)
             .expect("new backing policy matches created configuration");
+        let mounts = body["HostConfig"]["Mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[1]["Type"], "bind");
+        assert_eq!(mounts[1]["Source"], mounts[0]["Source"]);
+        assert_eq!(mounts[1]["Target"], RUNSC_TMP_ROOTFS_MARKER);
+        assert_eq!(mounts[1]["ReadOnly"], true);
+        for (field, value) in [
+            ("Source", serde_json::json!("/srv/foreign")),
+            ("Target", serde_json::json!("/tmp/other")),
+            ("ReadOnly", serde_json::json!(false)),
+        ] {
+            let mut mismatched = facts.clone();
+            mismatched["HostConfig"]["Mounts"][1][field] = value;
+            assert!(crate::docker_engine::verify_created(&mismatched, &body).is_err());
+        }
+        let mut missing = facts.clone();
+        missing["HostConfig"]["Mounts"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(crate::docker_engine::verify_created(&missing, &body).is_err());
         facts["Config"]["Labels"]
             .as_object_mut()
             .unwrap()

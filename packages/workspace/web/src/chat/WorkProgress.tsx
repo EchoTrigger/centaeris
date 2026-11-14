@@ -5,15 +5,19 @@ import { AnimatedDisclosure } from "./AnimatedDisclosure";
 import { initialWorkDisclosure, observeFinalAnswer, toggleWorkDisclosure, preserveWorkDisclosure, type WorkDisclosure } from "./workDisclosure";
 import { formatWorkDuration } from "./workDuration";
 
-export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs, children, response, responseIsProcess = false, initialDisclosure, onDisclosureChange, revealKey }: {
+export type WorkProgressSegment = Readonly<{ key: string; kind: "process" | "input"; content: ReactNode }>;
+
+export function WorkProgress({ running, finalStarted, hasProcess, startedAtMs, completedAtMs, children, segments, response, responseIsProcess = false, initialDisclosure, onDisclosureChange, revealKey }: {
   revealKey?: string;
   initialDisclosure?: WorkDisclosure;
   onDisclosureChange?(value: WorkDisclosure): void;
   running: boolean;
   finalStarted: boolean;
+  hasProcess: boolean;
   startedAtMs?: number;
   completedAtMs?: number;
   children?: ReactNode;
+  segments?: readonly WorkProgressSegment[];
   response?: ReactNode;
   responseIsProcess?: boolean;
 }) {
@@ -41,18 +45,20 @@ export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs
   const statusKey = running ? "workProgress.working" : "workProgress.worked";
   const label = [t(statusKey), elapsed].filter(Boolean).join(" ");
   return <div className="workProgress">
-    {disclosure.finalSeen ? <button className="workProgressSummary workProgressHeader" type="button" aria-label={label}
+    {hasProcess && disclosure.finalSeen ? <button className="workProgressSummary workProgressHeader" type="button" aria-label={label}
       aria-expanded={disclosure.expanded}
       onClick={() => setDisclosure(toggleWorkDisclosure)}>
       <span>{label}</span><ChevronRight aria-hidden="true" className={disclosure.expanded ? "isExpanded" : ""} />
     </button> : <div className="workProgressStatus workProgressHeader">{label}</div>}
-    <AnimatedDisclosure expanded={disclosure.expanded}><div className="workProgressBody" onClickCapture={(event) => {
+    {(segments ?? (hasProcess ? [{ key: "process", kind: "process", content: children }] : [])).map(segment => segment.kind === "input"
+      ? <div key={segment.key}>{segment.content}</div>
+      : <AnimatedDisclosure key={segment.key} expanded={disclosure.expanded}><div className="workProgressBody" onClickCapture={(event) => {
       // Opening any process detail is a deliberate reading choice, including
       // keyboard activation. A later final answer must not interrupt it.
       if (event.target instanceof Element && event.target.closest('button[aria-expanded="false"]')) {
         setDisclosure(preserveWorkDisclosure);
       }
-    }}>{children}</div></AnimatedDisclosure>
-    <div hidden={responseIsProcess && !disclosure.expanded}>{response}</div>
+    }}>{segment.content}</div></AnimatedDisclosure>)}
+    <div hidden={hasProcess && responseIsProcess && !disclosure.expanded}>{response}</div>
   </div>;
 }

@@ -44,6 +44,7 @@ impl RequestPolicy {
                     | "/internal/jobs/control/ready"
                     | "/internal/jobs/control/claim"
                     | "/internal/jobs/control/start"
+                    | "/internal/jobs/control/retry-workspace-preservation"
                     | "/internal/jobs/yield"
                     | "/internal/jobs/complete"
                     | "/internal/jobs/heartbeat"
@@ -110,6 +111,7 @@ mod tests {
         for path in [
             "/agent-runs/cancel",
             "/internal/jobs/heartbeat",
+            "/internal/jobs/control/retry-workspace-preservation",
             "/internal/environments/retire",
         ] {
             let lane = policy.lane("POST", path);

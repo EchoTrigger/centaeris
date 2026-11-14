@@ -246,7 +246,7 @@ class PresentationObserverTests(SimpleTestCase):
             return "0"
         async def wait(run, cursor):
             await asyncio.Event().wait()
-        async def live(run):
+        async def live(run, cursor):
             if run == "A":
                 old_read.set()
                 await finish_old.wait()

@@ -365,7 +365,7 @@ fn runtime_http_router_contract() {
                 )
             })
             .collect();
-        assert_eq!(routes.len(), 30);
+        assert_eq!(routes.len(), 31);
         for (method, path) in routes {
             let jobs =
                 path.starts_with("/internal/jobs") || path.starts_with("/internal/job-outbox");

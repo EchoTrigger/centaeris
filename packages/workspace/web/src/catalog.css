@@ -1,0 +1,165 @@
+/* Workspace catalogs use the same header, density and neutral surfaces as Issues. */
+.catalogPage, .extensionPage.catalogPage { box-sizing:border-box; width:100%; min-width:0; min-height:100%; margin:0; padding:0 8px 32px; color:var(--on-surface); font-size:14px; }
+.catalogPage *, .inboxLayout * { box-sizing:border-box; }
+.catalogPage a { color:inherit; text-decoration:none; }
+.catalogPage button, .catalogPage input { font:inherit; }
+.catalogPage svg { width:14px; height:14px; stroke-width:1.8; flex-shrink:0; }
+.catalogPage :is(button,a,input,summary):focus-visible { outline: 1px solid var(--outline); outline-offset:2px; }
+.catalogPage .catalogHeader { width:100%; min-height:var(--workspace-header-height,44px); margin:0; padding:6px 16px; gap:16px; }
+.catalogPage .catalogHeader h1 { margin:0; font-size:14px; line-height:20px; font-weight:500; }
+.catalogPage .catalogHeader .catalogTextLink { font-size:12px; }
+.catalogTabs { display:flex; gap:4px; align-items:center; padding:12px 16px 16px; margin:0; overflow-x:auto; scrollbar-width:none; }
+.catalogPage .catalogTabs a { display:inline-flex; flex-shrink:0; align-items:center; min-height:30px; padding:4px 12px; border:1px solid transparent; border-radius:16px; color:var(--process-text); font-size:12px; line-height:20px; text-decoration:none; }
+.catalogPage .catalogTabs a:hover { color:var(--on-surface); }
+.catalogPage .catalogTabs a[aria-current=page], .catalogPage .catalogTabs a.isActive { border-color:transparent; color:var(--on-surface); font-weight:500; }
+.catalogBody { padding:0 16px 24px; }
+.catalogDetailBody { max-width:860px; margin:16px auto 0; padding-inline:24px; }
+.catalogSectionHeading { display:flex; align-items:baseline; flex-wrap:wrap; gap:8px 24px; margin:8px 0 20px; }
+.catalogSectionHeading h2 { margin:0; font-size:14px; font-weight:500; }
+.catalogSectionHeading > span, .catalogDescription { color:var(--process-text); font-size:12px; line-height:1.7; }
+.catalogDescription { margin:0 0 20px; }
+.catalogRows { padding:0; margin:0; list-style:none; }
+.catalogRows a { display:flex; align-items:center; justify-content:space-between; min-height:64px; gap:20px; padding:12px; border-radius:6px; color:inherit; text-decoration:none; }
+.extensionPage .catalogRows, .workHomeBody .catalogRows { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
+.extensionPage .catalogRows li, .workHomeBody .catalogRows li { min-width:0; }
+.extensionPage .catalogRows a, .workHomeBody .catalogRows a { height:100%; min-height:88px; padding:14px; border:0; border-radius:9px; background:var(--surface-variant); }
+.extensionPage .catalogMeta { gap:8px; max-width:40%; text-align:right; white-space:normal; }
+.catalogRows a > span:first-child { display:grid; min-width:0; gap:5px; }
+.catalogRows a[aria-current=true] strong { font-weight:500; }
+.catalogRows strong { font-size:14px; font-weight:400; overflow-wrap:anywhere; }
+.catalogRows small { color:var(--process-text); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
+.catalogMeta { display:flex; align-items:center; gap:16px; flex-shrink:0; color:var(--process-text); font-size:12px; }
+.catalogColumnLabels { display:flex; justify-content:space-between; padding:8px 12px; color:var(--process-text); font-size:12px; }
+.catalogEmpty { margin:0; padding:44px 20px; color:var(--process-text); font-size:13px; text-align:center; line-height:1.7; }
+.catalogTextLink { font-size:13px; text-underline-offset:3px; }
+.catalogTextLink:hover { text-decoration:underline; }
+.catalogTable { width:100%; }
+.catalogTableRow { display:grid; grid-template-columns:minmax(0,1fr) 100px; gap:20px; padding:14px 12px; font-size:13px; border-bottom:1px solid color-mix(in srgb,var(--outline-variant) 55%,transparent); }
+.catalogTableRow > span { min-width:0; overflow-wrap:anywhere; }
+.catalogTableRow > span:last-child { color:var(--process-text); font-size:12px; }
+.catalogTableHead { color:var(--process-text); font-size:12px; padding-block:10px; }
+.spaceWorkspace.libraryWorkspace { height:100%; }
+.spaceWorkspace.libraryWorkspace > .libraryMain { height:100%; scrollbar-width:thin; scrollbar-color:color-mix(in srgb,var(--process-text) 35%,transparent) transparent; }
+.catalogPage .libraryContent { width:100%; margin:0; padding:0 16px 24px; }
+.catalogPage .libraryCatalogTabs { margin-inline:-16px; }
+.catalogPage .libraryCatalogTools { min-height:44px; margin-bottom:12px; }
+.catalogPage .libraryList { padding:0; border:0; border-radius:0; box-shadow:none; background:transparent; }
+.catalogPage .libraryRow { min-height:48px; }
+.catalogPage .libraryRow + .libraryRow { border-top:1px solid color-mix(in srgb,var(--outline-variant) 55%,transparent); }
+.catalogPage .libraryName { font-size:14px; grid-template-columns:18px minmax(0,1fr); gap:10px; }
+.catalogPage .libraryName span { font-size:14px; }
+.catalogPage .libraryName svg { width:16px; height:16px; padding:0; border:0; border-radius:0; color:var(--process-text); }
+.catalogPage .libraryThumbnail { width:18px; height:18px; border-radius:3px; }
+.catalogPage .libraryListHeader { background:transparent; }
+.extensionPage.catalogPage .pluginSettings { padding:0; }
+.catalogPage .pluginSettings > .extensionHeading, .catalogPage .pluginSettings > .pluginSettingsMeta,
+.catalogPage .pluginSettings > .extensionToolbar, .catalogPage .pluginSettings > .pluginSettingsRows,
+.catalogPage .pluginSettings > .globalPluginNotice, .catalogPage .pluginSettings > .capabilitySettingsError { margin-inline:16px; }
+.catalogPage .pluginSettings > .extensionHeading { margin-top:12px; }
+.catalogPage .extensionHeading h1 { font-size:20px; line-height:1.5; }
+.catalogPage .catalogListHeading { margin-bottom:4px; }
+.catalogPage .catalogListHeading h1 { font-size:14px; }
+.catalogPage .extensionToolbar { margin-bottom:8px; }
+.catalogPage .pluginSettingsRows.settingsPanel { border:0; border-radius:0; box-shadow:none; background:transparent; padding:0; }
+.catalogPage .pluginSettingsIdentity { padding:14px 12px; min-height:64px; }
+.catalogPage .pluginSettingsIdentity .managementRowIcon { width:28px; height:28px; border-radius:6px; background:var(--surface-container); }
+.catalogPage .pluginSettingsIdentity .managementRowCopy strong { font-size:14px; font-weight:400; }
+.catalogPage .pluginSettingsIdentity .managementRowCopy small { font-size:12px; }
+.catalogPage .pluginSettingsDetail.isPage { max-width:860px; margin:24px auto; }
+.catalogPage .pluginSettingsSection { background:transparent; border:0; border-radius:0; box-shadow:none; padding:0 0 24px;  }
+.catalogPage .extensionSkillFacts, .catalogPage .extensionSkillDocument { background:transparent; border:0; box-shadow:none; padding:16px 0; }
+.catalogPage .pluginSettingsToggle { font-size:12px; }
+.workPrototype > .inboxLayout { display:grid; grid-template-columns:336px minmax(0,1fr); flex:1 1 0; min-height:0; margin-inline:8px;  }
+.inboxList { min-width:0; overflow:auto;  padding:12px 12px 24px 0; scrollbar-width:thin; }
+.inboxTabs { margin-bottom:14px; }
+.inboxList ul { display:grid; gap:8px; margin:0; padding:0; list-style:none; }
+.workPrototype .inboxItem { width:100%; align-items:flex-start; justify-content:flex-start; gap:10px; min-height:108px; border:0; padding:14px 10px; text-align:left; border-radius:9px; background:var(--surface-variant); }
+.inboxReadDot { width:5px; height:5px; margin-top:6px; flex-shrink:0; border-radius:50%; background:var(--primary-color); }
+.inboxReadDot.isRead { visibility:hidden; }
+.inboxItemCopy { display:grid; gap:7px; min-width:0; width:100%; }
+.workPrototype .inboxItem[aria-current=true] .inboxItemCopy strong { font-weight:600; }
+.inboxItemCopy strong { font-size:13px; font-weight:500; line-height:1.5; }
+.inboxItemMeta { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11px; color:var(--process-text); }
+.inboxItemMeta time { white-space:nowrap; font-variant-numeric:tabular-nums; }
+.inboxSummary { white-space:nowrap; text-overflow:ellipsis; overflow:hidden; color:var(--process-text); font-size:12px; }
+.inboxItemCopy small { color:var(--process-text); font-size:11px; }
+.inboxDetail { min-width:0; overflow:auto; }
+.inboxActions { display:flex; align-items:center; gap:4px; min-height:54px; padding:8px 20px; }
+.inboxActions > span { flex:1; }
+.inboxActions > a { font-size:12px; color:var(--process-text); }
+.workPrototype .inboxActions button { border:0; padding:6px; min-height:30px; background:transparent; color:var(--process-text); }
+.workPrototype .inboxActions button:hover { color:var(--on-surface); }
+.inboxArticle { max-width:820px; margin:24px auto 40px; padding:0 clamp(16px,3vw,40px); }
+.inboxMessageCard { min-width:0; padding:28px; border:0; border-radius:10px; background:var(--surface-raised); }
+.inboxMessageCard > header { margin-bottom:24px; }
+.inboxMessageCard > footer { margin-top:24px; }
+.workPrototype .inboxOpenItem { display:inline-flex; align-items:center; min-height:32px; padding:6px 12px; border:0; border-radius:6px; background:var(--surface-container); color:var(--on-surface); text-decoration:none; font-size:13px; }
+.workPrototype .inboxOpenItem:hover { background:var(--surface-hover); text-decoration:none; }
+.inboxDeliverable { min-width:0; }
+.inboxDeliverableMeta { display:flex; flex-wrap:wrap; gap:8px 16px; margin-bottom:18px; color:var(--process-text); font-size:12px; overflow-wrap:anywhere; }
+.inboxDeliverableFiles { display:flex; flex-wrap:wrap; gap:8px; margin:20px 0 0; padding:0; list-style:none; }
+.inboxDeliverableFiles li { min-width:0; max-width:100%; }
+.inboxDeliverableFiles .fileLinkCard { width:100%; max-width:360px; background:var(--surface-color); }
+.inboxDeliverableFiles .fileLinkCard:hover { background:var(--surface-hover); }
+.workPrototype .inboxMessageCard > header > h2 { font-size:22px; font-weight:500; line-height:1.4; margin:18px 0; }
+.workPrototype .inboxArticle p { line-height:1.8; margin-bottom:20px; font-size:14px; white-space:pre-line; }
+.workPrototype .inboxMessageCard > header p { margin-top:0; margin-bottom:0; }
+.inboxDeliverable .markdownContent { min-width:0; }
+.workPrototype .inboxArticle .inboxByline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; color:var(--process-text); font-size:12px; }
+.inboxLead { color:var(--process-text); }
+.inboxNoSelection { display:grid; place-items:center; height:100%; min-height:240px; color:var(--process-text); font-size:13px; }
+.workHomeBody { display:flex; flex-direction:column; gap:32px; width:min(780px,100%); margin:36px auto; padding:0 32px 48px; }
+.workPrototype .workHomeBody > h2 { margin-bottom:8px; font-size:24px; font-weight:500; }
+.workPrototype .workHomeBody h3 { margin-bottom:16px; }
+@media(max-width:760px) {
+  .catalogPage { padding-inline:4px; }
+  .catalogBody { padding-inline:12px; }
+  .catalogPage .catalogHeader { flex-wrap:wrap; padding-inline:12px; }
+  .catalogMeta { gap:6px; max-width:35%; white-space:normal; text-align:right; }
+  .spaceSources .catalogRows a { gap:12px; padding-inline:4px; }
+  .extensionPage .catalogRows, .workHomeBody .catalogRows { grid-template-columns:minmax(0,1fr); }
+  .workPrototype > .inboxLayout { display:flex; flex-direction:column; }
+  .inboxList { border-right:0; padding-right:0; }
+  .inboxDetail { display:none; }
+  .inboxLayout.hasSelection .inboxList { display:none; }
+  .inboxLayout.hasSelection .inboxDetail { display:block; }
+  .inboxArticle { margin-top:16px; padding:0 20px; }
+  .inboxMessageCard { padding:20px; }
+  .workHomeBody { margin-top:24px; padding-inline:20px; }
+}
+
+.catalogWorkspace { padding:0 16px 24px; min-width:0; }
+.catalogDirectory { min-width:0; }
+.catalogDetailView { width:min(860px,100%); min-width:0; margin:12px auto 24px; outline:0; }
+.catalogDetailView > h2 { margin:24px 0 12px; font-size:22px; font-weight:500; line-height:1.5; overflow-wrap:anywhere; outline:0; }
+.catalogBack { display:inline-flex; align-items:center; gap:8px; min-height:30px; margin-bottom:16px; color:var(--process-text); font-size:13px; text-decoration:none; }
+.catalogPage a.catalogBack { color:var(--process-text); }
+.catalogBack:hover { color:var(--on-surface); }
+.catalogDetailView .pluginSettingsDetail.isPage { margin:12px 0; }
+.catalogDetailView .pluginSettingsMeta { flex-wrap:wrap; }
+.catalogWorkspace.spaceContents { padding:0; }
+.libraryFileView .libraryPreviewMain { min-height:0; height:auto; }
+.libraryFileView .libraryPreviewHeader { padding:0; gap:12px; flex-wrap:wrap; margin-bottom:24px; }
+.libraryFileTitle { flex:1; min-width:0; overflow-wrap:anywhere; font-size:20px; }
+.libraryFileTitle strong { font-weight:500; }
+.libraryFileView .libraryPreviewBody { min-height:400px; padding:0; }
+.libraryFileView .libraryPreviewBody.libraryNotePreview { padding:0; }
+.libraryFileView .libraryNoteIdentity { flex:1; flex-wrap:wrap; }
+.libraryFileView .libraryNoteIdentity > small { font-size:11px; }
+.libraryFileView .libraryNoteEditor textarea { min-height:560px; font-size:14px; }
+.libraryFileView .libraryPreviewFrame { height:65vh; min-height:400px; }
+.libraryFileView .libraryNoteName { max-width:100%; }
+@media(max-width:760px) {
+  .catalogDetailView { margin-top:0; }
+}
+
+.libraryCreateMenu { min-width:184px; font-size:14px; }
+.libraryCreateMenu .workMenuItem { min-height:30px; gap:8px; }
+.libraryCreateMenu .workMenuItem svg { width:14px; height:14px; stroke-width:1.8; }
+
+/* Detail headings receive reading focus on navigation, not control focus. */
+:root .catalogDetailView[tabindex="-1"]:focus, :root .catalogDetailView > h2[tabindex="-1"]:focus { outline:none; }
+
+.workHomeBody .catalogRows a { min-height:52px; padding:12px 14px; }
+
+.spaceMaterialText { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.7; margin:20px 0; }

@@ -12,6 +12,25 @@ use centaeris_core::session::reliability::{
 use serde::Deserialize;
 use tokio::sync::watch;
 
+/// Notifications accelerate durable scans; the timer also recovers lost wakes.
+#[derive(Clone)]
+pub(crate) struct WorkWake(watch::Sender<()>);
+impl Default for WorkWake {
+    fn default() -> Self {
+        Self(watch::channel(()).0)
+    }
+}
+impl WorkWake {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<()> {
+        self.0.subscribe()
+    }
+    fn notify(&self) {
+        self.0.send_replace(());
+    }
+}
+
+pub(crate) const IDLE_RECHECK: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 struct Shutdown(watch::Sender<bool>);
 impl Default for Shutdown {
@@ -88,6 +107,7 @@ impl Lane {
 
 pub(crate) struct Executor {
     shutdown: Shutdown,
+    pub(crate) work_wake: WorkWake,
     dispatchers: Vec<tokio::task::JoinHandle<()>>,
     _platform: Platform,
 }
@@ -105,11 +125,12 @@ impl Executor {
     }
 }
 
-pub(crate) fn start(state: HttpServerState) -> Result<Executor, String> {
+pub(crate) fn start(state: HttpServerState, work_wake: WorkWake) -> Result<Executor, String> {
     let config = Config::from_env()?;
     let platform = Platform::new().map_err(|_| "lifecycle platform client unavailable")?;
     let mut executor = Executor {
         shutdown: Shutdown::default(),
+        work_wake,
         dispatchers: vec![],
         _platform: platform.clone(),
     };
@@ -131,6 +152,7 @@ pub(crate) fn start(state: HttpServerState) -> Result<Executor, String> {
                 config,
                 lane,
                 shutdown,
+                executor.work_wake.clone(),
             )));
     }
     let store = state.job_store.clone();
@@ -170,6 +192,7 @@ pub(crate) fn start_terminal_delivery(state: HttpServerState) -> Result<Executor
     Ok(Executor {
         dispatchers: vec![state.runtime.spawn(outbox::run(store, shutdown.clone()))],
         shutdown,
+        work_wake: WorkWake::default(),
         _platform: platform,
     })
 }
@@ -180,10 +203,14 @@ async fn dispatch(
     config: Config,
     lane: Lane,
     shutdown: Shutdown,
+    work_wake: WorkWake,
 ) {
     let mut active = tokio::task::JoinSet::new();
     let mut sequence = 0_usize;
     while !shutdown.is_stopped() {
+        // Subscribe before checking durable rows so a concurrent commit cannot
+        // disappear between the scan and entering the wait.
+        let mut ready = work_wake.subscribe();
         while let Some(result) = active.try_join_next() {
             if result.is_err() {
                 eprintln!("Run lifecycle task failed; lease remains reclaimable");
@@ -233,10 +260,12 @@ async fn dispatch(
             }
             Ok(Ok(_)) if lane.stage().is_none() => {
                 let store = state.job_store.clone();
+                let work_wake = work_wake.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    store.wait_for_runtime_jobs(
+                    store.wait_for_runtime_jobs_observed(
                         &[AGENT_RUN_LIFECYCLE_JOB_KIND.into(), "worker.noop".into()],
                         Duration::from_secs(20),
+                        || work_wake.notify(),
                     )
                 })
                 .await;
@@ -245,7 +274,22 @@ async fn dispatch(
                 }
             }
             Ok(Ok(_)) => {
-                shutdown.wait(Duration::from_millis(250)).await;
+                let store = state.job_store.clone();
+                let wait = tokio::task::spawn_blocking(move || {
+                    store.control_job_wait(lane.stage().expect("control lane"), IDLE_RECHECK)
+                })
+                .await;
+                match wait {
+                    Ok(Ok(wait)) => {
+                        tokio::select! {
+                            _ = ready.changed() => {},
+                            _ = shutdown.wait(wait) => {},
+                        }
+                    }
+                    _ => {
+                        shutdown.wait(Duration::from_secs(1)).await;
+                    }
+                }
             }
             _ => {
                 eprintln!("Run claim unavailable");
@@ -329,6 +373,13 @@ fn run_claimed(
                 Ok(next) => next,
                 Err(error) => {
                     lease.require()?;
+                    if preservation_blocked(&error) {
+                        lease.handoff()?;
+                        return state
+                            .job_store
+                            .block_workspace_preservation(&job.job_id, owner)
+                            .map_err(Failure::from);
+                    }
                     if let Some(reason) = wait_reason(&error)
                         .or_else(|| lane.stage().map(|_| "control_retry_pending"))
                     {
@@ -617,11 +668,15 @@ fn retry_at(outcome: &AgentRunStepOutcome, now: i64, recheck: i64, deadline: Opt
 }
 
 fn cleanup_pending(error: Failure) -> Failure {
-    if wait_reason(&error).is_some() {
+    if preservation_blocked(&error) || wait_reason(&error).is_some() {
         error
     } else {
         Failure::rejected(503, "retained_cleanup_pending")
     }
+}
+
+fn preservation_blocked(error: &Failure) -> bool {
+    matches!(error, Failure::Rejected { status: 422, code } if code == "workspace_preservation_blocked")
 }
 
 fn wait_reason(error: &Failure) -> Option<&'static str> {
@@ -716,7 +771,7 @@ fn finish(
             }
         }
         Resolution::Ready { .. } => {
-            return Err(Failure::rejected(409, "control_execution_forbidden"))
+            return Err(Failure::rejected(409, "control_execution_forbidden"));
         }
     }
     Ok(Next::Complete)
@@ -797,7 +852,7 @@ fn fail(
                 "agent_run_lifecycle_lease_lost" | "agent_run_execute_lease_required"
             ) =>
         {
-            return Ok(())
+            return Ok(());
         }
         _ => ("agent_run_lifecycle_failed", false),
     };
@@ -840,6 +895,34 @@ fn cleanup_state(state: &HttpServerState) -> HttpServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deterministic_preservation_errors_are_not_converted_into_transient_waits() {
+        let blocked = cleanup_pending(Failure::rejected(422, "workspace_preservation_blocked"));
+        assert!(preservation_blocked(&blocked));
+        assert!(wait_reason(&blocked).is_none());
+        let unavailable = cleanup_pending(Failure::rejected(503, "retained_cleanup_unconfirmed"));
+        assert!(!preservation_blocked(&unavailable));
+        assert_eq!(wait_reason(&unavailable), Some("retained_cleanup_pending"));
+    }
+    #[tokio::test]
+    async fn work_wake_retains_commits_between_scan_and_wait() {
+        let wake = WorkWake::default();
+        let mut advance = wake.subscribe();
+        let mut cleanup = wake.subscribe();
+        wake.notify();
+        tokio::time::timeout(Duration::from_secs(1), advance.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), cleanup.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!advance.has_changed().unwrap());
+        wake.notify();
+        assert!(advance.has_changed().unwrap());
+    }
+
     #[test]
     fn waiting_uses_runtime_recovery_deadline_and_authorization_deadline() {
         let outcome = AgentRunStepOutcome {

@@ -2,9 +2,8 @@ Centaeris
 Copyright (C) 2026 EchoTrigger
 
 This notice applies to original Centaeris material unless a file or notice
-identifies another copyright holder. The default license is AGPL-3.0-only;
-see LICENSING.md for Apache-2.0 directory exceptions and third-party notices.
+identifies another copyright holder. Original Centaeris material is licensed
+under AGPL-3.0-only; see LICENSING.md for scope and third-party notices.
 The AGPL terms are in LICENSE in the source tree and container images, or
-LICENSE.centaeris.txt in Desktop and TUI distributions. The Apache terms are
-in LICENSE-APACHE.
+LICENSE.centaeris.txt in Desktop and TUI distributions.
 Third-party materials remain under their stated licenses and notices.

@@ -1,7 +1,7 @@
 import { animate } from "@centaeris/ui/motion";
 import { useTranslation } from "../i18n";
 import { useLayoutEffect, useRef, useState } from "react";
-import { Archive, ArrowLeft, Cpu, Settings2, ShieldCheck, SlidersHorizontal, Terminal, Users, UsersRound } from "lucide-react";
+import { Archive, ArrowLeft, Building2, Cpu, Network, Server, Settings, ShieldCheck, SlidersHorizontal, Terminal, Users } from "lucide-react";
 import { Link, Navigate, useLoaderData, useLocation, useNavigate, useOutletContext, useRouteLoaderData } from "react-router";
 import { ApiError, apiJson, jsonOptions } from "../api";
 import { LanguageSelector } from "../components/LanguageSelector";
@@ -21,13 +21,13 @@ import { useNavigationScroll, useWorkspaceNavigation } from "../shell/workspaceN
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 const SECTIONS = (t) => ({
   preferences: { label: t("settingsRoute.preferences"), title: t("settingsRoute.preferences"), icon: SlidersHorizontal, group: t("settingsRoute.personal"), account: true },
-  general: { label: t("pluginSettings.general"), title: t("pluginSettings.general"), icon: Settings2, group: t("settingsRoute.personal"), account: true },
+  general: { label: t("pluginSettings.general"), title: t("pluginSettings.general"), icon: Settings, group: t("settingsRoute.personal"), account: true },
   security: { label: t("settingsRoute.security"), title: t("settingsRoute.security"), icon: ShieldCheck, group: t("settingsRoute.personal"), account: true },
-  "workspace-profile": { label: t("workspaceProfile.title"), title: t("workspaceProfile.title"), icon: Settings2, group: t("settingsRoute.workspace") },
+  "workspace-profile": { label: t("workspaceProfile.title"), title: t("workspaceProfile.title"), icon: Building2, group: t("settingsRoute.workspace") },
   members: { label: t("invitationActivationRoute.member"), title: t("settingsRoute.membersAndPermissions"), icon: Users, group: t("settingsRoute.workspace") },
-  environment: { label: t("environmentSettings.title"), title: t("environmentSettings.title"), icon: Settings2, group: t("settingsRoute.workspace") },
+  environment: { label: t("environmentSettings.title"), title: t("environmentSettings.title"), icon: Server, group: t("settingsRoute.workspace") },
   archive: { label: t("archive.title"), title: t("archive.title"), icon: Archive, workspaceMember: true },
-  groups: { label: t("settingsRoute.groups"), title: t("settingsRoute.groups"), icon: UsersRound, group: t("settingsRoute.workspace"), hiddenInNav: true },
+  groups: { label: t("settingsRoute.groups"), title: t("settingsRoute.groups"), icon: Network, group: t("settingsRoute.workspace"), hiddenInNav: true },
   models: { label: t("appRoute.models"), title: t("appRoute.models"), icon: Cpu, group: t("settingsRoute.workspace"), resourceManagement: true },
   developer: { label: t("developer.title"), title: t("developer.title"), icon: Terminal, group: t("settingsRoute.workspace"), workspaceMember: true },
 });
@@ -245,7 +245,7 @@ export default function SettingsPage() {
         </> : <>
         <nav ref={navigationRef} className="workspaceSettingsSections" aria-label={t("shellSidebar.settings")}>
           {groups.map(({ label, entries }) => <section key={label ?? "archive"}>
-            {label ? <h2>{label}</h2> : null}
+            {label && label !== t("settingsRoute.personal") ? <h2>{label}</h2> : null}
             {entries.map(([key, item]) => {
               const Icon = item.icon;
               const active = key === section || (key === "members" && section === "groups");
@@ -255,7 +255,7 @@ export default function SettingsPage() {
         </nav>
         <select className="workspaceSettingsSectionPicker" aria-label={t("shellSidebar.settings")} value={section === "groups" ? "members" : section}
           onChange={event => navigate(sectionPath(event.target.value), { state: { returnTo: closeTo } })}>
-          {groups.map(({ label, entries }) => label ? <optgroup key={label} label={label}>
+          {groups.map(({ label, entries }) => label && label !== t("settingsRoute.personal") ? <optgroup key={label} label={label}>
             {entries.map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}
           </optgroup> : entries.map(([key, item]) => <option key={key} value={key}>{item.label}</option>))}
         </select>

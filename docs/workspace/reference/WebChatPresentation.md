@@ -50,6 +50,42 @@ again. The user can still close it manually. A new turn or Session has its own
 state; reopening a historical turn defaults to folded. This is local presentation
 state, not a persisted Runtime or transport field.
 
+Only turns with process content expose the completed work disclosure. A final-only
+response retains its elapsed-time label as static text, with no disclosure body,
+arrow or divider. Live reasoning also counts as process content. Work headers use
+no divider in either state.
+
+Running-turn user supplements appear immediately as right-aligned message bubbles
+with a small Steer label and icon. They remain visible when surrounding process
+details fold. The accepted supplement and its durable transcript record reconcile
+by input identity, with no delivery or model-processing state labels. A rejected
+send retains the composer draft and uses the existing composer error feedback.
+Opening or refreshing a Session restores accepted supplements from Runtime's
+durable queue through the existing active-Run read. Restoration does not consume
+the input and reconciles by supplement identity when its transcript record arrives.
+
+## Live delivery
+
+Each presentation subscription starts its live content with a complete `live`
+snapshot. Subsequent `liveDelta` frames contain `agentRunId` and a `delta` with
+`turnId`, `messageId`, `afterSequence`, `baseRevision`, `revision`, `textOffset`,
+`text` and `reasoning`. Offsets count UTF-8 bytes, and `text` is the appended
+suffix. A non-null reasoning delta contains `blockId`, `requestId`, `offset` and
+`text`; null means reasoning is unchanged. Clearing reasoning, changing its
+identity, correcting text or changing the live identity requires a complete
+snapshot. Revisions may skip, but a delta applies only to its exact base revision
+and offsets. Projection resets and reconnections establish a new complete base.
+
+Live snapshots and deltas carry no replay cursor. Only a fully applied committed
+checkpoint advances the durable cursor. Disconnecting delivery does not cancel
+the accepted Run, and a terminal notice does not discard readable live text before
+its committed replacement arrives.
+
+Redis retains one complete text/reasoning snapshot and bounded position signals.
+Normal publication appends only new bytes. The browser delivery adapter reads
+suffixes atomically against its connection's baseline; a replacement boundary
+forces a complete snapshot, including when the replacement has the same length.
+
 ## Focused verification
 
 From the repository root:

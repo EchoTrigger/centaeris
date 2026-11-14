@@ -1,0 +1,29 @@
+.markdownContent :is(h4,h5,h6) { margin: 18px 0 8px; font-size: inherit; font-weight: 650; }
+.markdownContent blockquote { margin: 12px 0; padding-left: 16px; border-left: 2px solid var(--outline-variant); color: var(--on-surface-variant); }
+.markdownContent li > input[type="checkbox"] { margin: 0 7px 0 -2px; accent-color: var(--on-surface); }
+.markdownContent hr { margin: 20px 0; border: 0; border-top: 1px solid var(--outline-variant); }
+.markdownRawHtml, .markdownMathSource, .markdownSourcePending { white-space: pre-wrap; }
+.markdownFootnotes { font-size: .9em; color: var(--on-surface-variant); }
+.markdownMathBlock { display: block; margin: 14px 0; overflow-x: auto; }
+.markdownMathInline .katex { font-size: 1.05em; }
+.markdownCodeBlock { min-width: 0; max-width: 100%; margin: 12px 0 16px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface-color); }
+.markdownCodeToolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 34px; padding: 4px 10px; border-bottom: 1px solid var(--border); font-family: var(--font-ui, sans-serif); font-size: 12px; color: var(--on-surface-variant); }
+.markdownCodeLanguage, .markdownCodeModes { margin-right: auto; }
+.markdownCodeModes { display: flex; gap: 4px; }
+.markdownCodeAction { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 3px 6px; border: 0; border-radius: 5px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.markdownCodeAction:hover, .markdownCodeAction[aria-pressed="true"] { color: var(--on-surface); background: var(--surface-hover); }
+.markdownCodeAction:focus-visible { outline: 2px solid var(--outline); outline-offset: 2px; }
+.markdownCodeAction svg { width: 14px; height: 14px; }
+.markdownCodeNotice { flex-basis: 100%; }
+.markdownCodeBlock > .markdownCode { border: 0; border-radius: 0; margin: 0; background: transparent; }
+.markdownContent .markdownCode code { white-space: pre; }
+.markdownMermaid { padding: 16px; overflow-x: auto; text-align: center; }
+.markdownMermaid > svg { display: block; width: 100%; max-width: 100%; height: auto; margin: 0 auto; }
+.markdownContent .markdownDiagramError { margin: 0; padding: 8px 14px 12px; color: var(--on-surface-variant); font-size: 13px; }
+.markdownCodeBlock { --md-keyword: #075985; --md-string: #166534; --md-number: #9a3412; --md-comment: #707070; --md-type: #6b21a8; }
+:root[data-theme="dark"] .markdownCodeBlock { --md-keyword: #8ac5fa; --md-string: #a1d4a0; --md-number: #e5b67e; --md-comment: #9b9b9b; --md-type: #d2b3ed; }
+.markdownCode .tok-keyword, .markdownCode .tok-operator { color: var(--md-keyword); }
+.markdownCode .tok-string, .markdownCode .tok-string2 { color: var(--md-string); }
+.markdownCode .tok-number, .markdownCode .tok-bool, .markdownCode .tok-null { color: var(--md-number); }
+.markdownCode .tok-comment { color: var(--md-comment); }
+.markdownCode .tok-typeName, .markdownCode .tok-className, .markdownCode .tok-attributeName { color: var(--md-type); }

@@ -1,7 +1,8 @@
 use sha2::Digest as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,8 +41,9 @@ pub use facts::ToolExecutionFact;
 use local_handlers::BashToolHandler;
 use providers::wrap_dynamic_tool_output;
 pub use providers::{
-    extract_dynamic_tool_pending_poll, DynamicToolPendingPoll, DynamicToolPollingSpec,
-    DynamicToolProvider, DynamicToolProviderRequest, DynamicToolProviderResponse,
+    extract_dynamic_tool_pending_poll, DynamicToolCatalogFuture, DynamicToolPendingPoll,
+    DynamicToolPollingSpec, DynamicToolProvider, DynamicToolProviderRequest,
+    DynamicToolProviderResponse,
 };
 use read::ReadToolHandler;
 pub(crate) use result_capture::tool_result_capture;
@@ -120,6 +122,8 @@ pub struct ToolRuntimeContext {
     pub resource_claim_ttl_ms: u64,
     pub file_mutation_commit_port: Option<Arc<dyn FileMutationCommitPort + Send + Sync>>,
     pub external_context_store: Option<Arc<dyn ExternalContextStorePort + Send + Sync>>,
+    pub model_input_image_store:
+        Option<Arc<dyn crate::session::store::AgentRuntimeSnapshotStorePort + Send + Sync>>,
     pub sandbox_policy: ExecutionPolicy,
     pub resolved_input_manifest: Option<Arc<ResolvedInputState>>,
     pub resolved_input_root: Option<PathBuf>,
@@ -138,6 +142,7 @@ impl Default for ToolRuntimeContext {
             resource_claim_ttl_ms: DEFAULT_RESOURCE_CLAIM_TTL_MS,
             file_mutation_commit_port: None,
             external_context_store: None,
+            model_input_image_store: None,
             sandbox_policy: ExecutionPolicy::workspace_write_no_network("/workspace"),
             resolved_input_manifest: None,
             resolved_input_root: None,
@@ -179,6 +184,10 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field(
                 "external_context_store_configured",
                 &self.external_context_store.is_some(),
+            )
+            .field(
+                "model_input_image_store_configured",
+                &self.model_input_image_store.is_some(),
             )
             .field("sandbox_policy", &self.sandbox_policy)
             .field(
@@ -594,14 +603,45 @@ pub trait LocalToolHandler {
     ) -> Result<LocalToolOutput, LocalToolError>;
 }
 
-#[derive(Clone)]
 pub struct ToolLayer {
     handlers: HashMap<String, Arc<dyn LocalToolHandler + Send + Sync>>,
     dynamic_tool_providers:
         HashMap<(String, String, String), Arc<dyn DynamicToolProvider + Send + Sync>>,
     skill_index: Arc<SkillIndex>,
     dynamic_tool_registry: Arc<DynamicToolRegistry>,
+    refreshed_dynamic_tools: RwLock<Option<DynamicToolBindings>>,
+    dynamic_catalog_providers: Vec<Arc<dyn DynamicToolProvider + Send + Sync>>,
+    dynamic_catalog_frozen: AtomicBool,
     runtime_context: ToolRuntimeContext,
+}
+
+#[derive(Clone)]
+struct DynamicToolBindings {
+    registry: Arc<DynamicToolRegistry>,
+    providers: HashMap<(String, String, String), Arc<dyn DynamicToolProvider + Send + Sync>>,
+}
+
+impl Clone for ToolLayer {
+    fn clone(&self) -> Self {
+        Self {
+            handlers: self.handlers.clone(),
+            dynamic_tool_providers: self.dynamic_tool_providers.clone(),
+            skill_index: self.skill_index.clone(),
+            dynamic_tool_registry: self.dynamic_tool_registry.clone(),
+            // A batch/subagent gets an immutable view of the directory it was given.
+            refreshed_dynamic_tools: RwLock::new(
+                self.refreshed_dynamic_tools
+                    .read()
+                    .expect("tool directory lock poisoned")
+                    .clone(),
+            ),
+            dynamic_catalog_providers: self.dynamic_catalog_providers.clone(),
+            dynamic_catalog_frozen: AtomicBool::new(
+                self.dynamic_catalog_frozen.load(Ordering::Acquire),
+            ),
+            runtime_context: self.runtime_context.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for ToolLayer {
@@ -610,7 +650,7 @@ impl std::fmt::Debug for ToolLayer {
             .field("handlers_len", &self.handlers.len())
             .field("dynamic_provider_count", &self.dynamic_tool_providers.len())
             .field("skill_count", &self.skill_index.entries().len())
-            .field("dynamic_tool_count", &self.dynamic_tool_registry.len())
+            .field("dynamic_tool_count", &self.dynamic_tool_registry().len())
             .field("runtime_context", &self.runtime_context)
             .finish()
     }
@@ -696,6 +736,9 @@ impl ToolLayer {
             dynamic_tool_providers: HashMap::new(),
             skill_index: shared_skill_index.clone(),
             dynamic_tool_registry: dynamic_tool_registry.clone(),
+            refreshed_dynamic_tools: RwLock::new(None),
+            dynamic_catalog_providers: Vec::new(),
+            dynamic_catalog_frozen: AtomicBool::new(false),
             runtime_context,
         };
         layer.register(Arc::new(ReadToolHandler));
@@ -774,6 +817,14 @@ impl ToolLayer {
         self
     }
 
+    pub(crate) fn with_model_input_image_store(
+        mut self,
+        store: Arc<dyn crate::session::store::AgentRuntimeSnapshotStorePort + Send + Sync>,
+    ) -> Self {
+        self.runtime_context.model_input_image_store = Some(store);
+        self
+    }
+
     pub fn with_resolved_input_manifest(mut self, manifest: Arc<ResolvedInputState>) -> Self {
         self.runtime_context = self.runtime_context.with_resolved_input_manifest(manifest);
         self
@@ -787,6 +838,9 @@ impl ToolLayer {
     pub fn with_dynamic_tool_registry(mut self, registry: Arc<DynamicToolRegistry>) -> Self {
         self.dynamic_tool_registry = registry;
         self.dynamic_tool_providers.clear();
+        self.refreshed_dynamic_tools = RwLock::new(None);
+        self.dynamic_catalog_providers.clear();
+        self.dynamic_catalog_frozen = AtomicBool::new(false);
         self
     }
 
@@ -824,7 +878,7 @@ impl ToolLayer {
                 Ok((provider_id.to_string(), contract.name, schema_hash))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        if keys.is_empty() {
+        if keys.is_empty() && !provider.has_dynamic_catalog() {
             return Err(format!(
                 "dynamic tool provider has no authorized contract: {provider_id}"
             ));
@@ -840,21 +894,106 @@ impl ToolLayer {
         for key in keys {
             self.dynamic_tool_providers.insert(key, provider.clone());
         }
+        if provider.has_dynamic_catalog() {
+            if self
+                .dynamic_catalog_providers
+                .iter()
+                .any(|existing| existing.provider_id() == provider_id)
+            {
+                return Err(format!("duplicate dynamic catalog provider: {provider_id}"));
+            }
+            self.dynamic_catalog_providers.push(provider);
+        }
         Ok(())
+    }
+
+    /// Refreshes external directories before freezing the next model request.
+    pub async fn refresh_dynamic_tool_catalogs(&self) -> Result<(), String> {
+        if self.dynamic_catalog_providers.is_empty()
+            || self.dynamic_catalog_frozen.load(Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        let updates = futures::future::try_join_all(self.dynamic_catalog_providers.iter().map(
+            |provider| async move {
+                Ok::<_, String>((provider.clone(), provider.refresh_catalog().await?))
+            },
+        ))
+        .await?;
+        let current = self.dynamic_tool_registry();
+        let mut contracts = current.list_dynamic_contracts();
+        let mut providers = self
+            .refreshed_dynamic_tools
+            .read()
+            .map_err(|_| "tool directory lock poisoned")?
+            .as_ref()
+            .map(|bindings| bindings.providers.clone())
+            .unwrap_or_else(|| self.dynamic_tool_providers.clone());
+        let mut changed_providers = Vec::new();
+        for (provider, update) in updates {
+            let Some(update) = update else { continue };
+            if update
+                .iter()
+                .any(|contract| contract.provider_id != provider.provider_id())
+            {
+                return Err("dynamic catalog changed its provider identity".into());
+            }
+            let existing = contracts
+                .iter()
+                .filter(|contract| contract.provider_id == provider.provider_id())
+                .cloned()
+                .collect::<Vec<_>>();
+            if existing == update {
+                continue;
+            }
+            contracts.retain(|contract| contract.provider_id != provider.provider_id());
+            contracts.extend(update);
+            providers.retain(|(id, _, _), _| id != provider.provider_id());
+            changed_providers.push(provider);
+        }
+        if !changed_providers.is_empty() {
+            let registry = Arc::new(DynamicToolRegistry::from_contracts(contracts)?);
+            for provider in changed_providers {
+                for contract in registry.list_contracts().into_iter().filter(|contract| {
+                    contract.provider_id.as_deref() == Some(provider.provider_id())
+                }) {
+                    let hash = contract
+                        .schema_hash
+                        .ok_or("dynamic catalog contract has no schemaHash")?;
+                    providers.insert(
+                        (provider.provider_id().to_string(), contract.name, hash),
+                        provider.clone(),
+                    );
+                }
+            }
+            *self
+                .refreshed_dynamic_tools
+                .write()
+                .map_err(|_| "tool directory lock poisoned")? = Some(DynamicToolBindings {
+                registry,
+                providers,
+            });
+        }
+        Ok(())
+    }
+
+    /// Retains the exact directory validated against a delegated work packet.
+    pub fn freeze_dynamic_tool_catalogs(&self) {
+        self.dynamic_catalog_frozen.store(true, Ordering::Release);
     }
 
     pub fn can_handle(&self, tool_name: &str) -> bool {
         let canonical = canonicalize_tool_name(tool_name).unwrap_or(tool_name);
         self.handlers.contains_key(canonical)
             || self
-                .dynamic_tool_registry
+                .dynamic_tool_registry()
                 .find_contract(canonical)
                 .is_some()
     }
 
     pub fn is_concurrency_safe(&self, tool_name: &str) -> bool {
         let canonical = canonicalize_tool_name(tool_name).unwrap_or(tool_name);
-        if let Some(contract) = self.dynamic_tool_registry.find_contract(canonical) {
+        if let Some(contract) = self.dynamic_tool_registry().find_contract(canonical) {
             return contract.concurrency_safe;
         }
         is_tool_concurrency_safe(canonical)
@@ -862,7 +1001,7 @@ impl ToolLayer {
 
     pub fn tool_contract(&self, tool_name: &str) -> Result<ToolContract, String> {
         let canonical = canonicalize_tool_name(tool_name).unwrap_or(tool_name);
-        if let Some(contract) = self.dynamic_tool_registry.find_contract(canonical) {
+        if let Some(contract) = self.dynamic_tool_registry().find_contract(canonical) {
             return Ok(contract);
         }
         list_tool_contracts()
@@ -876,8 +1015,27 @@ impl ToolLayer {
             .map(|contract| contract.turn_behavior)
     }
 
-    pub fn dynamic_tool_registry(&self) -> &DynamicToolRegistry {
-        self.dynamic_tool_registry.as_ref()
+    pub fn dynamic_tool_registry(&self) -> Arc<DynamicToolRegistry> {
+        self.refreshed_dynamic_tools
+            .read()
+            .expect("tool directory lock poisoned")
+            .as_ref()
+            .map(|bindings| bindings.registry.clone())
+            .unwrap_or_else(|| self.dynamic_tool_registry.clone())
+    }
+
+    fn dynamic_tool_provider(
+        &self,
+        key: &(String, String, String),
+    ) -> Option<Arc<dyn DynamicToolProvider + Send + Sync>> {
+        self.refreshed_dynamic_tools
+            .read()
+            .expect("tool directory lock poisoned")
+            .as_ref()
+            .map(|bindings| &bindings.providers)
+            .unwrap_or(&self.dynamic_tool_providers)
+            .get(key)
+            .cloned()
     }
 
     pub fn skill_index(&self) -> &SkillIndex {
@@ -1042,7 +1200,7 @@ impl ToolLayer {
             .unwrap_or(req.tool_name.as_str())
             .to_string();
         if self
-            .dynamic_tool_registry
+            .dynamic_tool_registry()
             .find_contract(canonical_name.as_str())
             .is_some()
         {
@@ -1132,7 +1290,7 @@ impl ToolLayer {
             .unwrap_or(req.tool_name.as_str())
             .to_string();
         if let Some(contract) = self
-            .dynamic_tool_registry
+            .dynamic_tool_registry()
             .find_contract(canonical_name.as_str())
         {
             return self
@@ -1198,7 +1356,7 @@ impl ToolLayer {
             canonical_name.clone(),
             schema_hash.clone(),
         );
-        let Some(provider) = self.dynamic_tool_providers.get(&provider_key) else {
+        let Some(provider) = self.dynamic_tool_provider(&provider_key) else {
             let completed_at_ms = now_ms();
             return ToolExecutionResult {
                 tool_call_id: req.tool_call_id,

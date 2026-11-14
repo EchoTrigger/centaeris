@@ -321,7 +321,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
                 <button type="button" onClick={() => { setDialogError(""); setRevokeTarget(invitation); }}>{t("workspaceMembersRoute.revoke")}</button>
               </span> : <span />}
             </div>)}
-          </div> : <div className="settingsPanel shWorkspaceSettingsEmpty">{t("workspaceMembersRoute.noPendingInvitations")}</div>}
+          </div> : null}
         </section>
       </> : null}
     </div>

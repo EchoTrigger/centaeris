@@ -160,6 +160,7 @@ mod tests {
             scope,
             state: EnvironmentTaskState::Unknown,
             exit_code: None,
+            timed_out: None,
             cleanup_complete: complete,
             output_complete: false,
         }

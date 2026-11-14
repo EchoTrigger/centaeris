@@ -47,11 +47,10 @@ one maintainer, an additional approving review is not a required merge condition
 ## License
 
 Except where a file or notice says otherwise, the original source code and
-documentation are licensed under `AGPL-3.0-only`. [LICENSING.md](LICENSING.md)
-lists the Apache-2.0 directory exceptions and third-party notices. Contributions
-are submitted under the license applicable to the files being changed; changes
-spanning license boundaries retain each file's applicable license. Third-party
-materials remain under their stated licenses. The software licenses grant no
+documentation are licensed under `AGPL-3.0-only`. Contributions to first-party
+code and documentation use the same license. [LICENSING.md](LICENSING.md)
+records the scope and third-party notices. Third-party materials retain their
+stated licenses and notices. The software licenses grant no
 trademark rights.
 
 ## Contribution provenance

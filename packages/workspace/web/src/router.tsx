@@ -17,6 +17,7 @@ import SettingsRoute from "./routes/SettingsRoute";
 import WorkspaceChooserRoute from "./routes/WorkspaceChooserRoute";
 import WorkspaceHomeRoute from "./routes/WorkspaceHomeRoute";
 import TrashSessionRoute from "./routes/TrashSessionRoute";
+import WorkPrototypeRoute from "./work/WorkPrototypeRoute";
 
 export type AuthenticatedUser = {
   id: string;
@@ -65,7 +66,7 @@ function WorkspaceEntry() {
     return <Navigate
       replace
       state={location.state}
-      to={`/w/${encodeURIComponent(destination.id)}/app`}
+      to={`/w/${encodeURIComponent(destination.id)}/work`}
     />;
   }
   return <WorkspaceChooserRoute />;
@@ -221,15 +222,17 @@ export function createRouter() {
               shouldRevalidate: ({ currentParams, nextParams, defaultShouldRevalidate }) => defaultShouldRevalidate || currentParams.sessionId !== nextParams.sessionId,
               Component: WorkspaceLayout,
               children: [
-                { index: true, loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/app`) },
+                { index: true, loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/work`) },
                 {
                   Component: WorkspaceHomeRoute,
                   children: [
                     { path: "app", element: <></> },
+                    { path: "work/*", Component: WorkPrototypeRoute },
                     { path: "sessions/:sessionId", element: <></> },
                     { path: "library", loader: ({ request, params }) => new URL(request.url).searchParams.get("view") === "skills"
-                      ? redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions?view=skills`) : null, element: <LibraryRoute embedded /> },
-                    { path: "library/:libraryObjectId", element: <LibraryObjectRoute embedded /> },
+                      ? redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions?view=skills`) : null, element: <LibraryRoute embedded />, children: [
+                        { path: ":libraryObjectId", element: <LibraryObjectRoute embedded inline /> },
+                      ] },
                     { path: "extensions", Component: ExtensionsRoute },
                     { path: "settings/plugins", loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions`) },
                     ...["preferences", "security", "general", "workspace-profile", "members", "groups", "models", "environment", "developer", "archive"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),

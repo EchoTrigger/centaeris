@@ -33,6 +33,7 @@ import { TranscriptContentReader } from "./transcriptContentReader";
 import { loadTranscriptContentRange } from "./transcriptContentRanges";
 import { TranscriptReferencedContent } from "./TranscriptReferencedContent";
 import { TranscriptMessageMeta } from "./TranscriptMessageMeta";
+import { TranscriptSupplement } from "./TranscriptSupplement";
 import { toolGroupIconCategory, type ToolGroupCategory } from "./toolGroupTitle";
 import type { TranscriptContentRef } from "./transcriptContract";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
@@ -489,11 +490,11 @@ function TranscriptBlockBody({ store, blockId, searchHit }: { store: TranscriptV
     );
   }
   if (kind === "notice" && body.noticeType === "turn_supplement") {
-    return <div className="workspaceTranscriptBlock workspaceSupplement" data-block-id={block.blockId}>
+    return <TranscriptSupplement blockId={block.blockId}>
       {text === null
-        ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
-        : <MarkdownContent text={text} />}
-    </div>;
+        ? (reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null)
+        : <HighlightedTranscriptText text={text} />}
+    </TranscriptSupplement>;
   }
   return (
     <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId} data-search-hit={searchHit || undefined} tabIndex={searchHit ? -1 : undefined}>

@@ -1,0 +1,106 @@
+.issuesSurface { font-size:14px; font-weight:400; min-width:0; }
+.issuesSurface .workHeader { height:44px; min-height:44px; flex-wrap:nowrap; }
+.issuesSurface svg { width:14px; height:14px; stroke-width:1.8; }
+.issueFilters { display:flex; gap:8px; padding:8px 16px; }
+.issueFilters [aria-pressed=true] { font-weight:500; }
+.issueList { padding:0 12px; }
+.issueRow { display:flex; align-items:center; gap:12px; min-height:42px; padding:10px 12px; border-radius:6px; }
+.issueRow > span { flex:1; overflow-wrap:anywhere; }
+.issueRow small { color:var(--process-text); font-size:12px; }
+.issueEmpty { padding:32px 12px; color:var(--process-text); }
+.issueDetail { max-width:1100px; margin:24px auto; padding:0 28px 32px; width:100%; min-width:0; }
+.issueDetail.isReading { display:grid; grid-template-columns:minmax(0,1fr) 210px; column-gap:44px; align-items:start; }
+.issueHeading { grid-column:1; display:flex; align-items:center; gap:12px; min-width:0; }
+.issueHeading h1 { flex:1; min-width:0; }
+.issueHeading .issueActions { margin:0; gap:4px; flex:none; }
+.issueMoreActions { display:inline-flex; justify-content:center; align-items:center; width:30px; height:30px; border:0; border-radius:6px; background:transparent; color:var(--process-text); }
+.issueMoreActions:hover { background:var(--surface-variant); color:var(--on-surface); }
+.issueProperties { grid-column:2; grid-row:1 / span 3; min-width:0; padding-top:5px; }
+.issueProperties > h2 { color:var(--process-text); font-size:12px; font-weight:400; margin-bottom:10px; }
+.issueProperties .workChoice { display:flex; width:100%; max-width:100%; min-width:0; padding:6px 0; margin-bottom:3px; border:0; border-radius:5px; background:transparent; font-size:13px; }
+.issueProperties .workChoice:hover { background:var(--surface-variant); }
+.issueProperties .workChoice > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.issueProperties .issueTemplateValues { margin-top:24px; gap:18px; }
+.issueArchived { display:block; color:var(--process-text); font-size:12px; margin-top:10px; }
+.issueDetailBody { grid-column:1; min-width:0; margin-top:24px; }
+.issueDetail h1 { overflow-wrap:anywhere; font-size:22px; font-weight:500; }
+.issueMetadata,.issueActions { display:flex; align-items:center; gap:12px; margin:16px 0; }
+.issueMetadata { color:var(--process-text); }
+.issueDescription { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.7; margin-block:24px !important; }
+.issueForm { display:grid; gap:20px; }
+.issueForm label { display:grid; gap:8px; }
+.issueFormProperties,.issueForm footer,.issuePagination { display:flex; gap:12px; align-items:center; }
+.issueForm footer,.issuePagination { justify-content:flex-end; }
+.issueActivity { grid-column:1; min-width:0; margin-top:28px; }
+.issueActivity > summary { display:flex; align-items:center; gap:6px; width:fit-content; color:var(--process-text); font-size:12px; cursor:pointer; padding-block:5px; list-style:none; }
+.issueActivity > summary::-webkit-details-marker { display:none; }
+.issueActivity > summary > svg { width:12px; height:12px; }
+.issueActivity[open] > summary > svg { transform:rotate(90deg); }
+.issueActivity ol { list-style:none; padding:0; }
+.issueActivity li { padding:12px 0; font-size:13px; overflow-wrap:anywhere; }
+.issueActivity li > div { display:flex; gap:8px; flex-wrap:wrap; }
+.issueActivity time { color:var(--process-text); margin-left:auto; font-size:12px; }
+.issueActivity li p { margin-top:8px; color:var(--process-text); white-space:pre-wrap; }
+.issueError { display:flex; align-items:center; gap:12px; margin:8px 16px; color:var(--error); font-size:13px; }
+.issueExecutions { margin-block:28px; }
+.issueExecutionsHeader { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:8px; }
+.issueExecutions h2 { font-size:14px; font-weight:500; }
+.issueExecutionActions { display:flex; gap:5px; align-items:center; }
+.issueExecutions .issueExecutionNew { background:var(--surface-variant); }
+.issueExecutionForm { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding-block: 12px; }
+.issueExecutionForm label { display: grid; gap: 6px; color: var(--process-text); }
+.issueExecutionForm .issueExecutionInstructions { flex-basis:100%; min-width:0; }
+.issueExecutionInstructions textarea { width:100%; resize:vertical; }
+.issueExecutionForm select { color: var(--on-surface); background: var(--surface-input); border: 0; border-radius: 6px; padding: 8px; font: inherit; max-width: 100%; }
+.issueExecutionError { display: flex; align-items: center; gap: 8px; color: var(--error); }
+.issueExecutionList { display: grid; gap: 6px; list-style: none; padding: 0; }
+.issueExecutionRow { display:flex; align-items:center; gap:12px; min-width:0; padding-block:4px; }
+.issueExecutionRow .issueExecutionTitle { display:flex; justify-content:flex-start; flex:1; min-width:0; gap:9px; padding-inline:0; }
+.issueExecutionTitle > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.issueExecutionTitle > svg { color:var(--process-text); }
+.issueExecutionTitle > svg:last-child { width:12px; height:12px; margin-left:auto; }
+.issueExecutionTitle[aria-expanded=true] > svg:last-child { transform:rotate(180deg); }
+.issueExecutionRow > a { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; font-size:12px; color:var(--process-text); text-decoration:none; }
+.issueExecutionRow > a:hover { color:var(--on-surface); text-decoration:none; }
+.issueExecutionList small { flex: none; color: var(--process-text); }
+@media(max-width:760px) { .issueDetail { padding-inline:18px; } .issueDetail.isReading { grid-template-columns:minmax(0,1fr); } .issueHeading,.issueProperties,.issueDetailBody,.issueActivity { grid-column:1; grid-row:auto; } .issueProperties { padding-top:0; margin-top:12px; } .issueProperties > h2 { display:none; } .issueProperties .workChoice { width:auto; display:inline-flex; max-width:100%; margin-right:12px; } .issueProperties .issueTemplateValues { grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-block:20px 0; } .issueRow small { max-width:90px; overflow:hidden; text-overflow:ellipsis; } }
+.issueMaterials { margin-block:24px; }
+.issueMaterials > header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:8px; }
+.issueMaterials h2 { font-size:14px; font-weight:500; margin-right:auto; }
+.issueMaterialList { padding:0; list-style:none; }
+.issueMaterialList li { display:flex; align-items:center; gap:12px; padding-block:6px; }
+.issueMaterialList li > span { flex:1; overflow-wrap:anywhere; }
+.issueMaterialList li > svg { flex:none; color:var(--process-text); }
+.issueMaterialsEmpty { color:var(--process-text); font-size:12px; }
+.issueMaterialChooser { display:grid; gap:12px; padding-block:12px; }
+.issueMaterialChooser label { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.issueMaterialChooser select,.issueUpload input { max-width:100%; font:inherit; }
+.issueExecutionResults { padding:12px; }
+.issueExecutionResults p { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.6; }
+.issueExecutionResults ol { padding-left:20px; }
+.issueExecutionResults time { font-size:12px; color:var(--process-text); }
+.issueExecutionResults article + article { margin-top:20px; }
+
+.issueTemplateFields { display:grid; gap:16px; }
+.issueTemplateFields fieldset { border:0; margin:0; padding:0; min-width:0; }
+.issueTemplateItem { margin-block:12px; padding:12px; border-radius:8px; background:var(--surface-color); }
+.issueTemplateItem > .issueTemplateFields { grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr)); }
+.issueForm > label > select { background:var(--surface-input); border:0; border-radius:6px; padding:8px; color:var(--on-surface); font:inherit; }
+.issueTemplateValues { display:grid; gap:12px; margin-block:20px; }
+.issueTemplateValues dt { font-size:12px; color:var(--process-text); }
+.issueTemplateValues dd { margin:4px 0 0; overflow-wrap:anywhere; white-space:pre-wrap; }
+.issueTemplateValues ol { padding-left:20px; }
+.issueTemplateValues .issueTemplateValues { grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); margin-block:8px; }
+.issueTemplateValues.isContent { gap:24px; margin:0 0 28px; }
+.issueTemplateValues.isContent > div > dt { color:var(--on-surface); font-size:14px; font-weight:500; margin-bottom:10px; }
+.issueTemplateValues.isContent > div > dd { margin:0; }
+.issueTemplateItems { max-width:100%; overflow-x:auto; }
+.issueTemplateItems table { width:100%; border-collapse:collapse; font-size:13px; }
+.issueTemplateItems th { text-align:left; color:var(--process-text); font-size:12px; font-weight:400; padding:4px 0 10px; }
+.issueTemplateItems td { padding:8px 0; vertical-align:top; white-space:pre-wrap; overflow-wrap:anywhere; }
+.issueTemplateItems th + th,.issueTemplateItems td + td { padding-left:16px; }
+.issueTemplateItems [data-field-type=money] { text-align:right; font-variant-numeric:tabular-nums; }
+.issueTemplateItems tbody tr:hover { background:var(--surface-variant); }
+
+.issueTemplateFields input[type=date] { color-scheme:light; }
+:root[data-theme=dark] .issueTemplateFields input[type=date] { color-scheme:dark; }

@@ -183,5 +183,6 @@
   "postgres_store::session_subagents::tests::postgres_session_subagents_read_persists_and_enforces_parent_scope",
   "postgres_store::session_subagents::tests::postgres_session_subagent_read_scope_blocks_purge_until_transaction_ends",
   "postgres_store::session_subagents::tests::postgres_subagent_presentation_source_is_atomic_and_status_only",
-  "postgres_store::session_subagents::tests::postgres_subagent_presentation_migrates_nineteen_forward_and_rejects_trigger_drift"
+  "postgres_store::session_subagents::tests::postgres_subagent_presentation_migrates_nineteen_forward_and_rejects_trigger_drift",
+  "postgres_store::integration_tests::model_input_image_tests::postgres_image_history_upgrades_preserves_sessions_and_is_immutable_and_purgeable"
 ]

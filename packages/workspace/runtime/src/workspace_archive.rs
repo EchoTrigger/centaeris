@@ -34,7 +34,7 @@ pub struct ArchiveSummary {
     pub compressed_bytes: u64,
     /// Sum of file body bytes only; excludes manifest, tar headers/padding, and zstd framing.
     pub expanded_bytes: u64,
-    /// Workspace files only; excludes the manifest and GNU long-name entries.
+    /// Workspace nodes; excludes the manifest and GNU long-name entries.
     pub file_count: u32,
     pub manifest: SandboxWorkspaceSnapshotManifest,
 }
@@ -109,9 +109,10 @@ fn encode_with<W: Write>(
     ))
 }
 
-/// Convert to the existing v1 manifest-length/JSON/body stream. Output must be
+/// Convert to the manifest-length/JSON/body stream. The manifest retains its
+/// explicit snapshot schema, including v2 directories and symlinks. Output must be
 /// isolated until success; a later archive integrity error can follow emitted
-/// v1 bytes. Returned byte counts describe the compressed input and file bodies,
+/// frame bytes. Returned byte counts describe the compressed input and file bodies,
 /// not the output frame size or physical I/O.
 pub fn decode_to_v1(
     input: impl Read,
@@ -293,7 +294,7 @@ fn validate_manifest(
     validate_limits(limits)?;
     let expanded = crate::docker_execution_host::validate_workspace_snapshot_manifest(manifest)
         .map_err(invalid)?;
-    if manifest.files.len() as u64 > u64::from(limits.file_count)
+    if manifest.node_count() as u64 > u64::from(limits.file_count)
         || expanded > limits.expanded_bytes
     {
         return Err(invalid("archive exceeds declared workspace limits"));
@@ -311,7 +312,7 @@ fn summary(
         compressed_sha256: format!("sha256:{:x}", digest.finalize()),
         compressed_bytes: bytes,
         expanded_bytes: expanded,
-        file_count: manifest.files.len() as u32,
+        file_count: manifest.node_count() as u32,
         manifest,
     }
 }

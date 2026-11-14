@@ -77,7 +77,7 @@ use hosted_execution::protocol::{
     SandboxFileSystemRequest, SandboxInputInventory, SandboxInputRevokeRequest,
     SandboxMaterializedInput, SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile,
     SandboxWorkspaceSnapshotManifest, SANDBOX_INPUT_INVENTORY_SCHEMA,
-    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -827,8 +827,7 @@ impl DockerExecutionHostRunner {
         docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?;
         let oci_runtime = OciRuntime::from_environment()?;
         let runtime_name = oci_runtime.docker_runtime_name();
-        let info = crate::docker_engine::info()?;
-        crate::docker_storage::require_overlayfs(info["Driver"].as_str())?;
+        let info = crate::docker_engine::sandbox_info()?;
         let runtimes = &info["Runtimes"];
         if runtimes.get(runtime_name).is_none() {
             return Err(format!(
@@ -2515,6 +2514,13 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 "projected Skill and Plugin files are read-only",
             ));
         }
+        if system_skill_path {
+            return run_system_skill_file_system_operation_at(
+                Path::new(SYSTEM_SKILL_CONTAINER_ROOT),
+                request.model_path.as_str(),
+                request.operation,
+            );
+        }
         if !read_only_path && !memory_path {
             self.refresh_materialized_inputs()
                 .map_err(filesystem_input_unavailable)?;
@@ -2757,6 +2763,35 @@ fn authorized_plugin_path(
     ))
 }
 
+fn run_system_skill_file_system_operation_at(
+    root: &Path,
+    model_path: &str,
+    operation: ExecutionFileSystemOperation,
+) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+    let path = if model_path == SYSTEM_SKILL_CONTAINER_ROOT {
+        root.to_path_buf()
+    } else {
+        let relative = model_path
+            .strip_prefix(&format!("{SYSTEM_SKILL_CONTAINER_ROOT}/"))
+            .ok_or_else(|| {
+                ExecutionFileSystemError::new(
+                    ExecutionFileSystemErrorKind::InvalidPath,
+                    "System Skill path is invalid",
+                )
+            })?;
+        root.join(relative)
+    };
+    centaeris_core::execution::run_policy_scoped_execution_file_system_operation(
+        ExecutionFileSystemRequest {
+            operation_id: None,
+            cwd: root.to_path_buf(),
+            policy: ExecutionPolicy::read_only_no_network(root),
+            model_path: path.to_string_lossy().into_owned(),
+            operation,
+        },
+    )
+}
+
 fn authorized_system_skill_path(model_path: &str) -> Result<bool, ExecutionFileSystemError> {
     if model_path == SYSTEM_SKILL_CONTAINER_ROOT {
         return Ok(true);
@@ -2794,6 +2829,7 @@ fn ensure_container_inner(
 ) -> Result<(), crate::postgres_store::execution_instances::InstancePreparationFailure> {
     use crate::postgres_store::execution_instances::InstancePreparationFailure;
     let body = container_create_body(expected)?;
+    crate::docker_engine::sandbox_info()?;
     if let Some(facts) = inspect_container(expected.name)? {
         require_plugin_mounts_match(
             &facts.mounts,
@@ -2862,7 +2898,7 @@ fn container_ids_for_agent_run(agent_run_id: &str) -> Result<Vec<String>, String
 }
 
 fn resident_host_id() -> Result<String, String> {
-    crate::docker_engine::info()?["ID"]
+    crate::docker_engine::sandbox_info()?["ID"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
@@ -2870,7 +2906,7 @@ fn resident_host_id() -> Result<String, String> {
 }
 
 pub(crate) fn resident_host_context() -> Result<(String, ResidentCapacity), String> {
-    let info = crate::docker_engine::info()?;
+    let info = crate::docker_engine::sandbox_info()?;
     let id = info["ID"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
@@ -4002,7 +4038,7 @@ fn inspect_workspace_snapshot_with_manifest(
             sha256: format!("sha256:{:x}", digest.finalize()),
             size_bytes,
             expanded_size_bytes,
-            file_count: u32::try_from(manifest.files.len())
+            file_count: u32::try_from(manifest.node_count())
                 .map_err(|_| "snapshot file count overflow".to_string())?,
         },
         Some(manifest),
@@ -4051,42 +4087,78 @@ fn read_snapshot_exact(
 pub(crate) fn validate_workspace_snapshot_manifest(
     manifest: &SandboxWorkspaceSnapshotManifest,
 ) -> Result<u64, String> {
-    if manifest.schema != SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA || manifest.files.is_empty() {
+    if !matches!(
+        manifest.schema.as_str(),
+        SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA | SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1
+    ) || manifest.is_empty()
+        || (manifest.schema == SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1
+            && (!manifest.directories.is_empty() || !manifest.symlinks.is_empty()))
+    {
         return Err("snapshot manifest is invalid".to_string());
     }
+    let mut paths = std::collections::BTreeMap::new();
     let mut previous = None;
     let mut expanded_size_bytes = 0_u64;
-    for SandboxWorkspaceSnapshotFile {
-        path,
-        size_bytes,
-        sha256,
-        ..
-    } in &manifest.files
-    {
-        if path.is_empty()
-            || path.trim() != path
-            || path.len() > 4 * 1024
-            || path.split('/').count() > 64
-            || path.contains('\\')
-            || path.starts_with('/')
-            || path.chars().any(char::is_control)
-            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
-            || path.nfc().collect::<String>() != *path
-            || !is_workspace_sha256(sha256)
-            || previous.is_some_and(|value: &str| value >= path.as_str())
-            || previous.is_some_and(|value: &str| {
-                path.strip_prefix(value)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-            })
+    for file in &manifest.files {
+        validate_workspace_snapshot_path(&file.path)?;
+        if !is_workspace_sha256(&file.sha256)
+            || previous.is_some_and(|value: &str| value >= file.path.as_str())
         {
             return Err("snapshot manifest paths or hashes are invalid".to_string());
         }
         expanded_size_bytes = expanded_size_bytes
-            .checked_add(*size_bytes)
+            .checked_add(file.size_bytes)
             .ok_or_else(|| "snapshot expanded size overflow".to_string())?;
-        previous = Some(path.as_str());
+        paths.insert(file.path.as_str(), false);
+        previous = Some(file.path.as_str());
+    }
+    let mut previous = None;
+    for directory in &manifest.directories {
+        validate_workspace_snapshot_path(directory)?;
+        if previous.is_some_and(|value: &str| value >= directory.as_str())
+            || paths.insert(directory.as_str(), true).is_some()
+        {
+            return Err("snapshot manifest paths are not sorted and unique".into());
+        }
+        previous = Some(directory.as_str());
+    }
+    let mut previous = None;
+    for link in &manifest.symlinks {
+        validate_workspace_snapshot_path(&link.path)?;
+        if link.target.is_empty()
+            || link.target.len() > 4096
+            || link.target.contains('\0')
+            || previous.is_some_and(|value: &str| value >= link.path.as_str())
+            || paths.insert(link.path.as_str(), false).is_some()
+        {
+            return Err("snapshot manifest link metadata is invalid".into());
+        }
+        previous = Some(link.path.as_str());
+    }
+    for path in paths.keys() {
+        for (index, _) in path.match_indices('/') {
+            if paths.get(&path[..index]) == Some(&false) {
+                return Err("snapshot manifest parent is not a directory".into());
+            }
+        }
     }
     Ok(expanded_size_bytes)
+}
+
+fn validate_workspace_snapshot_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.trim() != path
+        || path.len() > 4 * 1024
+        || path.split('/').count() > 64
+        || path.contains('\\')
+        || path.starts_with('/')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+        || path.nfc().collect::<String>() != path
+    {
+        return Err("snapshot manifest path is invalid".into());
+    }
+    Ok(())
 }
 
 fn is_workspace_sha256(value: &str) -> bool {
@@ -5318,9 +5390,19 @@ mod tests {
             assert!(host["Binds"].is_null());
             assert!(host["Tmpfs"].is_null());
             let mounts = host["Mounts"].as_array().unwrap();
-            assert_eq!(mounts.len(), 2);
+            assert_eq!(
+                mounts.len(),
+                if runtime == OciRuntime::Runsc { 3 } else { 2 }
+            );
             assert_eq!(mounts[0]["Target"], "/opt/centaeris/plugins/banana");
             assert_eq!(mounts[1]["Target"], AGENT_BINARY);
+            if runtime == OciRuntime::Runsc {
+                assert_eq!(
+                    mounts[2]["Target"],
+                    environment_container::RUNSC_TMP_ROOTFS_MARKER
+                );
+                assert_eq!(mounts[2]["Source"], mounts[1]["Source"]);
+            }
             assert!(mounts.iter().all(|mount| mount["ReadOnly"] == true));
             assert_eq!(host["Memory"], expected.resources.memory_bytes);
             assert_eq!(host["PidsLimit"], expected.resources.pids_limit);
@@ -5430,6 +5512,8 @@ mod tests {
                 sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
                 executable: false,
             }],
+            directories: Vec::new(),
+            symlinks: Vec::new(),
         };
         let manifest = serde_json::to_vec(&manifest).unwrap();
         let mut frame = (manifest.len() as u32).to_be_bytes().to_vec();
@@ -5679,6 +5763,8 @@ mod tests {
                 sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
                 executable: false,
             }],
+            directories: Vec::new(),
+            symlinks: Vec::new(),
         };
         let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest");
         let mut frame = Vec::new();
@@ -5712,6 +5798,8 @@ mod tests {
                 sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
                 executable: false,
             }],
+            directories: Vec::new(),
+            symlinks: Vec::new(),
         };
         let frame = encode_frame(&manifest, bytes).unwrap();
         let snapshot = RecoveryWorkspaceSnapshotV1 {
@@ -6479,7 +6567,7 @@ mod tests {
         let mut config = body.clone();
         config.as_object_mut().unwrap().remove("HostConfig");
         config.as_object_mut().unwrap().remove("Image");
-        let facts = ContainerFacts {
+        let mut facts = ContainerFacts {
             id: "a".repeat(64),
             raw: serde_json::json!({"Id":"a".repeat(64), "Config":config,
                 "Image":body["Image"], "HostConfig":host, "Mounts":host["Mounts"]}),
@@ -6496,6 +6584,19 @@ mod tests {
             mounts: serde_json::from_value(host["Mounts"].clone()).unwrap(),
         };
         assert!(facts.matches(&expected), "original retained configuration");
+        let original_storage = facts.raw["HostConfig"]["StorageOpt"].clone();
+        for actual in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"size":"1"}),
+        ] {
+            facts.raw["HostConfig"]["StorageOpt"] = actual;
+            assert!(
+                !facts.matches_configuration(&expected),
+                "retained reuse requires the signed writable-layer quota"
+            );
+        }
+        facts.raw["HostConfig"]["StorageOpt"] = original_storage;
         let changed = ContainerExpectation {
             network: ExecutionNetwork::PublicInternet,
             ..expected
@@ -6564,6 +6665,16 @@ mod tests {
             facts.matches(&expected),
             "original running instance remains eligible for its fenced RPCs"
         );
+        let original_mounts = facts.raw["HostConfig"]["Mounts"].clone();
+        facts.raw["HostConfig"]["Mounts"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(
+            !facts.matches_configuration(&expected),
+            "runsc reuse requires the read-only /tmp child mount"
+        );
+        facts.raw["HostConfig"]["Mounts"] = original_mounts;
         facts.raw["State"]["Paused"] = true.into();
         assert!(
             facts.matches_configuration(&expected),
@@ -7227,6 +7338,94 @@ mod tests {
         assert!(
             authorized_plugin_path(&[], "/opt/centaeris/plugins/legal-research/SKILL.md").is_err()
         );
+    }
+
+    #[test]
+    fn read_root_system_catalog_uses_runtime_read_only_projection() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("catalog");
+        let skill = root.join("web-output");
+        fs::create_dir_all(&skill).unwrap();
+        let content = b"Runtime-provided instructions\n";
+        fs::write(skill.join("SKILL.md"), content).unwrap();
+        fs::write(skill.join("reference.md"), b"Reference").unwrap();
+        fs::write(fixture.path().join("private.txt"), b"Not a System Skill").unwrap();
+        let model_path = format!("{SYSTEM_SKILL_CONTAINER_ROOT}/web-output/SKILL.md");
+        let run = |path: &str, operation| {
+            run_system_skill_file_system_operation_at(&root, path, operation)
+        };
+        let read = run(
+            &model_path,
+            ExecutionFileSystemOperation::ReadFile {
+                max_bytes: content.len(),
+            },
+        )
+        .unwrap();
+        let ExecutionFileSystemOutput::ReadFile(read) = read else {
+            panic!("expected System Skill file contents");
+        };
+        assert_eq!(read.bytes, content);
+
+        let list = run(
+            SYSTEM_SKILL_CONTAINER_ROOT,
+            ExecutionFileSystemOperation::ListDirectory {
+                recursive: false,
+                max_entries: 1,
+            },
+        )
+        .unwrap();
+        let ExecutionFileSystemOutput::ListDirectory(list) = list else {
+            panic!("expected System Skill catalog listing");
+        };
+        assert_eq!(list.entries.len(), 1);
+        assert_eq!(list.entries[0].path, "web-output");
+
+        for operation in [
+            ExecutionFileSystemOperation::InspectMutationPath,
+            ExecutionFileSystemOperation::WriteFile {
+                content: b"Changed instructions".to_vec(),
+                observed_file_hash: None,
+                create_only: false,
+            },
+            ExecutionFileSystemOperation::DeleteFile {
+                expected_file_hash: read.file_hash,
+            },
+        ] {
+            assert_eq!(
+                run(&model_path, operation).unwrap_err().kind,
+                ExecutionFileSystemErrorKind::PermissionDenied
+            );
+        }
+        assert_eq!(fs::read(skill.join("SKILL.md")).unwrap(), content);
+        assert_eq!(
+            run(
+                &format!("{SYSTEM_SKILL_CONTAINER_ROOT}/../private.txt"),
+                ExecutionFileSystemOperation::ReadFile { max_bytes: 64 },
+            )
+            .unwrap_err()
+            .kind,
+            ExecutionFileSystemErrorKind::PermissionDenied
+        );
+        for (path, operation) in [
+            (
+                model_path,
+                ExecutionFileSystemOperation::ReadFile {
+                    max_bytes: content.len() - 1,
+                },
+            ),
+            (
+                format!("{SYSTEM_SKILL_CONTAINER_ROOT}/web-output"),
+                ExecutionFileSystemOperation::ListDirectory {
+                    recursive: false,
+                    max_entries: 1,
+                },
+            ),
+        ] {
+            assert_eq!(
+                run(&path, operation).unwrap_err().kind,
+                ExecutionFileSystemErrorKind::TooLarge
+            );
+        }
     }
 
     #[test]

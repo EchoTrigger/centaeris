@@ -336,7 +336,7 @@ fn failure(code: &str) -> DynamicToolProviderResponse {
     response(details, message, true)
 }
 fn summary(task: &EnvironmentTaskSnapshot) -> Value {
-    json!({"taskId":task.task_id,"state":task.state,"exitCode":task.exit_code,"cleanupComplete":task.cleanup_complete,"outputComplete":task.output_complete})
+    json!({"taskId":task.task_id,"state":task.state,"exitCode":task.exit_code,"timedOut":task.timed_out,"cleanupComplete":task.cleanup_complete,"outputComplete":task.output_complete})
 }
 fn project(
     result: EnvironmentTaskResult,

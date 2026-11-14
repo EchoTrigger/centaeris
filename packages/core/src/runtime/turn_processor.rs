@@ -18,7 +18,7 @@ impl<
         req: ProcessTurnRequest,
         stream_sink: Option<&mut (dyn FnMut(TurnUpdate) + Send + '_)>,
     ) -> Result<TurnStepResult, String> {
-        self.process_turn_with_stream_sink_and_tool_safe_point_async(req, stream_sink, None)
+        self.process_turn_with_stream_sink_and_tool_safe_point_async(req, stream_sink, None, None)
             .await
     }
 
@@ -27,7 +27,9 @@ impl<
         req: ProcessTurnRequest,
         mut stream_sink: Option<&mut (dyn FnMut(TurnUpdate) + Send + '_)>,
         tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
+        execution_tools: Option<&ToolLayer>,
     ) -> Result<TurnStepResult, String> {
+        let execution_tools = execution_tools.unwrap_or(&self.tools_port);
         let mut session = self
             .session_manager
             .load_or_create_session(req.session_id.as_str())?;
@@ -118,8 +120,11 @@ impl<
         {
             return Err("provider returned an empty final response without tool calls".to_string());
         }
-        let question_call =
-            self.validate_tool_turn_behavior_preflight(&session, &effective_generate_result)?;
+        let question_call = self.validate_tool_turn_behavior_preflight(
+            &session,
+            &effective_generate_result,
+            execution_tools,
+        )?;
         let system_prompt_manifest_json = self.apply_system_prompt_template(
             &mut session,
             &req,
@@ -130,6 +135,7 @@ impl<
         let tool_permission_preview = self.build_tool_permission_preview(
             &session,
             effective_generate_result.tool_calls.as_slice(),
+            execution_tools,
         );
         let mut route_state = turn_state::build_route_state(
             effective_generate_result.clone(),
@@ -250,6 +256,7 @@ impl<
                         req.agent_run_identity.as_ref(),
                         stream_sink,
                         tool_safe_point,
+                        Some(execution_tools),
                     )
                     .await?;
                 merge_recovery_traces(

@@ -14,9 +14,17 @@ storage_driver="$(docker info --format '{{.Driver}}')" || {
   exit 69
 }
 case "$storage_driver" in
-  overlayfs|overlay2) ;;
-  *) echo "fresh-start gate requires OverlayFS-backed Docker storage" >&2; exit 69 ;;
+  overlay2) ;;
+  *) echo "fresh-start gate requires Docker classic overlay2 storage" >&2; exit 69 ;;
 esac
+if ! docker info --format '{{json .DriverStatus}}' | python3 -c '
+import json, sys
+status = dict(json.load(sys.stdin))
+sys.exit(0 if status.get("Backing Filesystem") == "xfs" and status.get("Supports d_type") == "true" else 1)
+'; then
+  echo "fresh-start gate requires XFS with d_type support" >&2
+  exit 69
+fi
 if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
   echo "fresh-start gate requires runsc on an explicitly disposable Docker host" >&2
   exit 69
@@ -43,6 +51,8 @@ supervisor_process=""
 supervisor_input=""
 unset ENVIRONMENT_EXECUTION_HELPER ENVIRONMENT_HOST_SOCKET_DIRECTORY
 compose=(docker compose --parallel 1 --env-file "$env_file")
+builder=(docker --host unix:///run/centaeris-builder/docker.sock)
+builder_compose=("${builder[@]}" compose --parallel 1 --env-file "$env_file")
 
 cleanup() {
   status=$?
@@ -59,10 +69,9 @@ cleanup() {
     supervisor_status=$?
     if [[ $status -eq 0 && $supervisor_status -ne 0 ]]; then status=$supervisor_status; fi
   fi
-  for container_id_file in "$helper_container_id_file" "$supervisor_container_id_file"; do
-    if [[ -s "$container_id_file" ]]; then docker rm -f "$(cat "$container_id_file")"; fi
-  done
-  docker image rm "$supervisor_image" >/dev/null 2>&1
+  if [[ -s "$helper_container_id_file" ]]; then docker rm -f "$(cat "$helper_container_id_file")"; fi
+  if [[ -s "$supervisor_container_id_file" ]]; then "${builder[@]}" rm -f "$(cat "$supervisor_container_id_file")"; fi
+  "${builder[@]}" image rm "$supervisor_image" >/dev/null 2>&1
   rm -rf -- "$fixture_directory"
   exit "$status"
 }
@@ -100,36 +109,36 @@ target.write_text("\n".join(rendered) + "\n", encoding="utf-8")
 PY
 
 "${compose[@]}" config --quiet
-"${compose[@]}" config --format json | WORKSPACE_ROOT="$workspace_root" python3 -c '
-import json, os, pathlib, sys
-config = json.load(sys.stdin)
-assert config["name"] == "centaeris-workspace"
-required_builds = {"api", "document-processor", "runtime", "web", "workspace-general"}
-assert required_builds <= {name for name, service in config["services"].items() if "build" in service}
-for service_name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
-    service = config["services"][service_name]
-    assert not service.get("profiles")
-    assert service_name in config["services"][consumer]["depends_on"]
-workspace = pathlib.Path(os.environ["WORKSPACE_ROOT"]).resolve()
-for name in required_builds:
-    assert pathlib.Path(config["services"][name]["build"]["context"]).resolve() == workspace
-for name in ("runtime", "workspace-general"):
-    assert not config["services"][name]["build"].get("additional_contexts")
-expected_volumes = {"agent-memory", "material-broker-data", "plugin-data", "postgres-data", "runtime-data", "storage-data", "upload-temp"}
-assert set(config["volumes"]) == expected_volumes
-for key, value in config["volumes"].items():
-    assert value["name"] == f"centaeris-workspace_{key}"
-'
+"${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-compose.py
 
-for service in document-processor workspace-general runtime api web; do
-  "${compose[@]}" build --pull "$service"
+built_services=(postgres document-processor workspace-general runtime api web)
+for service in "${built_services[@]}"; do
+  # Compose delegates to Bake, whose child process also needs the builder host.
+  DOCKER_HOST=unix:///run/centaeris-builder/docker.sock "${builder_compose[@]}" build --pull "$service"
+done
+built_image_names="$("${builder_compose[@]}" config --format json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+for name in sys.argv[1:]:
+    print(services[name]["image"])
+' "${built_services[@]}")"
+mapfile -t built_images <<< "$built_image_names"
+for image in "${built_images[@]}"; do
+  "${builder[@]}" image inspect --format '{{.Id}}' "$image" >/dev/null
+done
+"${builder[@]}" image save "${built_images[@]}" | docker image load
+for image in "${built_images[@]}"; do
+  if [[ "$("${builder[@]}" image inspect --format '{{.Id}}' "$image")" != "$(docker image inspect --format '{{.Id}}' "$image")" ]]; then
+    echo "runtime image differs from the ext4 build: $image" >&2
+    exit 66
+  fi
 done
 "${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-images.py
 # Reuse the workspace-general builder's cached compile, keeping host binaries out
 # of the final sandbox image. The supervisor must match the source under test.
-docker build --target build --tag "$supervisor_image" --file packages/workspace/executor/Dockerfile.agent .
-docker create --cidfile "$supervisor_container_id_file" "$supervisor_image" >/dev/null
-docker cp "$(cat "$supervisor_container_id_file"):/src/target/release/environment_host_supervisor" "$fixture_directory/environment_host_supervisor"
+"${builder[@]}" build --target build --tag "$supervisor_image" --file packages/workspace/executor/Dockerfile.agent .
+"${builder[@]}" create --cidfile "$supervisor_container_id_file" "$supervisor_image" >/dev/null
+"${builder[@]}" cp "$(cat "$supervisor_container_id_file"):/src/target/release/environment_host_supervisor" "$fixture_directory/environment_host_supervisor"
 # Extract the real helper without dispatching an AgentRun.
 helper_image="$("${compose[@]}" config --format json | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["workspace-general"]["image"])')"
 docker create --cidfile "$helper_container_id_file" "$helper_image" >/dev/null
@@ -154,9 +163,9 @@ values = {"ENVIRONMENT_EXECUTION_HELPER": str(root / "execution_agent"),
 path.write_text("\n".join(f"{key}={values[key]}" if (key := line.partition("=")[0]) in values else line
                           for line in path.read_text().splitlines()) + "\n")
 PY
-"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime platform-reconciler material-worker material-scheduler web
+"${compose[@]}" up -d --no-build --wait --wait-timeout 420 postgres redis api runtime platform-reconciler material-worker material-scheduler title-worker web
 
-for service in postgres redis api runtime platform-reconciler material-broker material-worker material-scheduler web; do
+for service in postgres redis api runtime platform-reconciler material-broker material-worker material-scheduler title-worker web; do
   "${compose[@]}" ps --status running --services | grep -Fx "$service" >/dev/null
 done
 

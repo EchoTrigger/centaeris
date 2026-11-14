@@ -39,11 +39,12 @@ fn generate_cross_language_archive_fixture() {
     let path = format!("nested/{}/数据.bin", "x".repeat(180));
     let script = b"#!/bin/sh\necho ready\n";
     let binary: Vec<u8> = (0..=255).cycle().take(2048).collect();
-    let files = manifest(vec![
+    let mut files = manifest(vec![
         file("a-empty", b"", false),
         file("bin/run", script, true),
         file(&path, &binary, false),
     ]);
+    files.schema = hosted_execution::protocol::SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1.into();
     let body = [script.as_slice(), binary.as_slice()].concat();
     let mut archive = Vec::new();
     encode_ordered(&files, body.as_slice(), &mut archive, limits()).unwrap();

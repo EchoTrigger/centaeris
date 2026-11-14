@@ -45,6 +45,8 @@ from app_core.runtime_contract import (
     _verify_authorization_digest_signature,
 )
 from app_core.runtime_client import (
+    AGENT_RUN_LIFECYCLE_JOB_KIND,
+    _validate_agent_run_binding,
     build_agent_run_start,
     build_agent_run_cleanup,
     get_agent_run_cleanup_receipt,
@@ -110,9 +112,6 @@ EXECUTION_WORKSPACE_DOWNLOAD_FIELDS = SESSION_WORKSPACE_LEASE_FIELDS | {
 MAX_SESSION_WORKSPACE_METADATA_BYTES = 64 * 1024
 MAX_SESSION_WORKSPACE_FILE_COUNT = 2_147_483_647
 MAX_SESSION_WORKSPACE_MANIFEST_BYTES = 1024 * 1024
-MAX_SESSION_WORKSPACE_PATH_BYTES = 4 * 1024
-MAX_SESSION_WORKSPACE_PATH_DEPTH = 64
-SESSION_WORKSPACE_SNAPSHOT_SCHEMA = "workspace.snapshot.v1"
 SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES = 64 * 1024
 
 
@@ -550,59 +549,11 @@ def _verify_workspace_snapshot(candidate: dict, storage_key: str) -> None:
 
 
 def _workspace_snapshot_manifest(manifest_bytes: bytes, candidate: dict) -> list[dict]:
+    from app_core.workspace_snapshot import SnapshotValidationError, manifest_files
     try:
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-        canonical = json.dumps(
-            manifest, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        return manifest_files(manifest_bytes, candidate)
+    except SnapshotValidationError:
         raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400) from None
-    if canonical != manifest_bytes or not isinstance(manifest, dict) or set(manifest) != {
-        "schema",
-        "files",
-    }:
-        raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-    files = manifest["files"]
-    if manifest["schema"] != SESSION_WORKSPACE_SNAPSHOT_SCHEMA or not isinstance(files, list):
-        raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-    if len(files) != candidate["fileCount"] or not files:
-        raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-    previous = None
-    expanded_size_bytes = 0
-    for file in files:
-        if not isinstance(file, dict) or set(file) != {
-            "path",
-            "sizeBytes",
-            "sha256",
-            "executable",
-        }:
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-        try:
-            validate_virtual_path(file["path"])
-            require_sha256("workspace snapshot file sha256", file["sha256"])
-        except ValueError:
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400) from None
-        if (
-            len(file["path"].encode("utf-8")) > MAX_SESSION_WORKSPACE_PATH_BYTES
-            or len(file["path"].split("/")) > MAX_SESSION_WORKSPACE_PATH_DEPTH
-            or not isinstance(file["sizeBytes"], int)
-            or isinstance(file["sizeBytes"], bool)
-            or file["sizeBytes"] < 0
-            or not isinstance(file["executable"], bool)
-            or previous is not None
-            and (
-                previous >= file["path"]
-                or file["path"].startswith(f"{previous}/")
-            )
-        ):
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-        expanded_size_bytes += file["sizeBytes"]
-        if expanded_size_bytes > candidate["expandedSizeBytes"]:
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-        previous = file["path"]
-    if expanded_size_bytes != candidate["expandedSizeBytes"]:
-        raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
-    return files
 
 
 def _require_workspace_eof(request) -> None:
@@ -1708,18 +1659,36 @@ def reconcile_agent_run_lifecycle(request):
                     )
                 terminalized += 1
                 continue
-            if agent_run.session.purpose == "agentRunApi":
-                schedule_agent_run_lifecycle(agent_run, require_current_authority=False)
-                _cancel_agent_run_api_run_if_required(agent_run)
+            agent_run_api = agent_run.session.purpose == "agentRunApi"
+            if job is None:
+                if agent_run_api:
+                    schedule_agent_run_lifecycle(agent_run, require_current_authority=False)
+                else:
+                    schedule_agent_run_lifecycle(agent_run)
             else:
-                schedule_agent_run_lifecycle(agent_run)
-            if agent_run.status == "queued" and agent_run.session.purpose != "agentRunApi":
+                # Existing jobs already own their Runtime wakeups. Keep the
+                # same authority and binding checks without a no-op schedule RPC.
+                authorization = _validate_agent_run_binding(
+                    agent_run, require_current_authority=not agent_run_api)
+                if (
+                    job.get("jobId") != agent_run_lifecycle_job_id(agent_run.id)
+                    or job.get("jobKind") != AGENT_RUN_LIFECYCLE_JOB_KIND
+                    or job.get("idempotencyKey") != f"agent_run.lifecycle:{agent_run.id}:{authorization.digest}"
+                    or job.get("sessionId") != agent_run.session_id
+                    or job.get("payloadRef") != f"record:agent_run:{agent_run.id}"
+                    or job.get("status") not in {"queued", "leased", "running"}
+                ):
+                    raise RuntimeError("agent_run_lifecycle_job_binding_invalid")
+            if agent_run_api:
+                _cancel_agent_run_api_run_if_required(agent_run)
+            if agent_run.status == "queued" and not agent_run_api:
                 with transaction.atomic():
                     current = (AgentRun.objects.select_for_update(of=("self",))
                                .select_related("authorization", "modelConfig", "session", "environment")
                                .get(id=agent_run.id))
                     _expire_queued_run_locked(current)
-            scheduled += 1
+            if job is None:
+                scheduled += 1
         except Exception:
             pending += 1
             logger.exception(

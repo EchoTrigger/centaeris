@@ -32,6 +32,36 @@ pub(crate) type ProtocolResult = Result<Value, (u16, &'static str)>;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspacePreservationRetryRequest {
+    schema: String,
+    job_id: String,
+}
+
+pub(crate) fn retry_workspace_preservation(
+    body: &[u8],
+    store: &PostgresRuntimeStore,
+) -> ProtocolResult {
+    let request: WorkspacePreservationRetryRequest = decode(body)?;
+    if !valid_workspace_preservation_retry(&request) {
+        return Err((400, "workspace_preservation_retry_invalid"));
+    }
+    store
+        .retry_workspace_preservation(&request.job_id)
+        .map_err(|_| (409, "workspace_preservation_retry_rejected"))?;
+    Ok(json!({"jobId": request.job_id, "disposition": "queued"}))
+}
+
+fn valid_workspace_preservation_retry(request: &WorkspacePreservationRetryRequest) -> bool {
+    request.schema == "runtime.job.workspace_preservation.retry.v1"
+        && request
+            .job_id
+            .strip_prefix("agent_run.lifecycle:")
+            .is_some_and(|run| !run.is_empty())
+        && runtime_job_id(&request.job_id)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ScheduleRequest {
     schema: String,
     job_id: String,
@@ -828,6 +858,39 @@ fn now_ms() -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workspace_preservation_retry_accepts_only_the_exact_canonical_job_contract() {
+        let body = json!({"schema":"runtime.job.workspace_preservation.retry.v1","jobId":"agent_run.lifecycle:agent_run_original"});
+        let request: WorkspacePreservationRetryRequest =
+            serde_json::from_value(body.clone()).unwrap();
+        assert!(valid_workspace_preservation_retry(&request));
+        for field in ["leaseOwner", "force", "agentRunId"] {
+            let mut extra = body.clone();
+            extra[field] = json!("extra");
+            assert!(serde_json::from_value::<WorkspacePreservationRetryRequest>(extra).is_err());
+        }
+        for (schema, job_id) in [
+            (
+                "runtime.job.workspace_preservation.retry.v2",
+                "agent_run.lifecycle:agent_run_original",
+            ),
+            (
+                "runtime.job.workspace_preservation.retry.v1",
+                "worker.noop:other",
+            ),
+            (
+                "runtime.job.workspace_preservation.retry.v1",
+                "agent_run.lifecycle:",
+            ),
+        ] {
+            assert!(!valid_workspace_preservation_retry(
+                &WorkspacePreservationRetryRequest {
+                    schema: schema.into(),
+                    job_id: job_id.into()
+                }
+            ));
+        }
+    }
     #[test]
     fn heartbeat_storage_outage_does_not_claim_definite_lease_loss() {
         let body=serde_json::to_vec(&json!({"schema":"runtime.job.heartbeat.v1","jobId":"agent_run.lifecycle:agent_run_test","leaseOwner":"worker-owner-original","heartbeatAtMs":123,"leaseMs":60000})).unwrap();

@@ -86,7 +86,18 @@ The host owns catalog freezing, credential refresh, registration and cancellatio
 budget so adapters can reject oversized results before capture without duplicating
 the numeric limit. Neither API contains platform material semantics.
 
-The declaration remains `mcp_servers_v1`. Every server requires `modelContractDigest`; every tool requires the exact model-visible `description` and `inputSchema` alongside its `sourceName` and canonical model name. Core validates the digest and builds the model catalog without connecting to the server. The adapter connects and discovers only on the first tool call, then rejects missing, extra, duplicate, or changed live tools. A contract mismatch is sticky for that activation; transport failures remain retryable. There is no discovery fallback or old-declaration alias.
+The declaration remains `mcp_servers_v1` and explicitly selects pinned tools
+(`tools` plus `modelContractDigest`) or `toolDiscovery` (package-owned
+`namePrefix`, `concurrencySafe`, and `scopes`). The modes cannot be combined.
+Pinned contracts retain their lazy exact-discovery check. Dynamic directories
+are discovered before activation starts, cached, and refreshed at model-request
+boundaries after a change notification, reconnect or upstream contract rejection.
+Core validates the directory and freezes each request's executable contracts.
+Upstream metadata never controls package scopes or concurrency; stale calls are
+rejected without argument rewriting or automatic business replay. Delegated
+packets freeze the exact contracts they were granted. See
+[the package contract](SkillPackageSpec.md#mcp-declarations) for naming, limits
+and discovery lifecycle.
 
 The package-catalog publisher validates every declared MCP contract offline before emitting a catalog. Missing fields or stale model-contract digests block catalog generation; file digests alone do not establish a valid tool contract. Generic package resolution freezes resource identities without repeating MCP semantic validation; runtime MCP loading remains strict. Image builds must run the catalog check explicitly before copying release assets.
 
@@ -99,7 +110,7 @@ cargo run --locked -p centaeris-desktop-services --bin centaeris-mcp-contract --
 cargo run --locked -p centaeris-desktop-services --bin centaeris-mcp-contract -- --check <declaration.json>
 ```
 
-Supply one snapshot binding per declared server. Paginated or incomplete snapshots fail; synchronization preserves exact description text (including surrounding whitespace) and schema array order and writes atomically. Descriptions must contain non-whitespace text and are preserved verbatim for hashing and model presentation. Live discovery comparison ignores leading/trailing whitespace and differences between whitespace runs (including indentation and line endings), while requiring the same non-whitespace words in order. Missing descriptions, changed words, tool identities, and input schemas still fail. `--write` only recomputes digests for an already complete declaration.
+Supply one snapshot binding per declared server. Paginated or incomplete snapshots fail; synchronization preserves exact description text (including surrounding whitespace) and schema array order and writes atomically. Descriptions must contain non-whitespace text and are preserved verbatim for hashing and model presentation. Live discovery comparison ignores leading/trailing whitespace and differences between whitespace runs (including indentation and line endings), while requiring the same non-whitespace words in order. Missing descriptions, changed words, tool identities, and input schemas still fail. `--write` only recomputes digests for an already complete pinned declaration. For `toolDiscovery`, `--check` validates configuration and `--sync` validates snapshots without pinning their schemas.
 
 Tool descriptions are limited to 4096 Unicode characters and 16384 UTF-8 bytes; each input schema is limited to 65536 serialized JSON bytes. MCP declarations and discovery responses are bounded to 4 MiB before decoding. Dynamic registration, activated MCP declarations, and the complete resolved tool catalog each enforce a 4 MiB cumulative serialized budget before accumulation or hashing. Oversized inputs fail explicitly without truncating contracts or changing digests. These byte budgets do not impose a message-count limit. Plugin resource hashing streams file bytes using the unchanged length-prefixed digest format.
 

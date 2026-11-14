@@ -2,7 +2,18 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 20;
+const STORE_SCHEMA_VERSION: i64 = 22;
+const MODEL_INPUT_IMAGE_DDL: &str = r#"
+CREATE TABLE runtime.session_model_input_images(
+ session_id text NOT NULL,content_digest text NOT NULL,
+ content bytea NOT NULL CHECK(octet_length(content) BETWEEN 1 AND 10485760),
+ PRIMARY KEY(session_id,content_digest),
+ CHECK(content_digest='sha256:'||encode(sha256(content),'hex')));
+CREATE FUNCTION runtime.protect_model_input_image() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'model input image is immutable'; END;
+$$;
+CREATE TRIGGER model_input_image_facts BEFORE UPDATE ON runtime.session_model_input_images FOR EACH ROW EXECUTE FUNCTION runtime.protect_model_input_image();
+"#;
 const SUBAGENT_PRESENTATION_DDL: &str = r#"
 CREATE FUNCTION runtime.notify_subagent_presentation_v1() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -71,6 +82,7 @@ pub(super) const RUNTIME_TABLES: &[&str] = &[
     "runtime_turn_supplement_queues",
     "schema_migrations",
     "session_runtime_snapshots",
+    "session_model_input_images",
     "transcript_block_identities",
     "transcript_block_versions",
     "transcript_projection_current_recoveries",
@@ -105,6 +117,7 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
+    ("session_model_input_images", "session_id:text:NO,content_digest:text:NO,content:bytea:NO"),
     ("sandbox_deployment", "singleton:boolean:NO,deployment_id:uuid:NO"),
     ("runsc_environment_power", super::runsc_rotation::COLUMNS),
     ("resident_capacity_clock", "singleton:boolean:NO,generation:bigint:NO,changed_at_ms:bigint:NO"),
@@ -314,6 +327,8 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_sandbox_deployment(client)?;
         upgrade_worker_dispatch_host(client)?;
         upgrade_subagent_presentation(client)?;
+        upgrade_child_job_notifications(client)?;
+        upgrade_dispatch_schema(client, 22, MODEL_INPUT_IMAGE_DDL)?;
     } else {
         create_schema(client)?;
     }
@@ -521,6 +536,10 @@ fn upgrade_worker_dispatch_host(client: &mut Client) -> Result<(), String> {
 
 fn upgrade_subagent_presentation(client: &mut Client) -> Result<(), String> {
     upgrade_dispatch_schema(client, 20, SUBAGENT_PRESENTATION_DDL)
+}
+
+fn upgrade_child_job_notifications(client: &mut Client) -> Result<(), String> {
+    upgrade_dispatch_schema(client, 21, CHILD_JOB_NOTIFICATION_DDL)
 }
 
 fn upgrade_sandbox_deployment(client: &mut Client) -> Result<(), String> {
@@ -802,6 +821,10 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(SUBAGENT_PRESENTATION_DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(CHILD_JOB_NOTIFICATION_DDL)
+        .map_err(|e| e.to_string())?;
+    tx.batch_execute(MODEL_INPUT_IMAGE_DDL)
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -830,6 +853,7 @@ pub(super) fn sandbox_deployment_id(client: &mut impl GenericClient) -> Result<S
 #[cfg(test)]
 pub(super) fn restore_sandbox_deployment_fixture(client: &mut Client) {
     super::integration_tests::require_owned_migration_fixture(client);
+    restore_model_input_image_fixture(client);
     let mut tx = client
         .transaction()
         .expect("begin sandbox deployment fixture downgrade");
@@ -843,6 +867,26 @@ pub(super) fn restore_sandbox_deployment_fixture(client: &mut Client) {
     .expect("restore sandbox deployment fixture");
     tx.commit()
         .expect("commit sandbox deployment fixture downgrade");
+}
+
+#[cfg(test)]
+pub(super) fn restore_model_input_image_fixture(client: &mut Client) {
+    super::integration_tests::require_owned_migration_fixture(client);
+    if !schema_versions(client).unwrap().contains(&22) {
+        return;
+    }
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*) FROM runtime.session_model_input_images",
+                &[]
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        0,
+        "fixture cannot discard image history"
+    );
+    client.batch_execute("DROP TABLE runtime.session_model_input_images; DROP FUNCTION runtime.protect_model_input_image(); DELETE FROM runtime.schema_migrations WHERE version=22;").unwrap();
 }
 
 fn validate_schema_with_reclaim_budget(
@@ -873,12 +917,14 @@ fn validate_schema_with_resource_budgets(
     let sandbox_deployment = versions.contains(&18);
     let worker_dispatch_host = versions.contains(&19);
     let subagent_presentation = versions.contains(&20);
+    let model_input_images = versions.contains(&22);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
         .copied()
         .filter(|table| {
             (sandbox_deployment || *table != "sandbox_deployment")
+                && (model_input_images || *table != "session_model_input_images")
                 && (runsc_rotation || *table != "runsc_environment_power")
                 && (capacity_waits
                     || !matches!(
@@ -899,7 +945,8 @@ fn validate_schema_with_resource_budgets(
         return Err(format!("Postgres runtime table set mismatch: {tables:?}"));
     }
     for (table, expected) in TABLE_SHAPES {
-        if (*table == "sandbox_deployment" && !sandbox_deployment)
+        if (*table == "session_model_input_images" && !model_input_images)
+            || (*table == "sandbox_deployment" && !sandbox_deployment)
             || (*table == "runsc_environment_power" && !runsc_rotation)
             || (!capacity_waits
                 && matches!(
@@ -1324,6 +1371,42 @@ fn validate_schema_with_resource_budgets(
             return Err("Postgres lifecycle lease purpose trigger mismatch".into());
         }
     }
+    if model_input_images {
+        expected_functions.insert("protect_model_input_image".into());
+        let expected_body = MODEL_INPUT_IMAGE_DDL
+            .split_once("AS $$")
+            .ok_or("image function missing")?
+            .1
+            .split_once("$$;")
+            .ok_or("image function body missing")?
+            .0;
+        let actual_body: String = client.query_one(
+            "SELECT prosrc FROM pg_proc WHERE oid='runtime.protect_model_input_image()'::regprocedure", &[],
+        ).map_err(|e| e.to_string())?.get(0);
+        if actual_body != expected_body {
+            return Err("Postgres immutable image function mismatch".into());
+        }
+        let trigger: i64 = client.query_one("SELECT count(*) FROM pg_trigger WHERE tgrelid='runtime.session_model_input_images'::regclass AND tgname='model_input_image_facts' AND tgenabled='O' AND NOT tgisinternal AND tgtype=19 AND tgfoid='runtime.protect_model_input_image()'::regprocedure AND tgqual IS NULL AND tgnargs=0", &[]).map_err(|e| e.to_string())?.get(0);
+        if trigger != 1 {
+            return Err("Postgres immutable image trigger mismatch".into());
+        }
+        let constraints = client.query("SELECT pg_get_constraintdef(oid),convalidated,condeferrable FROM pg_constraint WHERE conrelid='runtime.session_model_input_images'::regclass AND contype<>'n'", &[]).map_err(|e| e.to_string())?;
+        let actual: BTreeSet<String> = constraints.iter().map(|row| row.get(0)).collect();
+        let expected = BTreeSet::from([
+            "PRIMARY KEY (session_id, content_digest)".to_string(),
+            "CHECK (((octet_length(content) >= 1) AND (octet_length(content) <= 10485760)))"
+                .to_string(),
+            "CHECK ((content_digest = ('sha256:'::text || encode(sha256(content), 'hex'::text))))"
+                .to_string(),
+        ]);
+        if actual != expected
+            || constraints
+                .iter()
+                .any(|row| !row.get::<_, bool>(1) || row.get::<_, bool>(2))
+        {
+            return Err("Postgres immutable image constraints mismatch".into());
+        }
+    }
     if capacity_waits {
         expected_functions.extend([
             "resident_capacity_release".into(),
@@ -1345,6 +1428,9 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_triggers = BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]);
+    if model_input_images {
+        expected_triggers.insert("model_input_image_facts".into());
+    }
     if subagent_presentation {
         expected_triggers.insert("runtime_subagent_presentation_v1".into());
     }
@@ -1460,6 +1546,26 @@ CREATE INDEX idx_external_context_links_session_linked ON runtime.external_conte
 CREATE INDEX idx_external_context_links_object ON runtime.external_context_links(object_id, linked_at_ms DESC, session_id ASC);
 "#;
 
+const CHILD_JOB_NOTIFICATION_DDL: &str = r#"
+CREATE OR REPLACE FUNCTION runtime.notify_runtime_job_ready_v1() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.job_kind = 'agent_run.lifecycle' AND OLD.status IN ('leased','running') AND NEW.status NOT IN ('leased','running') THEN
+            PERFORM pg_notify('runtime_job_ready_v1', '');
+        END IF;
+    END IF;
+    IF NEW.status = 'queued' AND NEW.job_kind IN ('agent_run.lifecycle','worker.noop','subagent.run') THEN
+        IF TG_OP = 'INSERT' THEN
+            PERFORM pg_notify('runtime_job_ready_v1', '');
+        ELSIF OLD.status IS DISTINCT FROM 'queued' OR OLD.run_at_ms IS DISTINCT FROM NEW.run_at_ms OR OLD.job_kind IS DISTINCT FROM NEW.job_kind THEN
+            PERFORM pg_notify('runtime_job_ready_v1', '');
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+"#;
+
 const TRANSCRIPT_DDL: &str = r#"
 CREATE TABLE runtime.transcript_projection_heads(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,source_high_water bigint NOT NULL CHECK(source_high_water>=0),invalidation_reason text,PRIMARY KEY(session_id,projection_version,projection_generation));
 CREATE TABLE runtime.transcript_projection_current_generations(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,source_high_water bigint NOT NULL CHECK(source_high_water>=0),PRIMARY KEY(session_id,projection_version),FOREIGN KEY(session_id,projection_version,projection_generation) REFERENCES runtime.transcript_projection_heads(session_id,projection_version,projection_generation) ON DELETE CASCADE);
@@ -1521,7 +1627,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 20);
+        assert_eq!(STORE_SCHEMA_VERSION, 22);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { createMemoryRouter, RouterProvider, useRouteLoaderData } from "react-router";
@@ -19,14 +19,17 @@ vi.mock("../../src/i18n", () => {
 });
 
 vi.mock("../../src/routes/AppRoute", () => ({
-  AppPageContent({ location, visible, catalogContent }: { location: { key: string }, visible: boolean, catalogContent?: ReactNode }) {
+  AppPageContent({ location, initialSession, visible, catalogContent, chatFloating, onShowChat, onMinimizeChat, onExpandChat, onDockChat }: { location: { key: string, pathname: string, search: string }, initialSession?: { id: string } | null, visible: boolean, catalogContent?: ReactNode, chatFloating?: boolean, onShowChat?: () => void, onMinimizeChat?: () => void, onExpandChat?: () => void, onDockChat?: () => void }) {
     const { workspace } = useRouteLoaderData("workspace");
     const [draft, setDraft] = useState("");
     const search = useWorkspaceSearch(location.key, visible);
     return <>
-      <ShellSidebar workspace={workspace} search={search} />
+      <ShellSidebar workspace={workspace} agentPath={location.pathname + location.search} search={search} />
+      <output aria-label="Conversation session">{initialSession?.id || "draft"}</output>
       <textarea id="messageDraft" hidden={!visible || search.open} aria-label="Session draft" value={draft} onChange={event => setDraft(event.target.value)} />
       {catalogContent}
+      <button onClick={onShowChat}>打开浮窗</button><button onClick={onMinimizeChat}>最小化会话</button><button onClick={onExpandChat}>展开会话</button><button onClick={onDockChat}>收起到工具栏</button>
+      {chatFloating ? <span>浮窗已打开</span> : null}
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
     </>;
   },
@@ -135,7 +138,9 @@ test("archive deletion confirms its scope and retries only conversations that fa
   expect(screen.queryByText("Draft brief")).toBeNull();
   expect(screen.getByText("Planning call")).toBeTruthy();
   await user.click(within(bulk).getByRole("button", { name: "appRoute.delete" }));
-  expect(await screen.findByText("archive.empty")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByRole("list")).toBeNull();
+  expect(screen.getByRole("heading", { name: "archive.title" })).toBeTruthy();
   expect(removed).toEqual(["/api/sessions/a", "/api/sessions/b", "/api/sessions/c", "/api/sessions/c"]);
 });
 
@@ -149,10 +154,10 @@ test("workspace search reports a failed source and can retry the same query", as
   const user = userEvent.setup();
   let libraryRequests = 0;
   vi.stubGlobal("fetch", async (url: string) => {
-    if (url.endsWith("/api/library")) {
+    if (url.includes("/workspaces/research/search?")) {
       libraryRequests += 1;
       if (libraryRequests === 1) return new Response(null, { status: 503 });
-      return Response.json({ objects: [{ id: "guide", objectKind: "note", displayName: "Field guide" }] });
+      return Response.json({ matches: [{ id: "userLibraryObject:guide", kind: "material", title: "Field guide", snippet: "", href: "/w/research/library/guide" }], nextCursor: null });
     }
     return Response.json({ matches: [], nextCursor: null });
   });
@@ -165,7 +170,7 @@ test("workspace search reports a failed source and can retry the same query", as
   const input = screen.getByRole("combobox", { name: "searchOverlay.searchConversationsAndNotes" });
   await user.type(input, "field");
   expect((await screen.findByRole("alert")).textContent).toBe("searchOverlay.libraryLoadFailed");
-  expect(screen.queryByText("searchOverlay.noMatchingResults")).toBeNull();
+  expect((input as HTMLInputElement).value).toBe("field");
   await user.click(screen.getByRole("button", { name: "agentChat.retry" }));
   expect(await screen.findByRole("option", { name: "Field guide" })).toBeTruthy();
   expect((input as HTMLInputElement).value).toBe("field");
@@ -193,6 +198,7 @@ test("workspace settings replace the work navigation and return to the same draf
       Component: WorkspaceHomeRoute,
       children: [
         { path: "app", element: <></> },
+        { path: "work/*", element: <h1>Work prototype</h1> },
         { path: "library", element: <h1>Library contents</h1> },
         { path: "extensions", element: <h1>Extension catalog</h1> },
         { path: "settings/preferences", Component: SettingsRoute },
@@ -205,6 +211,10 @@ test("workspace settings replace the work navigation and return to the same draf
   render(<RouterProvider router={router} />);
 
   await user.type(await screen.findByRole("textbox", { name: "Session draft" }), "Keep this draft");
+  await user.click(screen.getByRole("link", { name: "work.myIssues" }));
+  expect(await screen.findByRole("heading", { name: "Work prototype" })).toBeTruthy();
+  await router.navigate(-1);
+  expect((await screen.findByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("Keep this draft");
   await user.click(screen.getByRole("button", { name: "shellSidebar.newConversation" }));
   expect(screen.getByRole("textbox", { name: "Session draft" })).toBe(document.activeElement);
   screen.getByRole("button", { name: "shellSidebar.valueWorkspaceMenu" }).focus();
@@ -215,7 +225,7 @@ test("workspace settings replace the work navigation and return to the same draf
   switchWorkspace.focus();
   await user.keyboard("{ArrowRight}");
   const workspaceChoices = await screen.findByRole("menu", { name: "shellSidebar.switchWorkspace" });
-  expect(within(workspaceChoices).getByRole("menuitem", { name: /Design/ }).getAttribute("href")).toBe("/w/design/app");
+  expect(within(workspaceChoices).getByRole("menuitem", { name: /Design/ }).getAttribute("href")).toBe("/w/design/work");
   await user.keyboard("{ArrowLeft}");
   expect(screen.queryByRole("menu", { name: "shellSidebar.switchWorkspace" })).toBeNull();
   await user.click(within(workspaceActions).getByRole("menuitem", { name: "shellSidebar.settings" }));
@@ -286,4 +296,66 @@ test("workspace settings replace the work navigation and return to the same draf
   await user.click(await screen.findByRole("menuitem", { name: "shellSidebar.settings" }));
   await user.click(await screen.findByRole("link", { name: "settingsRoute.backToApp" }));
   expect(await screen.findByRole("heading", { name: "Extension catalog" })).toBeTruthy();
+});
+
+test("a conversation keeps its draft while floating above work, minimizing and expanding", async () => {
+  const user = userEvent.setup();
+  const workspace = { id: "dock", name: "Dock" };
+  const router = createMemoryRouter([{ id: "authenticated", loader: () => ({ user: { id: "dock-user" } }), HydrateFallback: () => null, children: [{ id: "workspace", path: "/w/dock", loader: () => ({ workspace, selectedSession: null }), Component: WorkspaceHomeRoute, children: [{ path: "app", element: <></> }, { path: "work", element: <h1>工作列表</h1> }] }] }], { initialEntries: ["/w/dock/app"] });
+  render(<RouterProvider router={router} />);
+  await user.type(await screen.findByRole("textbox", { name: "Session draft" }), "保留这段草稿");
+  await user.click(screen.getByRole("link", { name: "work.myIssues" }));
+  await screen.findByRole("heading", { name: "工作列表" });
+  await user.click(screen.getByRole("button", { name: "打开浮窗" }));
+  expect(screen.getByText("浮窗已打开")).toBeTruthy();
+  expect((screen.getByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("保留这段草稿");
+  expect(router.state.location.pathname).toBe("/w/dock/work");
+  await user.click(screen.getByRole("button", { name: "最小化会话" }));
+  expect(screen.queryByRole("textbox", { name: "Session draft" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "打开浮窗" }));
+  await user.click(screen.getByRole("button", { name: "展开会话" }));
+  expect(router.state.location.pathname).toBe("/w/dock/app");
+  expect((await screen.findByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("保留这段草稿");
+  await user.click(screen.getByRole("button", { name: "收起到工具栏" }));
+  await screen.findByRole("heading", { name: "工作列表" });
+  expect(screen.getByText("浮窗已打开")).toBeTruthy();
+  expect((screen.getByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("保留这段草稿");
+});
+
+test("Agent returns to the floating conversation while explicit new conversation still opens a draft", async () => {
+  const user = userEvent.setup();
+  const workspace = { id: "bound", name: "Bound" };
+  const session = { id: "kept-session", title: "Retained conversation" };
+  const router = createMemoryRouter([{
+    id: "authenticated", loader: () => ({ user: { id: "bound-user" } }), HydrateFallback: () => null,
+    children: [{
+      id: "workspace", path: "/w/bound", Component: WorkspaceHomeRoute,
+      loader: ({ params }) => ({ workspace, selectedSession: params.sessionId === session.id ? session : null }),
+      shouldRevalidate: () => true,
+      children: [
+        { path: "app", element: <></> },
+        { path: "sessions/:sessionId", element: <></> },
+        { path: "work", element: <h1>工作列表</h1> },
+        { path: "work/home", element: <h1>团队主页</h1> },
+        { path: "library", element: <h1>资料空间</h1> },
+      ],
+    }],
+  }], { initialEntries: ["/w/bound/sessions/kept-session"] });
+  render(<RouterProvider router={router} />);
+  expect((await screen.findByLabelText("Conversation session")).textContent).toBe(session.id);
+  await user.click(screen.getByRole("button", { name: "收起到工具栏" }));
+  await screen.findByRole("heading", { name: "工作列表" });
+
+  for (const destination of ["work.home", "libraryObjectRoute.library"]) {
+    await user.click(screen.getByRole("link", { name: "Agent" }));
+    expect(router.state.location.pathname).toBe("/w/bound/sessions/kept-session");
+    await user.click(screen.getByRole("link", { name: destination }));
+    expect(screen.getByText("浮窗已打开")).toBeTruthy();
+    expect(screen.getByLabelText("Conversation session").textContent).toBe(session.id);
+  }
+
+  await user.click(screen.getByRole("button", { name: "shellSidebar.newConversation" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/w/bound/app"));
+  expect(router.state.location.search).toBe("?new=1");
+  expect(screen.getByLabelText("Conversation session").textContent).toBe("draft");
 });

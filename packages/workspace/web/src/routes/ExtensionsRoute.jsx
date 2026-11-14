@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useRouteLoaderData, useSearchParams } from "react-router";
-import { ArrowLeft, ChevronRight, Layers, LoaderCircle, Search } from "lucide-react";
+import { ChevronRight, LoaderCircle } from "lucide-react";
 import { apiJson } from "../api";
 import { MarkdownContent } from "../chat/MarkdownContent";
 import { useTranslation } from "../i18n";
 import PluginSettings from "./PluginSettings";
+import { CatalogDetailView } from "../components/CatalogDetailView";
+import "../catalog.css";
 
-function SkillDetail({ path, skillId, back }) {
+function SkillDetail({ path, skillId, backTo }) {
   const { t } = useTranslation();
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState("");
@@ -19,10 +21,8 @@ function SkillDetail({ path, skillId, back }) {
       });
     return () => controller.abort();
   }, [path, skillId, t]);
-  return <>
-    {back}
-    <header className="extensionHeading"><div><h1 tabIndex={-1}>{detail?.skill.name || t("extensions.skills")}</h1>
-      {detail?.skill.description ? <p>{detail.skill.description}</p> : null}</div></header>
+  return <CatalogDetailView backLabel={t("extensions.backToSkills")} title={detail?.skill.name || t("extensions.skills")} backTo={backTo}>
+    {detail?.skill.description ? <p className="catalogDescription">{detail.skill.description}</p> : null}
     {error ? <div className="settingsPanel libraryCatalogEmpty" role="alert">{error}</div> : detail ? <>
       <section className="settingsPanel extensionSkillFacts">
         <dl>
@@ -33,25 +33,18 @@ function SkillDetail({ path, skillId, back }) {
       </section>
       <article className="settingsPanel extensionSkillDocument"><MarkdownContent text={detail.content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "")} /></article>
     </> : <div className="settingsPanel libraryCatalogEmpty" role="status"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.openingSkill")}</div>}
-  </>;
+  </CatalogDetailView>;
 }
 
 function ExtensionCatalog({ workspace, view, isSuperuser, detailId, onSelectPlugin }) {
   const { t } = useTranslation();
   const [items, setItems] = useState(null);
   const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
   const skills = view === "skills";
   const id = encodeURIComponent(workspace.id);
   const base = `/w/${id}/extensions`;
   const skillList = `${base}?view=skills`;
   const path = `/api/workspaces/${id}/skills`;
-  const pageRef = useRef(null);
-  useEffect(() => {
-    const page = pageRef.current;
-    page?.closest(".workspaceCatalog")?.scrollTo({ top: 0 });
-    if (detailId) page?.querySelector("h1")?.focus({ preventScroll: true });
-  }, [detailId]);
   useEffect(() => {
     if (!skills) return;
     const controller = new AbortController();
@@ -63,32 +56,31 @@ function ExtensionCatalog({ workspace, view, isSuperuser, detailId, onSelectPlug
     return () => controller.abort();
   }, [path, skills, t]);
 
-  const filter = query.trim().toLocaleLowerCase();
-  const rows = (items || []).filter(item => `${item.name} ${item.description || ""}`.toLocaleLowerCase().includes(filter));
-  const search = <label className="librarySearch extensionSearch"><Search aria-hidden="true" /><input aria-label={t("extensions.search")} value={query} onChange={event => setQuery(event.target.value)} placeholder={t("extensions.search")} /></label>;
-  const back = <Link className="managementBack extensionBack" to={skills ? skillList : base}><ArrowLeft aria-hidden="true" />{t(skills ? "extensions.backToSkills" : "extensions.backToPlugins")}</Link>;
+  const navigation = <nav className="catalogTabs" aria-label={t("extensions.title")}>
+    <Link to={base} aria-current={view === "plugins" ? "page" : undefined}>{t("catalog.installed")}</Link>
+    <Link to={skillList} aria-current={skills ? "page" : undefined}>{t("extensions.skills")}</Link>
+    <Link to={`${base}?view=connections`} aria-current={view === "connections" ? "page" : undefined}>{t("catalog.connections")}</Link>
+  </nav>;
 
-  return <section className="extensionPage" ref={pageRef} aria-label={t("extensions.title")}>
-    <nav className="extensionTabs" aria-label={t("extensions.title")}>
-      <Link to={base} aria-current={!skills ? "page" : undefined}>{t("libraryRoute.plugins")}</Link>
-      <Link to={skillList} aria-current={skills ? "page" : undefined}>{t("extensions.skills")}</Link>
-    </nav>
-    {!skills ? <PluginSettings workspace={workspace} isSuperuser={isSuperuser} filter={filter}
-      catalog={{ selectedName: detailId, onSelect: onSelectPlugin, search, back }} />
-      : detailId ? <SkillDetail key={detailId} path={path} skillId={detailId} back={back} />
+  return <section className="extensionPage catalogPage" aria-label={t("extensions.title")}>
+    {!skills ? <PluginSettings workspace={workspace} isSuperuser={isSuperuser}
+      catalog={{ selectedName: detailId, onSelect: onSelectPlugin, navigation, base, view }} />
       : <>
-        <header className="extensionHeading"><h1>{t("extensions.skills")}</h1></header>
-        <div className="extensionToolbar">{search}</div>
-        {error ? <div className="settingsPanel libraryCatalogEmpty" role="alert">{error}</div> : items === null
-          ? <div className="settingsPanel libraryCatalogEmpty" role="status"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("agentChat.loading")}</div>
-          : rows.length === 0 ? <div className="settingsPanel libraryCatalogEmpty"><p>{t(filter ? "extensions.noMatches" : "libraryRoute.noSkillsAvailableInThisWorkspace")}</p></div>
-          : <ul className="settingsPanel settingsListPanel extensionList">{rows.map(item => <li key={item.skillId}>
-            <Link className="managementRow managementRowButton" to={`${skillList}&${new URLSearchParams({ skill: item.skillId })}`}>
-              <span className="managementRowIcon"><Layers aria-hidden="true" /></span>
-              <span className="managementRowCopy"><strong>{item.name}</strong><small>{item.description}</small></span>
-              <span className="managementRowEnd">{t(item.skillId.startsWith("system:") ? "libraryRoute.system" : "libraryRoute.plugins")}<ChevronRight aria-hidden="true" /></span>
-            </Link>
-          </li>)}</ul>}
+        <header className="workHeader catalogHeader"><h1>{t("extensions.title")}</h1></header>
+        {navigation}
+        <div className={`catalogWorkspace${detailId ? " hasDetail" : ""}`}>
+        <div className="catalogDirectory" hidden={Boolean(detailId)}>
+          {error ? <p className="catalogEmpty" role="alert">{error}</p> : items === null
+            ? <p className="catalogEmpty" role="status">{t("agentChat.loading")}</p>
+            : <ul className="catalogRows">{items.map(item => <li key={item.skillId}>
+              <Link to={`${skillList}&${new URLSearchParams({ skill: item.skillId })}`} aria-current={detailId === item.skillId ? "true" : undefined}>
+                <span><strong>{item.name}</strong><small>{item.description}</small></span>
+                <span className="catalogMeta">{t(item.skillId.startsWith("system:") ? "libraryRoute.system" : "libraryRoute.plugins")}<ChevronRight aria-hidden="true" /></span>
+              </Link>
+            </li>)}</ul>}
+        </div>
+        {detailId ? <SkillDetail key={detailId} path={path} skillId={detailId} backTo={skillList} /> : null}
+        </div>
       </>}
   </section>;
 }
@@ -98,7 +90,7 @@ export default function ExtensionsRoute() {
   const { user } = useRouteLoaderData("authenticated");
   const [params, setParams] = useSearchParams();
   const view = params.get("view") || "plugins";
-  if (view !== "plugins" && view !== "skills") throw new Error(`unsupported extensions view: ${view}`);
+  if (!["plugins", "skills", "connections"].includes(view)) throw new Error(`unsupported extensions view: ${view}`);
   return <ExtensionCatalog key={`${workspace.id}:${view}`} workspace={workspace} view={view} isSuperuser={user.isSuperuser}
-    detailId={params.get(view === "skills" ? "skill" : "plugin")} onSelectPlugin={plugin => setParams({ plugin })} />;
+    detailId={params.get(view === "skills" ? "skill" : "plugin")} onSelectPlugin={plugin => setParams(view === "plugins" ? { plugin } : { view, plugin })} />;
 }

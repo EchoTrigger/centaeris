@@ -1,9 +1,83 @@
 @import "@centaeris/ui/theme.css";
+@import "./interaction.css";
 :root {
   --control-height-compact: 32px;
   --control-height: 36px;
   --control-radius: 7px;
   --settings-form-width: 720px;
+  --navigation-font-size: 14px;
+  --navigation-font-weight: 400;
+  --navigation-selected-weight: 500;
+  --navigation-icon-size: 14px;
+  --navigation-icon-stroke: 1.8;
+  --navigation-row-height: 30px;
+}
+/* Web surfaces use OpenAI black/white anchors and a neutral luminance hierarchy. */
+:root[data-theme] {
+  --workspace-rail: #ededed;
+  --surface-color: #f7f7f7;
+  --surface-variant: #ffffff;
+  --surface-container: #e6e6e6;
+  --surface-raised: #ffffff;
+  --surface-input: #f1f1f1;
+  --surface-hover: #e9e9e9;
+  --surface-active: #e2e2e2;
+  --on-surface: #080808;
+  --process-text: #666666;
+  --muted: #6b6b6b;
+  --color-muted-foreground: var(--muted);
+  --solid-surface: #080808;
+  --solid-text: #ffffff;
+  --primary-color: #080808;
+  --primary-hover: #333333;
+  --outline: #898989;
+  --outline-variant: #dedede;
+  --workspace-frame-edge: transparent;
+  --workspace-floating-shadow: 0 8px 24px rgba(0, 0, 0, .12);
+  --background: 0 0% 96.86%;
+  --foreground: 0 0% 3.14%;
+  --primary: 0 0% 3.14%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 100%;
+  --secondary-foreground: var(--foreground);
+  --accent: 0 0% 90%;
+  --accent-foreground: var(--foreground);
+  --input: 0 0% 87%;
+  --muted-foreground: 0 0% 42%;
+  --ring: 0 0% 54%;
+}
+:root[data-theme="dark"] {
+  --workspace-rail: #080808;
+  --surface-color: #111111;
+  --surface-variant: #1b1b1b;
+  --surface-container: #242424;
+  --surface-raised: #242424;
+  --surface-input: #1b1b1b;
+  --surface-hover: #292929;
+  --surface-active: #303030;
+  --on-surface: #ededed;
+  --solid-surface: #ffffff;
+  --solid-text: #080808;
+  --primary-color: #ffffff;
+  --primary-hover: #ededed;
+  --process-text: #a3a3a3;
+  --muted: #8f8f8f;
+  --outline: #8a8a8a;
+  --outline-variant: #343434;
+  --workspace-frame-edge: transparent;
+  --workspace-floating-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+  --background: 0 0% 6.67%;
+  --foreground: 0 0% 93%;
+  --primary: 0 0% 100%;
+  --primary-foreground: 0 0% 3.14%;
+  --secondary: 0 0% 10.59%;
+  --accent: 0 0% 14.12%;
+  --input: 0 0% 20.39%;
+  --muted-foreground: 0 0% 56.08%;
+  --ring: 0 0% 54.12%;
+}
+@media (forced-colors: active) {
+  :root[data-theme] { --workspace-rail: Canvas; --surface-raised: Canvas; --surface-input: Canvas; --workspace-frame-edge: ButtonBorder; }
 }
 @media (pointer: coarse) {
   :root {
@@ -15,4 +89,4 @@
 .themeToggle button { border:0; background:transparent; color:var(--process-text); display:grid; place-items:center; width:28px; height:28px; border-radius:6px; cursor:pointer; }
 .themeToggle button:hover { color:var(--on-surface); }
 .themeToggle svg { width:16px; height:16px; }
-.themeToggle button:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
+.themeToggle button:focus-visible { outline:1px solid var(--outline); outline-offset:2px; }

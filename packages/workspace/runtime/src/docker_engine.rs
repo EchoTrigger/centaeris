@@ -169,6 +169,12 @@ pub(crate) fn info() -> Result<Value, String> {
     })
 }
 
+pub(crate) fn sandbox_info() -> Result<Value, String> {
+    let info = info()?;
+    crate::docker_storage::require_quota_backing(&info)?;
+    Ok(info)
+}
+
 /// Download only the authorized subtree of an immutable container into an
 /// anonymous bounded spool. An empty or failed HTTP response is never a snapshot.
 pub(crate) fn download_archive(id: &str, path: &str, limit: u64) -> Result<std::fs::File, String> {
@@ -652,6 +658,7 @@ fn remove_inner(id: &str, volumes: bool, force: bool) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
     #[test]
     fn power_mutations_reject_mutable_names_before_connecting_to_a_daemon() {
         for id in [

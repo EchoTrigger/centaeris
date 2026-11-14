@@ -28,7 +28,8 @@ def descriptor(content, manifest, encoding="tarZstdV1"):
     return {"generation": 1, "encoding": encoding,
         "snapshotSha256": sha(content), "snapshotSizeBytes": len(content),
         "expandedSizeBytes": sum(file["sizeBytes"] for file in manifest["files"]),
-        "fileCount": len(manifest["files"])}
+        "fileCount": len(manifest["files"]) + len(manifest.get("directories", []))
+            + len(manifest.get("symlinks", []))}
 
 
 def entry(name, content, *, kind=tarfile.REGTYPE, mode=0o644, size=None):
@@ -76,6 +77,68 @@ class LegacyFrameCharacterization(SimpleTestCase):
 
 
 class WorkspaceSnapshotArchiveTests(SimpleTestCase):
+    def test_v2_nodes_keep_exact_bytes_and_only_regular_files_are_content_objects(self):
+        from app_core.http.internal import _WorkspaceSnapshotReader, _workspace_snapshot_manifest
+        for files, bodies in [([], []), (manifest_for()["files"], [b"abc"])]:
+            manifest = {"schema": "workspace.snapshot.v2", "files": files,
+                "directories": ["empty", "links"], "symlinks": [
+                    {"path": "links/cycle", "target": "cycle"},
+                    {"path": "links/escape.docx", "target": "/etc/hostname"},
+                    {"path": "links/leak.txt", "target": "/etc/passwd"},
+                    {"path": "links/missing", "target": "../../missing"}]}
+            encoded = canonical(manifest)
+            frame = len(encoded).to_bytes(4, "big") + encoded + b"".join(bodies)
+            archive = compress(tar_bytes(manifest, bodies))
+            for content, encoding in [(frame, "frameV1"), (archive, "tarZstdV1")]:
+                candidate = descriptor(content, manifest, encoding)
+                sink = io.BytesIO()
+                self.assertEqual(validate_snapshot_stream(io.BytesIO(content), candidate, output=sink), manifest)
+                self.assertEqual(sink.getvalue(), content)
+            candidate = descriptor(frame, manifest, "frameV1")
+            reader = _WorkspaceSnapshotReader(io.BytesIO(frame), candidate)
+            copied = b"".join(iter(lambda: reader.read(7), b""))
+            reader.require_complete()
+            self.assertEqual(copied, frame)
+            self.assertEqual(_workspace_snapshot_manifest(encoded, candidate), files)
+
+    def test_v2_rejects_invalid_fields_node_conflicts_targets_order_and_count(self):
+        from copy import deepcopy
+        from app_core.http.internal import _workspace_snapshot_manifest, SessionWorkspaceError
+        manifest = {"schema": "workspace.snapshot.v2", "files": [],
+            "directories": ["empty"], "symlinks": [{"path": "link", "target": "/etc/passwd"}]}
+        variants = []
+        for changes in [
+            {"directories": None}, {"symlinks": None}, {"unknown": True},
+            {"directories": ["../outside"]}, {"directories": ["empty", "empty"]},
+            {"directories": ["z", "a"]}, {"directories": ["link"]},
+            {"directories": ["link/child"]},
+            {"files": [manifest_for(path="link/child")["files"][0]]},
+            {"files": [manifest_for(path="empty")["files"][0]]},
+        ]:
+            variants.append(manifest | changes)
+        for target in [None, "", "bad\0target", "x" * 4097]:
+            document = deepcopy(manifest)
+            document["symlinks"][0]["target"] = target
+            variants.append(document)
+        document = deepcopy(manifest)
+        document["symlinks"][0]["unknown"] = True
+        variants.append(document)
+        variants.extend([
+            {"schema": "workspace.snapshot.v2", "files": [], "directories": []},
+            {"schema": "workspace.snapshot.v1", "files": manifest_for()["files"], "directories": []},
+            {"files": [], "schema": "workspace.snapshot.v2", "directories": ["empty"], "symlinks": []},
+        ])
+        for document in variants:
+            encoded = canonical(document)
+            candidate = {"fileCount": sum(len(document.get(name, []))
+                for name in ("files", "directories", "symlinks") if isinstance(document.get(name, []), list)),
+                "expandedSizeBytes": sum(file["sizeBytes"] for file in document.get("files", []))}
+            with self.subTest(document=document), self.assertRaises(SessionWorkspaceError):
+                _workspace_snapshot_manifest(encoded, candidate)
+        encoded = canonical(manifest)
+        with self.assertRaises(SessionWorkspaceError):
+            _workspace_snapshot_manifest(encoded, {"fileCount": 1, "expandedSizeBytes": 0})
+
     def test_accepts_rust_vectors_and_copies_exact_stored_bytes(self):
         path = Path(__file__).resolve().parents[4] / "tests/workspace/fixtures/workspace_archive/v1/valid.json"
         fixture = json.loads(path.read_text(encoding="utf-8"))

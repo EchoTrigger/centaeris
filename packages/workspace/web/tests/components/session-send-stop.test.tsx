@@ -9,10 +9,11 @@ import type { SessionSummary } from "../../src/router";
 import { AppPageContent } from "../../src/routes/AppRoute";
 import { ApiError } from "../../src/api";
 import { TranscriptFailureNotice } from "../../src/chat/TranscriptBlockContent";
+import { TranscriptSupplement } from "../../src/chat/TranscriptSupplement";
 import type { streamWorkspacePresentation } from "../../src/chat/workspacePresentationTransport";
 import type { TranscriptPage } from "../../src/chat/transcriptContract";
 import type { TranscriptViewStore } from "../../src/chat/transcriptViewStore";
-import type { PendingTranscriptMessage } from "../../src/chat/transcriptTurns";
+import type { PendingTranscriptMessage, PendingSupplement } from "../../src/chat/transcriptTurns";
 
 type Subscription = Parameters<typeof streamWorkspacePresentation>[0];
 const fixture = vi.hoisted(() => ({
@@ -22,6 +23,8 @@ const fixture = vi.hoisted(() => ({
   selectedSession: null as SessionSummary | null,
   user: { id: "user" }, workspace: { id: "workspace", name: "Synthetic workspace", avatarUrl: null as string | null },
   activeRun: null as { agentRunId: string; status: string; streamCursor: string } | null,
+  pendingSupplements: [] as { supplementId: string; message: string }[],
+  activeRead: null as Promise<{ agentRun: { agentRunId: string; status: string; streamCursor: string } | null; pendingSupplements: { supplementId: string; message: string }[] }> | null,
 }));
 
 vi.mock("../../src/api", async original => ({
@@ -39,14 +42,14 @@ vi.mock("react-router", async original => ({
 }));
 vi.mock("../../src/i18n", () => {
   const t = (key: string) => key;
-  return { t, i18n: { language: "en" }, useTranslation: () => ({ t }) };
+  return { t, i18n: { language: "en" }, useTranslation: () => ({ t, i18n: { language: "en" } }) };
 });
 vi.mock("../../src/preferences", () => ({
   useEnterStartsNewLine: () => false, readModelThinkingMode: () => "", readPreferredModelIdentity: () => "",
   writeModelThinkingMode: () => {}, writePreferredModelIdentity: () => {},
 }));
 vi.mock("../../src/chat/transcriptTransport", () => ({
-  createWorkspaceTranscriptTransport: () => ({ loadActiveAgentRun: async () => ({ agentRun: fixture.activeRun }) }),
+  createWorkspaceTranscriptTransport: () => ({ loadActiveAgentRun: async ({ sessionId }: { sessionId: string }) => (sessionId === "session" ? fixture.activeRead : null) ?? ({ agentRun: fixture.activeRun, pendingSupplements: fixture.pendingSupplements }) }),
 }));
 vi.mock("../../src/chat/workspacePresentationTransport", () => ({
   streamWorkspacePresentation: (options: Subscription) => {
@@ -56,12 +59,13 @@ vi.mock("../../src/chat/workspacePresentationTransport", () => ({
   },
 }));
 vi.mock("../../src/chat/TranscriptBlockList", () => ({
-  TranscriptBlockList: ({ store, pendingUserMessage, running, activity, submissionRejected }: { store: TranscriptViewStore; pendingUserMessage: PendingTranscriptMessage | null; running: boolean; activity?: string; submissionRejected?: boolean }) =>
+  TranscriptBlockList: ({ store, pendingUserMessage, pendingSupplements = [], running, activity, submissionRejected }: { store: TranscriptViewStore; pendingUserMessage: PendingTranscriptMessage | null; pendingSupplements?: readonly PendingSupplement[]; running: boolean; activity?: string; submissionRejected?: boolean }) =>
     <section aria-label="Synthetic transcript" data-running={String(running)} data-activity={activity}>
-      {store.getListSnapshot().blockIds.map(id => { const block = store.getBlockSnapshot(id); return block?.body.kind === "userText" ? <p key={id}>{block.body.content.inlineContent}</p> : null; })}
+      {store.getListSnapshot().blockIds.map(id => { const block = store.getBlockSnapshot(id); return block?.body.kind === "userText" ? <p key={id}>{block.body.content.inlineContent}</p> : block?.body.noticeType === "turn_supplement" ? <TranscriptSupplement key={id}>{String((block.body.content as { inlineContent: string }).inlineContent)}</TranscriptSupplement> : null; })}
       {pendingUserMessage ? <p data-submission-status={pendingUserMessage.status ?? "pending"} data-completed-at={pendingUserMessage.completedAtMs}>
         {pendingUserMessage.text}
       </p> : null}
+      {pendingSupplements.map(item => <TranscriptSupplement key={item.supplementId}>{item.text}</TranscriptSupplement>)}
       {submissionRejected ? <TranscriptFailureNotice message="appRoute.messageNotSent" /> : null}
     </section>,
 }));
@@ -88,13 +92,13 @@ function deferred<T>() {
 const callsFor = (suffix: string) => fixture.request.mock.calls.filter(([path, options]) => path.endsWith(suffix) && options?.method === "POST");
 const receiptFor = (options?: RequestInit) => ({ operationId: JSON.parse(String(options?.body)).operationId,
   command: "submitMessage", status: "accepted", sessionId: "session", agentRunId: "original-run", turnId: "original-turn" });
-async function sendCheckpoint(status: "failed" | "cancelled" | null, sourceHighWater = "0") {
+async function sendCheckpoint(status: "running" | "completed" | "failed" | "cancelled" | null, sourceHighWater = "0", agentRunId = "original-run") {
   const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
   await act(async () => {
     await subscription.controller.acceptWithBackpressure({ cursor: "applied:0", item: {
       schema: "workspace.presentation.v1", workspaceId: "workspace",  sessionId: "session", kind: "checkpoint",
       projectionGeneration: "generation", sourceHighWater, agentRun: status ? {
-        agentRunId: "original-run", status, startedAt: null, completedAt: "2026-10-23T00:00:01Z",
+        agentRunId, status, startedAt: null, completedAt: status === "running" ? null : "2026-10-23T00:00:01Z",
       } : null,
     } });
   });
@@ -120,7 +124,7 @@ async function chooseModel() {
 }
 
 beforeEach(() => {
-  sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null;
+  sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null; fixture.pendingSupplements = []; fixture.activeRead = null;
   fixture.workspace = { id: "workspace", name: "Synthetic workspace", avatarUrl: null };
   vi.stubGlobal("crypto", webcrypto);
   window.history.replaceState({}, "", "/w/workspace/sessions/session");
@@ -174,10 +178,10 @@ test("the home page opens an existing conversation from the sidebar", async () =
 
   render(<MemoryRouter initialEntries={[home]}><Workspace /></MemoryRouter>);
   const navigation = await screen.findByRole("navigation", { name: "Session navigation" });
-  const link = await within(navigation).findByRole("link", { name: "Synthetic" });
-  expect(screen.getAllByRole("link", { name: "Synthetic" })).toHaveLength(1);
+  const link = await within(navigation).findByRole("link", { name: /^Synthetic/ });
+  expect(screen.getAllByRole("link", { name: /^Synthetic/ })).toHaveLength(1);
   await user.click(link);
-  expect(await screen.findByRole("heading", { name: "Synthetic", level: 1 })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: /^Synthetic/, level: 1 })).toBeTruthy();
   expect(screen.queryByRole("region", { name: "shellSidebar.recentConversations" })).toBeNull();
   expect(callsFor("/messages")).toHaveLength(0);
 });
@@ -226,7 +230,161 @@ test("an active Run shows Send for a draft and sends it to that Run as a supplem
   expect(supplement[0]).toBe("/api/sessions/session/agent-runs/original-run/supplements");
   expect(JSON.parse(String(supplement[1]?.body)).message).toBe("One more detail");
   expect((draft as HTMLTextAreaElement).value).toBe("");
+  expect(screen.getByText("chat.steer")).toBeTruthy();
+  expect(screen.getByText("One more detail")).toBeTruthy();
   expect(callsFor("/messages")).toHaveLength(1);
+  expect(callsFor("/cancel")).toHaveLength(0);
+});
+
+test("Steer appears immediately and is replaced once by its durable input identity", async () => {
+  const user = userEvent.setup(); const accepted = deferred<unknown>();
+  const initial = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, options) => path.endsWith("/messages") ? Promise.resolve(receiptFor(options))
+    : path.endsWith("/supplements") ? accepted.promise : initial(path, options));
+  await mountConversation();
+  const draft = screen.getByRole("textbox", { name: "appRoute.message" });
+  await user.type(draft, "Original input"); await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  await screen.findByRole("button", { name: "appRoute.stop" });
+  await user.type(draft, "直接给结果"); await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  expect(screen.getByText("chat.steer")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Synthetic transcript" })).getByText("直接给结果")).toBeTruthy();
+  const supplementId = JSON.parse(String(callsFor("/supplements")[0][1]?.body)).supplementId;
+  await act(async () => accepted.resolve({ sessionId: "session", agentRunId: "original-run", supplementId, disposition: "accepted", queuedCount: 1 }));
+  const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
+  await act(async () => subscription.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: "workspace.presentation.v1", workspaceId: "workspace", sessionId: "session", kind: "snapshot",
+    page: { ...page, sourceHighWater: "2", resumeCursors: [{ streamId: "workspace-transcript.v1", cursor: "2" }], blocks: [{ blockId: `message:turn:supplement:${supplementId}`, blockRevision: "1", orderKey: { sourceSequence: "2", ordinal: 0 },
+      body: { kind: "notice", noticeType: "turn_supplement", content: { inlineContent: "直接给结果", sourceRef: null }, status: "completed" } }] },
+  } }));
+  expect(screen.getAllByText("直接给结果")).toHaveLength(1);
+  expect(screen.getAllByText("chat.steer")).toHaveLength(1);
+  expect(callsFor("/messages")).toHaveLength(1);
+});
+
+test("refresh restores accepted Steer before Core consumes it, then reconciles the same identity", async () => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "restored-steer", message: "立即给出结果" }];
+  const props = { initialSession: row, workspaceDraft: false, location: { search: "", state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
+  const firstView = render(<MemoryRouter><AppPageContent {...props} /></MemoryRouter>);
+  await screen.findByText("立即给出结果");
+  firstView.unmount();
+  render(<MemoryRouter><AppPageContent {...props} /></MemoryRouter>);
+  await screen.findByText("立即给出结果");
+  expect(screen.getAllByText("chat.steer")).toHaveLength(1);
+  const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
+  await act(async () => subscription.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: "workspace.presentation.v1", workspaceId: "workspace", sessionId: "session", kind: "snapshot",
+    page: { ...page, sourceHighWater: "2", resumeCursors: [{ streamId: "workspace-transcript.v1", cursor: "2" }], blocks: [{ blockId: "message:turn:supplement:restored-steer", blockRevision: "1", orderKey: { sourceSequence: "2", ordinal: 0 },
+      body: { kind: "notice", noticeType: "turn_supplement", content: { inlineContent: "立即给出结果", sourceRef: null }, status: "completed" } }] },
+  } }));
+  expect(screen.getAllByText("立即给出结果")).toHaveLength(1);
+  expect(callsFor("/messages")).toHaveLength(0);
+  expect(callsFor("/supplements")).toHaveLength(0);
+});
+
+test.each([false, true])("a late Steer restore survives a checkpoint but respects Session changes: %s", async changeSession => {
+  const read = deferred<Awaited<NonNullable<typeof fixture.activeRead>>>();
+  fixture.activeRead = read.promise;
+  const props = { workspaceDraft: false, location: { search: "", state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
+  const view = render(<MemoryRouter><AppPageContent {...props} initialSession={row} /></MemoryRouter>);
+  await waitFor(() => expect(fixture.subscriptions.some(item => !item.signal.aborted)).toBe(true));
+  const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
+  await act(async () => subscription.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: "workspace.presentation.v1", workspaceId: "workspace", sessionId: "session", kind: "checkpoint",
+    projectionGeneration: null, sourceHighWater: "0", agentRun: {
+      agentRunId: "original-run", status: "running", startedAt: null, completedAt: null,
+    },
+  } }));
+  if (changeSession) {
+    view.rerender(<MemoryRouter><AppPageContent {...props} initialSession={{ ...row, id: "other", title: "Other Session" }} /></MemoryRouter>);
+  }
+  await act(async () => read.resolve({ agentRun: { agentRunId: "original-run", status: "running", streamCursor: "0" },
+    pendingSupplements: [{ supplementId: "delayed-steer", message: "迟到的追加" }] }));
+  if (changeSession) expect(screen.queryByText("迟到的追加")).toBeNull();
+  else expect(await screen.findByText("迟到的追加")).toBeTruthy();
+});
+
+test.each(["cancelled", "completed", "failed"] as const)("a %s Run retires its pending Steer without refreshing", async status => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "pending-steer", message: "Pending old instruction" }];
+  await mountConversation();
+  expect(screen.getByText("Pending old instruction")).toBeTruthy();
+  await sendCheckpoint(status);
+  expect(screen.queryByText("Pending old instruction")).toBeNull();
+  expect(screen.queryByText("chat.steer")).toBeNull();
+});
+
+test("a late active Run read cannot restore Steer after its terminal checkpoint", async () => {
+  const read = deferred<Awaited<NonNullable<typeof fixture.activeRead>>>();
+  fixture.activeRead = read.promise;
+  await mountConversation();
+  await sendCheckpoint("cancelled");
+  await act(async () => read.resolve({ agentRun: { agentRunId: "original-run", status: "running", streamCursor: "0" },
+    pendingSupplements: [{ supplementId: "late-steer", message: "Already cancelled instruction" }] }));
+  expect(screen.queryByText("Already cancelled instruction")).toBeNull();
+  expect(screen.queryByRole("button", { name: "appRoute.stop" })).toBeNull();
+});
+
+test("an older Run terminal checkpoint preserves the newer Run's pending Steer", async () => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "old-steer", message: "Old Run instruction" }];
+  await mountConversation();
+  fixture.activeRun = { agentRunId: "new-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "new-steer", message: "New Run instruction" }];
+  await sendCheckpoint("running", "0", "new-run");
+  await screen.findByText("New Run instruction");
+  await sendCheckpoint("cancelled");
+  expect(screen.queryByText("Old Run instruction")).toBeNull();
+  expect(screen.getByText("New Run instruction")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "appRoute.stop" })).toBeTruthy();
+});
+
+test("an authoritative empty read retires old pending Steer and preserves input sent after the read began", async () => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "old-steer", message: "Old queued instruction" }];
+  const request = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, options) => path.endsWith("/supplements")
+    ? Promise.resolve({ sessionId: "session", agentRunId: "original-run",
+      supplementId: JSON.parse(String(options?.body)).supplementId, disposition: "accepted", queuedCount: 1 })
+    : request(path, options));
+  await mountConversation();
+  const read = deferred<Awaited<NonNullable<typeof fixture.activeRead>>>();
+  fixture.activeRead = read.promise;
+  await sendCheckpoint(null);
+  const user = userEvent.setup();
+  await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Newly sent instruction");
+  await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  await screen.findByText("Newly sent instruction");
+  await act(async () => read.resolve({ agentRun: null, pendingSupplements: [] }));
+  expect(screen.queryByText("Old queued instruction")).toBeNull();
+  expect(screen.getByText("Newly sent instruction")).toBeTruthy();
+});
+
+test("a stale empty read cannot retire Steer after a newer active Run checkpoint", async () => {
+  fixture.activeRun = { agentRunId: "original-run", status: "running", streamCursor: "0" };
+  fixture.pendingSupplements = [{ supplementId: "pending-steer", message: "Still queued instruction" }];
+  await mountConversation();
+  const read = deferred<Awaited<NonNullable<typeof fixture.activeRead>>>();
+  fixture.activeRead = read.promise;
+  await sendCheckpoint(null);
+  await sendCheckpoint("running");
+  await act(async () => read.resolve({ agentRun: null, pendingSupplements: [] }));
+  expect(screen.getByText("Still queued instruction")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "appRoute.stop" })).toBeTruthy();
+});
+
+test("rejected Steer preserves its draft and does not leave a sent message behind", async () => {
+  const user = userEvent.setup(); const initial = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, options) => path.endsWith("/messages") ? Promise.resolve(receiptFor(options))
+    : path.endsWith("/supplements") ? Promise.reject(new ApiError("agent_run_supplement_unavailable", 503)) : initial(path, options));
+  await mountConversation();
+  const draft = screen.getByRole("textbox", { name: "appRoute.message" });
+  await user.type(draft, "Original input"); await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  await screen.findByRole("button", { name: "appRoute.stop" });
+  await user.type(draft, "Keep this instruction"); await user.click(screen.getByRole("button", { name: "appRoute.send" }));
+  await screen.findByText("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry");
+  expect((draft as HTMLTextAreaElement).value).toBe("Keep this instruction");
+  expect(screen.queryByText("chat.steer")).toBeNull();
   expect(callsFor("/cancel")).toHaveLength(0);
 });
 
@@ -303,7 +461,8 @@ test("workspace preservation stays out of the transcript when reopening after a 
 });
 
 test.each([
-  [409, "session_workspace_preservation_pending", null],
+  [409, "session_workspace_preservation_pending", "appRoute.workspacePreservationPending"],
+  [409, "session_workspace_preservation_blocked", "appRoute.workspacePreservationBlocked"],
   [413, "upload_body_too_large", "appRoute.attachmentTooLarge"],
   [429, "upload_capacity_exhausted", "appRoute.sendingTemporarilyUnavailable"],
 ] as const)("a definite %i rejection restores the draft and keeps the failure visible until acceptance", async (status, code, feedback) => {
@@ -390,7 +549,7 @@ test("a retained Session displays its original history and continues with the us
   expect(screen.queryByRole("alert")).toBeNull();
   expect(fixture.subscriptions.every(item => item.sessionId === "session")).toBe(true);
   await act(async () => { navigation.resolve({ sessions: [row] }); });
-  const historyLink = screen.getByRole("link", { name: "Synthetic" });
+  const historyLink = screen.getByRole("link", { name: /^Synthetic/ });
   expect(historyLink.getAttribute("href")).toBe("/w/workspace/sessions/session");
   await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Continue this original Session");
   await user.click(screen.getByRole("button", { name: "appRoute.send" }));
@@ -443,7 +602,7 @@ test("sending immediately after opening a Session targets that Session while nav
   const initial = fixture.request.getMockImplementation()!;
   render(<MemoryRouter initialEntries={["/w/workspace/app"]}><WorkspaceChatLayout /></MemoryRouter>);
   await chooseModel();
-  const oldSession = await screen.findByRole("link", { name: "Synthetic" });
+  const oldSession = await screen.findByRole("link", { name: /^Synthetic/ });
   fixture.request.mockImplementation((path, options) => path === "/api/workspaces/workspace/sessions" ? navigation.promise
     : path.endsWith("/messages") ? accepted.promise : initial(path, options));
   fixture.selectedSession = row;

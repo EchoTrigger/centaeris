@@ -93,6 +93,12 @@ class AgentRunApiApiTests(TransactionTestCase):
         self.assertEqual(self.query().json()["conversationId"], first.conversationId)
         self.assertEqual(self.query().json()["cleanupStatus"], "retained")
         self.assertEqual(self.message(first.conversationId)[0].json()["error"], "session_has_active_agent_run")
+        AgentRun.objects.filter(pk=first.agentRunId).update(status="failed",
+            transitionReason="workspace_preservation_blocked")
+        blocked, rejected_operation = self.message(first.conversationId)
+        self.assertEqual((blocked.status_code, blocked.json()["error"]),
+            (409, "session_workspace_preservation_blocked"))
+        self.assertIsNone(rejected_operation)
         self.settle_message(first)
         _, second = self.message(first.conversationId)
         self.assertEqual(second.sessionId, first.sessionId)

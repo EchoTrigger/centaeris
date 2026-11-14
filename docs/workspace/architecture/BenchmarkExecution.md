@@ -23,8 +23,9 @@ See [supervisor installation](../../../packages/workspace/executor/deploy/README
 
 Docker enforces CPU, memory and PID limits. `workspaceBytes` declares the workspace
 capacity used by admission and bounds expanded file, input and recovery data.
-`storageBytes` preserves the independent task storage declaration; the current host
-does not use it for admission or enforce it as a writable-layer quota. The common
+`storageBytes` is the independently authorized hard limit for the container's
+writable layer. The Docker host requires classic `overlay2` on XFS with project
+quotas enabled. The common
 profile preserves the image's writable filesystem without mounting a workspace tmpfs. Missing workspace directories are initialized for the profile's
 user; existing directories retain the image's contents and permissions.
 `disabled` selects Docker `none`; `publicInternet` selects `bridge` and the
@@ -37,7 +38,7 @@ File-level incremental snapshots retain a complete manifest while reusing
 unchanged content. Small files can share immutable packs (2–32 members, each at
 most 16 KiB, at most 512 KiB per pack); larger or ungrouped files stay loose.
 This physical layout preserves the same file hashes and restored bytes. It does
-not change the expanded-workspace admission budget or add a writable-layer quota.
+not change the expanded-workspace admission budget or writable-layer quota.
 Storage measurements include the actual loose/pack bytes and PostgreSQL indexes.
 A partially reachable pack retains all its bytes until its final protected member
 is no longer rooted; GC does not repack it during collection.

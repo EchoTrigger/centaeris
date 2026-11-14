@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 import redis
 import redis.asyncio as async_redis
@@ -138,14 +139,30 @@ def require_cursor_not_future(agent_run: AgentRun, source_sequence: int) -> None
         raise ValueError("last_event_id_invalid")
 
 
-def _live_state(meta: dict, text: str | None) -> dict | None:
+LIVE_META_FIELDS = {"messageId", "turnId", "afterSequence", "revision", "textResetRevision", "reasoningResetRevision", "reasoning"}
+
+
+def _reasoning_identity(encoded):
+    value = json.loads(encoded)
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or set(value) != {"blockId", "requestId"}
+            or not isinstance(value["requestId"], str) or not value["requestId"].strip()
+            or value["blockId"] != "reasoning:" + value["requestId"]):
+        raise ValueError("agent_run_live_reasoning_invalid")
+    return value
+
+
+def _live_state(meta: dict, text: str | None, reasoning_text: str | None) -> dict | None:
     if not meta:
         return None
-    if set(meta) - {"reasoning"} != {"messageId", "turnId", "afterSequence", "revision"}:
+    if set(meta) != LIVE_META_FIELDS:
         raise ValueError("agent_run_live_state_invalid")
     try:
         after_sequence = int(meta["afterSequence"])
         revision = int(meta["revision"])
+        text_reset = int(meta["textResetRevision"])
+        reasoning_reset = int(meta["reasoningResetRevision"])
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("agent_run_live_state_invalid") from error
     if (
@@ -153,17 +170,21 @@ def _live_state(meta: dict, text: str | None) -> dict | None:
         or revision < 0
         or not meta["messageId"]
         or not meta["turnId"]
+        or not 0 <= text_reset <= revision or not 0 <= reasoning_reset <= revision
     ):
         raise ValueError("agent_run_live_state_invalid")
     if revision == 0:
         return None
+    identity = _reasoning_identity(meta["reasoning"])
+    if not isinstance(text, str) or (identity is not None and not isinstance(reasoning_text, str)):
+        raise ValueError("agent_run_live_state_invalid")
     return {
         "messageId": meta["messageId"],
         "turnId": meta["turnId"],
         "afterSequence": after_sequence,
         "revision": revision,
-        "text": text if isinstance(text, str) else "",
-        **({"reasoning": _validate_reasoning(json.loads(meta["reasoning"]))} if "reasoning" in meta else {}),
+        "text": text,
+        "reasoning": {**identity, "text": reasoning_text} if identity is not None else None,
     }
 
 
@@ -180,10 +201,11 @@ def _validate_reasoning(value):
 def load_live_text_state(agent_run_id: str) -> dict | None:
     live_meta_key = f"workspace-agent:agent-run:{{{agent_run_id}}}:live:meta"
     live_text_key = f"workspace-agent:agent-run:{{{agent_run_id}}}:live:text"
+    live_reasoning_key = f"workspace-agent:agent-run:{{{agent_run_id}}}:live:reasoning"
     try:
         with _redis_sync_client.pipeline(transaction=True) as pipeline:
-            meta, text = pipeline.hgetall(live_meta_key).get(live_text_key).execute()
-        return _live_state(meta, text)
+            meta, text, reasoning = pipeline.hgetall(live_meta_key).get(live_text_key).get(live_reasoning_key).execute()
+        return _live_state(meta, text, reasoning)
     except ValueError as error:
         raise AgentRunStreamUnavailable(str(error)) from error
     except redis.RedisError as error:
@@ -191,11 +213,81 @@ def load_live_text_state(agent_run_id: str) -> dict | None:
 
 
 async def _load_live_text_state_async(agent_run_id: str) -> dict | None:
-    live_meta_key = f"workspace-agent:agent-run:{{{agent_run_id}}}:live:meta"
-    live_text_key = f"workspace-agent:agent-run:{{{agent_run_id}}}:live:text"
-    async with _redis_stream_client.pipeline(transaction=True) as pipeline:
-        meta, text = await pipeline.hgetall(live_meta_key).get(live_text_key).execute()
-    return _live_state(meta, text)
+    return (await load_live_text_update(agent_run_id)).value
+
+
+@dataclass(frozen=True)
+class LiveTextRead:
+    kind: str | None
+    value: dict | None
+    cursor: dict | None
+
+
+# Reset revisions make same-length replacements observable without downloading
+# and comparing the old prefix. Metadata and both byte ranges are one read.
+LIVE_TEXT_READ_SCRIPT = r'''
+local meta = redis.call("HGETALL", KEYS[2])
+if #meta == 0 then return {"missing"} end
+local fields = {}
+for i = 1, #meta, 2 do fields[meta[i]] = meta[i + 1] end
+local allowed = {messageId=true, turnId=true, afterSequence=true, revision=true, textResetRevision=true, reasoningResetRevision=true, reasoning=true}
+if #meta ~= 14 then return {"invalid"} end
+for key, _ in pairs(fields) do if not allowed[key] then return {"invalid"} end end
+if fields.revision == "0" then return {"missing"} end
+local textLength = redis.call("STRLEN", KEYS[1])
+local reasoningLength = redis.call("STRLEN", KEYS[3])
+local function atMost(a, b)
+  return a and (#a < #b or (#a == #b and a <= b))
+end
+local same = ARGV[1] == "1" and fields.turnId == ARGV[2] and fields.messageId == ARGV[3]
+  and fields.afterSequence == ARGV[4] and fields.reasoning == ARGV[8]
+if same and fields.revision == ARGV[5] and textLength == tonumber(ARGV[6]) and reasoningLength == tonumber(ARGV[7]) then
+  return {"unchanged"}
+end
+if same and atMost(ARGV[5], fields.revision) and atMost(fields.textResetRevision, ARGV[5])
+    and atMost(fields.reasoningResetRevision, ARGV[5]) and textLength >= tonumber(ARGV[6]) and reasoningLength >= tonumber(ARGV[7]) then
+  return {"liveDelta", meta, redis.call("GETRANGE", KEYS[1], ARGV[6], -1), redis.call("GETRANGE", KEYS[3], ARGV[7], -1), textLength, reasoningLength}
+end
+return {"live", meta, redis.call("GET", KEYS[1]), redis.call("GET", KEYS[3]), textLength, reasoningLength}
+'''
+
+
+def _live_read(raw, previous):
+    kind = raw[0]
+    if kind == "missing":
+        return LiveTextRead("live", None, None)
+    if kind == "unchanged":
+        return LiveTextRead(None, None, previous)
+    if kind not in {"live", "liveDelta"} or len(raw) != 6:
+        raise ValueError("agent_run_live_read_invalid")
+    meta = dict(zip(raw[1][::2], raw[1][1::2], strict=True))
+    # Validate the same exact metadata for both complete and suffix reads.
+    state = _live_state(meta, raw[2], raw[3])
+    if state is None:
+        raise ValueError("agent_run_live_read_invalid")
+    reasoning = _reasoning_identity(meta["reasoning"])
+    cursor = {key: state[key] for key in ("messageId", "turnId", "afterSequence", "revision")}
+    cursor.update(textOffset=raw[4], reasoningOffset=raw[5], reasoning=reasoning)
+    if kind == "live":
+        return LiveTextRead(kind, state, cursor)
+    if previous is None:
+        raise ValueError("agent_run_live_delta_base_missing")
+    value = {key: state[key] for key in ("messageId", "turnId", "afterSequence", "revision")}
+    value.update(baseRevision=previous["revision"], textOffset=previous["textOffset"], text=state["text"],
+        reasoning=({**reasoning, "offset": previous["reasoningOffset"], "text": raw[3]}
+                   if reasoning is not None and raw[3] else None))
+    return LiveTextRead(kind, value, cursor)
+
+
+async def load_live_text_update(agent_run_id: str, previous=None) -> LiveTextRead:
+    prefix = f"workspace-agent:agent-run:{{{agent_run_id}}}:live"
+    args = (["1", previous["turnId"], previous["messageId"], str(previous["afterSequence"]),
+             str(previous["revision"]), str(previous["textOffset"]), str(previous["reasoningOffset"]),
+             json.dumps(previous["reasoning"], ensure_ascii=False, separators=(",", ":"), sort_keys=True)]
+            if previous is not None else ["0", "", "", "0", "0", "0", "0", "null"])
+    raw = await _redis_stream_client.eval(LIVE_TEXT_READ_SCRIPT, 3,
+        f"{prefix}:text", f"{prefix}:meta", f"{prefix}:reasoning", *args)
+    return _live_read(raw, previous)
 
 
 async def _capture_signal_tail(agent_run_id: str) -> str:

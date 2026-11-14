@@ -199,7 +199,6 @@ $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $distR
 
 foreach ($requiredPath in @(
     "LICENSE.centaeris.txt",
-    "LICENSE-APACHE",
     "LICENSING.md",
     "packages/model-catalog/centaeris_model_catalog/logos/LICENSE",
     "COPYRIGHT",

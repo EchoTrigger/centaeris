@@ -41,13 +41,14 @@ function isUnconfirmedRequest(error: unknown) {
 }
 
 export function isWorkspacePreservationPending(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 409 && error.message === "session_workspace_preservation_pending";
+  return error instanceof ApiError && error.status === 409
+    && ["session_workspace_preservation_pending", "session_workspace_preservation_blocked"].includes(error.message);
 }
 
 export function isDefiniteSubmissionRejection(error: unknown): boolean {
   return isWorkspacePreservationPending(error) || (error instanceof ApiError
     && (([400, 401, 403, 404, 413, 422, 429].includes(error.status) && error.message !== "operation_not_found")
-      || (error.status === 409 && error.message === "session_has_active_agent_run")));
+      || (error.status === 409 && ["session_has_active_agent_run", "issue_version_conflict", "issue_archived", "issue_material_version_changed"].includes(error.message))));
 }
 
 function samePendingVersion(current: Pending | null, expected: Pending) {

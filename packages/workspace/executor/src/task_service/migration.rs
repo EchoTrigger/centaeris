@@ -64,7 +64,8 @@ fn remember_owner(journal: &mut Journal, owner: &EnvironmentTaskOwner) {
     }
 }
 fn read_v2(bytes: &[u8]) -> Result<Journal, String> {
-    let old: V2Journal = serde_json::from_slice(bytes).map_err(|_| "task_journal_invalid")?;
+    let old: V2Journal = serde_json::from_value(import_unknown_timeouts(bytes)?)
+        .map_err(|_| "task_journal_invalid")?;
     if old.schema != "environment.task.v2" {
         return Err("task_journal_schema_unsupported".into());
     }
@@ -131,14 +132,51 @@ pub(super) fn task_identity_v2(
     ))
 }
 
+fn import_unknown_timeouts(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| "task_journal_invalid")?;
+    // This is a private, explicit forward import, never the wire decoder. Old
+    // snapshots contain no authoritative reason for their exit or signal.
+    if let Some(tasks) = journal
+        .get_mut("tasks")
+        .and_then(|value| value.as_object_mut())
+    {
+        for task in tasks.values_mut() {
+            if let Some(snapshot) = task
+                .get_mut("snapshot")
+                .and_then(|value| value.as_object_mut())
+            {
+                snapshot
+                    .entry("timedOut")
+                    .or_insert(serde_json::Value::Null);
+            }
+        }
+    }
+    if let Some(receipts) = journal
+        .get_mut("receipts")
+        .and_then(|value| value.as_object_mut())
+    {
+        for receipt in receipts.values_mut() {
+            if let Some(snapshot) = receipt
+                .pointer_mut("/result/task")
+                .and_then(|value| value.as_object_mut())
+            {
+                snapshot
+                    .entry("timedOut")
+                    .or_insert(serde_json::Value::Null);
+            }
+        }
+    }
+    Ok(journal)
+}
+
 pub(super) fn read_journal(bytes: &[u8]) -> Result<Journal, String> {
     let schema: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| "task_journal_invalid")?;
     match schema["schema"].as_str() {
         Some("environment.task.v2") => read_v2(bytes),
-        Some(ENVIRONMENT_TASK_SCHEMA) => {
-            serde_json::from_slice(bytes).map_err(|_| "task_journal_invalid".into())
-        }
+        Some(ENVIRONMENT_TASK_SCHEMA) => serde_json::from_value(import_unknown_timeouts(bytes)?)
+            .map_err(|_| "task_journal_invalid".into()),
         _ => Err("task_journal_schema_unsupported".into()),
     }
 }
@@ -180,8 +218,11 @@ pub(super) fn migrate_index(root: &Path, instance: &str) -> Result<(), String> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| "task_index_invalid")?;
-    if version == 3 {
+    if version == 4 {
         return Ok(());
+    }
+    if version == 3 {
+        return migrate_task_timeouts(&mut connection);
     }
     if version == 2 {
         return migrate_output_consumptions(&mut connection);
@@ -256,6 +297,7 @@ pub(super) fn migrate_index(root: &Path, instance: &str) -> Result<(), String> {
                     },
                     state,
                     exit_code,
+                    timed_out: None,
                     cleanup_complete: flags & 1 != 0,
                     output_complete: flags & 2 != 0,
                 },
@@ -402,5 +444,24 @@ pub(super) fn migrate_index(root: &Path, instance: &str) -> Result<(), String> {
 fn migrate_output_consumptions(connection: &mut Connection) -> Result<(), String> {
     store::validate_version(connection, 2)?;
     connection.execute_batch("PRAGMA synchronous=FULL; BEGIN; CREATE TABLE output_consumptions(id TEXT PRIMARY KEY,receipt TEXT NOT NULL,reclaimed INTEGER NOT NULL CHECK(reclaimed IN (0,1))) WITHOUT ROWID; PRAGMA user_version=3; COMMIT;")
+        .map_err(|_| "task_index_migration_failed".to_owned())?;
+    migrate_task_timeouts(connection)
+}
+
+fn migrate_task_timeouts(connection: &mut Connection) -> Result<(), String> {
+    store::validate_version(connection, 3)?;
+    let invalid: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE json_type(record,'$[8]') IS NOT 'integer' OR json_extract(record,'$[8]') NOT BETWEEN 0 AND 3)
+         OR EXISTS(SELECT 1 FROM operations WHERE json_type(receipt,'$[1].Mutated[3]') IS NOT NULL AND
+             (json_type(receipt,'$[1].Mutated[3]') IS NOT 'integer' OR json_extract(receipt,'$[1].Mutated[3]') NOT BETWEEN 0 AND 3))",
+        [], |row| row.get(0),
+    ).map_err(|_| "task_index_invalid")?;
+    if invalid {
+        return Err("task_index_invalid".into());
+    }
+    // Unset reason bits mean Unknown. Preserve record/receipt bytes, identities,
+    // exit codes and output; an old deadline cannot be reconstructed from them.
+    connection
+        .execute_batch("PRAGMA synchronous=FULL; BEGIN; PRAGMA user_version=4; COMMIT;")
         .map_err(|_| "task_index_migration_failed".into())
 }

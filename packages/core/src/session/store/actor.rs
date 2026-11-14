@@ -1336,6 +1336,32 @@ impl RuntimeStoreActor {
 }
 
 impl AgentRuntimeSnapshotStorePort for RuntimeStoreActor {
+    fn save_model_input_image(
+        &self,
+        session_id: &str,
+        content_digest: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        self.send_blocking(|reply| RuntimeStoreActorCommand::SaveModelInputImage {
+            session_id: session_id.into(),
+            content_digest: content_digest.into(),
+            bytes: bytes.into(),
+            reply,
+        })
+    }
+
+    fn load_model_input_image(
+        &self,
+        session_id: &str,
+        content_digest: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.send_blocking(|reply| RuntimeStoreActorCommand::LoadModelInputImage {
+            session_id: session_id.into(),
+            content_digest: content_digest.into(),
+            reply,
+        })
+    }
+
     fn compare_and_save_agent_runtime_snapshot(
         &self,
         session_id: &str,
@@ -1729,6 +1755,17 @@ impl RuntimeStoreActor {
 }
 
 enum RuntimeStoreActorCommand {
+    SaveModelInputImage {
+        session_id: String,
+        content_digest: String,
+        bytes: Vec<u8>,
+        reply: RuntimeStoreActorReply<()>,
+    },
+    LoadModelInputImage {
+        session_id: String,
+        content_digest: String,
+        reply: RuntimeStoreActorReply<Option<Vec<u8>>>,
+    },
     SaveWaitCheckpoint {
         req: SaveWaitCheckpointRequest,
         reply: RuntimeStoreActorReply<()>,
@@ -2024,6 +2061,8 @@ impl RuntimeStoreActorCommand {
                 "upsert_external_context_link_and_complete_job"
             }
             Self::CreateDeadLetterAndFailJob { .. } => "create_dead_letter_and_fail_job",
+            Self::SaveModelInputImage { .. } => "save_model_input_image",
+            Self::LoadModelInputImage { .. } => "load_model_input_image",
             Self::LoadAgentRuntimeSnapshot { .. } => "load_agent_runtime_snapshot",
             Self::CompareAndSaveAgentRuntimeSnapshot { .. } => {
                 "compare_and_save_agent_runtime_snapshot"
@@ -2459,6 +2498,31 @@ async fn run_runtime_store_actor<S>(
                     reply.send(
                         run_store_operation(store.clone(), admission, move |store| {
                             store.create_dead_letter_and_fail_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::SaveModelInputImage {
+                    session_id,
+                    content_digest,
+                    bytes,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), admission, move |store| {
+                            store.save_model_input_image(&session_id, &content_digest, &bytes)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::LoadModelInputImage {
+                    session_id,
+                    content_digest,
+                    reply,
+                } => {
+                    reply.send(
+                        run_store_operation(store.clone(), admission, move |store| {
+                            store.load_model_input_image(&session_id, &content_digest)
                         })
                         .await,
                     );

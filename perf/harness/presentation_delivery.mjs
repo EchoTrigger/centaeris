@@ -4,6 +4,85 @@ import { fileURLToPath } from 'node:url';
 import { createTranscriptViewStore } from '../../packages/workspace/web/src/chat/transcriptViewStore.ts';
 import { WorkspacePresentationController } from '../../packages/workspace/web/src/chat/workspacePresentationController.ts';
 import { streamWorkspacePresentation } from '../../packages/workspace/web/src/chat/workspacePresentationTransport.ts';
+import { readPresentationSseBlock } from '../../packages/workspace/web/src/chat/workspacePresentationProtocol.ts';
+
+export async function observeLiveReplay({ identity, frames, expectedText }) {
+  const store = createTranscriptViewStore();
+  const controller = new WorkspacePresentationController({ ...identity, store });
+  let wireBytes = 0, frameCount = 0, parseMs = 0, applyMs = 0;
+  const started = performance.now();
+  for (const block of frames) {
+    wireBytes += Buffer.byteLength(block);
+    const parseStarted = performance.now();
+    const entry = readPresentationSseBlock(block, identity);
+    parseMs += performance.now() - parseStarted;
+    if (entry === null) continue;
+    frameCount++;
+    const applyStarted = performance.now();
+    await controller.acceptWithBackpressure(entry);
+    applyMs += performance.now() - applyStarted;
+  }
+  if (store.getLiveSnapshot()?.text !== expectedText) throw new Error('live replay did not reconstruct the exact fixture text');
+  const cursor = controller.lastCursor;
+  controller.dispose();
+  return { wireBytes, frameCount, parseMs, applyMs, elapsedMs: performance.now() - started, cursor };
+}
+
+// Both sequences represent the same recorded output. The full sequence is the
+// former delivery cost baseline; delta frames exercise the current consumer.
+export function* liveReplayFrames(identity, text, fullSnapshots, chunkBytes = 4096) {
+  const encode = item => `data: ${JSON.stringify({ schema: 'workspace.presentation.v1', ...identity, ...item })}\n\n`;
+  yield encode({ kind: 'snapshot', page: {
+    schema: 'transcript.page.v1', sessionId: identity.sessionId, projectionVersion: 'transcript.projection.v1',
+    projectionGeneration: 'live-replay', sourceHighWater: '0', blocks: [], olderCursor: null,
+    hasOlder: false, resumeCursors: [],
+  } });
+  const bytes = new TextEncoder().encode(text);
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let previousOffset = 0, previousText = '', revision = 0;
+  while (previousOffset < bytes.byteLength) {
+    let end = Math.min(previousOffset + chunkBytes, bytes.byteLength);
+    while (end < bytes.byteLength && (bytes[end] & 0xc0) === 0x80) end++;
+    const delta = decoder.decode(bytes.subarray(previousOffset, end));
+    const current = previousText + delta;
+    revision++;
+    if (revision === 1 || fullSnapshots) {
+      yield encode({ kind: 'live', agentRunId: 'live-replay-run', live: {
+        afterSequence: 0, revision, turnId: 'live-replay-turn', messageId: 'live-replay-answer',
+        text: current, reasoning: null,
+      } });
+    } else {
+      yield encode({ kind: 'liveDelta', agentRunId: 'live-replay-run', delta: {
+        afterSequence: 0, turnId: 'live-replay-turn', messageId: 'live-replay-answer',
+        baseRevision: revision - 1, revision, textOffset: previousOffset, text: delta, reasoning: null,
+      } });
+    }
+    previousOffset = end;
+    previousText = current;
+  }
+}
+
+async function liveReplayMain() {
+  const identity = { workspaceId: 'live-replay-workspace', sessionId: 'live-replay-session' };
+  const results = [];
+  for (const bytes of [1024, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024]) {
+    const text = '流式A\n'.repeat(bytes / 8);
+    const samples = { full: [], delta: [] };
+    for (let round = 0; round < 3; round++) {
+      for (const mode of round % 2 === 0 ? ['full', 'delta'] : ['delta', 'full']) {
+        samples[mode].push(await observeLiveReplay({
+          identity, frames: liveReplayFrames(identity, text, mode === 'full'), expectedText: text,
+        }));
+      }
+    }
+    const median = (values, key) => values.map(sample => sample[key]).sort((a, b) => a - b)[1];
+    const summarize = values => ({ wireBytes: values[0].wireBytes, frames: values[0].frameCount,
+      parseMs: median(values, 'parseMs'), applyMs: median(values, 'applyMs'), elapsedMs: median(values, 'elapsedMs') });
+    results.push({ bytes, full: summarize(samples.full), delta: summarize(samples.delta) });
+  }
+  console.log(JSON.stringify({ kind: 'offline-production-consumer-replay', repetitions: 3,
+    chunkBytes: 4096, includesInitialSnapshot: true, results }));
+}
 
 export async function observePresentation({ baseUrl, identity, cookie, reference, slowReadMs = 0 }) {
   const origin = new URL(baseUrl);
@@ -83,6 +162,8 @@ export async function observePresentation({ baseUrl, identity, cookie, reference
 }
 
 async function main() {
+  if (process.argv[2] === '--live-replay' && process.argv.length === 3) return liveReplayMain();
+  if (process.argv.length > 2) throw new Error('unsupported presentation probe arguments');
   const samples = Number(process.env.PERF_PRESENTATION_SAMPLES ?? 25);
   if (!Number.isSafeInteger(samples) || samples < 1 || samples > 100) {
     throw new Error('presentation sample count must be between 1 and 100');

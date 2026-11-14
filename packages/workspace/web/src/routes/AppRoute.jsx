@@ -1,3 +1,9 @@
+import { ConversationDockContext } from "../shell/ConversationDock";
+import { createChatDraft } from "../shell/workspaceChatState";
+import { createPortal } from "react-dom";
+import { ConversationTabs } from "../shell/ConversationTabs";
+import { ChatTitle } from "../shell/ChatTitle";
+import { ConversationHistory } from "../shell/ConversationHistory";
 import { animate } from "@centaeris/ui/motion";
 import { useTranslation } from "../i18n";
 import { useCompactWorkspaceLayout, useSidebarOpen, useWorkspaceNavigation } from "../shell/workspaceNavigationState";
@@ -12,11 +18,10 @@ import { officePreviewUrl } from "../chat/attachments.mjs";
 import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
-import { dismissDetailsOnOutsideInteraction } from "../components/detailsDismissal";
 import { streamWorkspacePresentation } from "../chat/workspacePresentationTransport";
 import { createTranscriptViewStore } from "../chat/transcriptViewStore";
 import { compareTranscriptBlocks } from "../chat/transcriptContract";
-import { hasCommittedPendingMessage } from "../chat/transcriptTurns";
+import { hasCommittedPendingMessage, hasCommittedSupplement } from "../chat/transcriptTurns";
 import { TranscriptToolOperationRegistry } from "../chat/transcriptToolOperations";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
 import { useTranscriptSearchTarget } from "../chat/useTranscriptSearchTarget";
@@ -42,7 +47,7 @@ import {
   writeModelThinkingMode,
   writePreferredModelIdentity,
 } from "../preferences";
-import { HomePlane, HomeQuickActions } from "../shell/HomePlane";
+import { HomePlane } from "../shell/HomePlane";
 import { ShellSidebar } from "../shell/ShellSidebar";
 import { useWorkspaceSearch, WorkspaceSearch } from "../shell/WorkspaceSearch";
 import { isWorkspaceCatalogPath, sessionChatPath, groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
@@ -52,15 +57,13 @@ import { SessionReadController, mergeSessionAttention } from "../shell/sessionRe
 import { createSessionNavigationStore } from "../shell/sessionNavigationStore";
 import { useNavigationRowActions, useLatestCallback } from "../shell/useNavigationRowActions";
 import {
-  Archive,
   Image as ImageIcon,
-  Ellipsis,
-  Pencil,
-  Pin,
-  PinOff,
+  ChevronDown,
+  Minimize2,
+  Minus,
+  Maximize2,
   PanelLeft,
   Search,
-  Trash2,
   X,
 } from "lucide-react";
 
@@ -114,57 +117,7 @@ function upsertBy(items, key, value) {
   return items.map((item, itemIndex) => (itemIndex === index ? value : item));
 }
 
-function ConversationTitle({ session, actions, running }) {
-  const { t } = useTranslation();
-  const menuRef = useRef(null);
-  const titleRef = useRef(null);
-  const [renaming, setRenaming] = useState(false);
-  useEffect(() => {
-    if (!renaming) return dismissDetailsOnOutsideInteraction(menuRef.current);
-  }, [renaming]);
-
-  function closeMenu() {
-    menuRef.current.open = false;
-    titleRef.current?.focus();
-  }
-
-  function finishRename(value, returnFocus = false) {
-    setRenaming(false);
-    if (value !== undefined) void actions.renameSession(session, value);
-    if (returnFocus) window.requestAnimationFrame(() => titleRef.current?.focus());
-  }
-
-  if (renaming) return <form className="workspaceConversationRename" onSubmit={event => {
-    event.preventDefault();
-    finishRename(event.currentTarget.elements.title.value, true);
-  }}>
-    <input name="title" aria-label={t("appRoute.renameValue", { value1: session.title })} autoFocus maxLength={200}
-      defaultValue={session.title} onFocus={event => event.currentTarget.select()}
-      onBlur={event => finishRename(event.currentTarget.value)}
-      onKeyDown={event => {
-        if (event.nativeEvent.isComposing) return;
-        if (event.key === "Escape") {
-          event.preventDefault();
-          finishRename(undefined, true);
-        }
-      }} />
-  </form>;
-
-  return <div className="workspaceConversationHeading">
-    <h1 className="workspaceConversationTitle" title={session.title}>{session.title || t("searchOverlay.untitledConversation")}</h1>
-    <details className="workspaceConversationActions" ref={menuRef}>
-      <summary ref={titleRef} className="workspacePanelToggle" role="button" aria-label={t("appRoute.conversationActionsForValue", { value1: session.title })}><Ellipsis aria-hidden="true" /></summary>
-      <div className="workspaceSessionMenu">
-        <button type="button" disabled={Boolean(actions.savingSessionId)} onClick={() => { closeMenu(); setRenaming(true); }}><Pencil aria-hidden="true" />{t("appRoute.rename")}</button>
-        <button type="button" disabled={Boolean(actions.savingSessionId)} onClick={() => { closeMenu(); actions.onTogglePin(session); }}>{session.isPinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}{t(session.isPinned ? "appRoute.unpin" : "appRoute.pin")}</button>
-        <button type="button" disabled={running || Boolean(actions.archivingSessionId)} onClick={() => { closeMenu(); void actions.onArchive(session); }}><Archive aria-hidden="true" />{t("archive.title")}</button>
-        <button type="button" className="isDanger" disabled={Boolean(actions.deletingSessionId)} onClick={() => { closeMenu(); actions.onRequestDelete(session); }}><Trash2 aria-hidden="true" />{t("appRoute.delete")}</button>
-      </div>
-    </details>
-  </div>;
-}
-
-export function AppPageContent({ initialSession = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, modelsVersion, onSessionAccepted }) {
+export function AppPageContent({ initialSession = null, dockContainer = null, dockedSessionIds = [], onKeepChatTab, onCloseChatTab, onReplaceDraftTab, overlayOnly = false, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, chatFloating = false, onShowChat, onMinimizeChat, onExpandChat, onDockChat, onOpenFloatingSession, modelsVersion, onSessionAccepted }) {
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
@@ -256,9 +209,12 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [assetsUnavailable, setAssetsUnavailable] = useState(false);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [pendingUploadFiles, setPendingUploadFiles] = useState([]);
-  const [draft, setDraft] = useState("");
+  const draftStore = useMemo(() => createChatDraft(user.id, workspace.id, requestScopeKey), [user.id, workspace.id, requestScopeKey]);
+  const draft = useSyncExternalStore(draftStore.subscribe, draftStore.getSnapshot, draftStore.getSnapshot);
+  const { setDraft } = draftStore;
   const [rejectedSubmissionScopes, setRejectedSubmissionScopes] = useState(() => new Set());
   const [pendingUserMessage, setPendingUserMessage] = useState(null);
+  const [pendingSupplements, setPendingSupplements] = useState([]);
   const pendingUserMessageRef = useRef(null);
   useEffect(() => { pendingUserMessageRef.current = pendingUserMessage; }, [pendingUserMessage]);
   const [workTime, setWorkTime] = useState(null);
@@ -269,6 +225,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [composerError, setComposerError] = useState("");
   const [conversationError, setConversationError] = useState("");
   const [navigationError, setNavigationError] = useState(false);
+  const chatPanelId = useId();
+  const browsing = Boolean(catalogContent) || overlayOnly;
+  const contextPanelAvailable = visible && !chatFloating && !browsing;
   const [navigationLoaded, setNavigationLoaded] = useState(false);
   const [olderHistoryError, setOlderHistoryError] = useState(false);
   const [streamIssue, setStreamIssue] = useState(null);
@@ -299,8 +258,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const drawerOpen = compactLayout && drawerFor === navigationKey && !search.open && (visible || Boolean(catalogContent));
   useWorkbenchProgress(workbenchRef, "--workspace-sidebar-progress", isSidebarOpen,
     { initial: initialSidebarProgress, duration: 0.22, immediate: compactLayout });
-  useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", visible && filePreviewOpen,
-    { initial: 0, duration: 0.24, immediate: !visible });
+  useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", contextPanelAvailable && filePreviewOpen,
+    { initial: 0, duration: 0.24, immediate: !contextPanelAvailable });
   useLayoutEffect(() => {
     if (!compactLayout) return;
     const drawer = sidebarRef.current;
@@ -392,6 +351,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const recordRunTerminal = useCallback((target) => {
     const key = JSON.stringify([target.sessionId, target.agentRunId]);
     terminalFactsRef.current.set(key, target);
+    setPendingSupplements(items => {
+      const remaining = items.filter(item => item.sessionId !== target.sessionId || item.agentRunId !== target.agentRunId);
+      return remaining.length === items.length ? items : remaining;
+    });
     const pendingOperation = operations.pending();
     if (pendingOperation?.receipt?.sessionId === target.sessionId && pendingOperation.receipt.agentRunId === target.agentRunId) {
       operations.complete(pendingOperation.operationId);
@@ -440,6 +403,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     [assets, pendingAttachmentIds],
   );
   const activeSession = sessions.find((candidate) => candidate.id === sessionId);
+  useEffect(() => {
+    if (workspaceDraft && sessionId) onReplaceDraftTab?.(sessionId);
+  }, [workspaceDraft, sessionId, onReplaceDraftTab]);
 
   const acceptModels = useCallback((nextModels) => {
     const previousModels = modelsRef.current;
@@ -515,7 +481,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   }, [contextPanel]);
 
   useEffect(() => {
-    if (!visible || search.open || !filePreviewOpen) return undefined;
+    if (!contextPanelAvailable || search.open || !filePreviewOpen) return undefined;
     const closeOnEscape = (event) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       if (document.getElementById(previewPanelId)?.contains(document.activeElement)) {
@@ -525,7 +491,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [visible, search.open, filePreviewOpen, previewPanelId, toggleFilePreview]);
+  }, [contextPanelAvailable, search.open, filePreviewOpen, previewPanelId, toggleFilePreview]);
 
   useEffect(() => {
     requestScopeRef.current.active = true;
@@ -535,7 +501,6 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     };
   }, [stopActiveStream]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: changing route intent (including its project) starts a new conversation view scope.
   useLayoutEffect(() => {
     if (!startFresh && requestedSessionId && acceptedRouteSessionIdRef.current === requestedSessionId) {
       acceptedRouteSessionIdRef.current = "";
@@ -556,12 +521,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setPresentationReady(Boolean(resumedViewRef.current));
     setReadableThrough("0");
     setReadingLatest(true);
-    setDraft("");
     setSending(false);
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
-  }, [workspaceDraft, requestedSessionId, requestScopeKey, startFresh, sessionViewCache, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
+  }, [workspaceDraft, requestedSessionId, startFresh, sessionViewCache, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
 
   const selectInitialDirectory = useEffectEvent(navigation => {
     if (!workspaceDraft && !startFresh && !requestedSessionId && !activeSessionIdRef.current) {
@@ -596,8 +560,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   }, [workspace.id, setSessions, setProjects]);
 
   useEffect(() => {
-    if (requestedPrompt) setDraft(requestedPrompt);
-  }, [requestedPrompt]);
+    if (requestedPrompt && !draftStore.getSnapshot()) draftStore.setDraft(requestedPrompt);
+  }, [requestedPrompt, draftStore]);
 
   useEffect(() => {
     if (!startFresh || loadingHistory || !workspace || !modelId) return;
@@ -741,6 +705,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         if (!isCurrent()) return;
         setLoadingHistory(false);
         if (hasCommittedPendingMessage(pendingUserMessageRef.current, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot)) setPendingUserMessage(null);
+        setPendingSupplements(items => {
+          const remaining = items.filter(item => !hasCommittedSupplement(item, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot));
+          return remaining.length === items.length ? items : remaining;
+        });
         const pending = operations.pending();
         if (pending?.receipt?.sessionId === selectedSessionId) operations.complete(pending.operationId);
       },
@@ -816,6 +784,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         if (view && selectedSessionId) sessionViewCache.set(selectedSessionId, view);
         setPresentationReady(true);
         if (hasCommittedPendingMessage(pendingUserMessageRef.current, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot)) setPendingUserMessage(null);
+        setPendingSupplements(items => {
+          const remaining = items.filter(item => !hasCommittedSupplement(item, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot));
+          return remaining.length === items.length ? items : remaining;
+        });
         setReadableThrough(checkpoint.sourceHighWater);
         setLoadingHistory(false);
         setStreamIssue(null);
@@ -840,11 +812,29 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     const controller = new AbortController();
     const scope = requestScopeRef.current;
     const revision = runControlRevisionRef.current;
-    const isCurrentRead = () => !controller.signal.aborted && scope.active && requestScopeRef.current === scope
-      && activeSessionIdRef.current === sessionId && runControlRevisionRef.current === revision;
+    const pendingAtRead = new Set(pendingSupplements.filter(item => item.sessionId === sessionId).map(item => item.supplementId));
+    const isCurrentScope = () => !controller.signal.aborted && scope.active && requestScopeRef.current === scope
+      && activeSessionIdRef.current === sessionId;
+    const isCurrentRead = () => isCurrentScope() && runControlRevisionRef.current === revision;
     // Zero is a valid source waterline; this endpoint reads current Run state.
     transcriptTransport.loadActiveAgentRun({ sessionId, sourceHighWater: "0" }, controller.signal)
-      .then(({ agentRun }) => {
+      .then(({ agentRun, pendingSupplements: restored }) => {
+        // Presentation checkpoints can arrive while this read is in flight.
+        // They fence Run control, but do not invalidate accepted input identities.
+        if (!isCurrentScope()) return;
+        if (agentRun) setPendingSupplements(items => {
+          if (terminalFactsRef.current.has(JSON.stringify([sessionId, agentRun.agentRunId]))) return items;
+          const received = restored.map(item => ({ supplementId: item.supplementId, text: item.message,
+            sessionId, agentRunId: agentRun.agentRunId }));
+          return [...received, ...items.filter(item => !received.some(other => other.sessionId === item.sessionId
+            && other.agentRunId === item.agentRunId && other.supplementId === item.supplementId))]
+            .filter(item => !hasCommittedSupplement(item, sessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot));
+        });
+        if (!agentRun && pendingAtRead.size) setPendingSupplements(items => {
+          // An empty read cannot retire input submitted after it started or after a newer Run fact.
+          if (!isCurrentRead()) return items;
+          return items.filter(item => item.sessionId !== sessionId || !pendingAtRead.has(item.supplementId));
+        });
         if (!isCurrentRead()) return;
         const currentRun = agentRun && !terminalRunIdsRef.current.has(agentRun.agentRunId) ? agentRun : null;
         currentRunIdentityRef.current = currentRun?.agentRunId || null;
@@ -856,7 +846,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         // A failed supplementary read cannot retire its current Run or scope.
       });
     return () => controller.abort();
-  }, [sessionId, requestScopeKey, presentationAttempt, runControlAttempt, transcriptTransport, updateActiveTranscriptRun]);
+  }, [sessionId, requestScopeKey, presentationAttempt, runControlAttempt, transcriptTransport, transcriptStore, updateActiveTranscriptRun]);
 
   function retryTranscriptStream() {
     if (streamIssue?.reconnecting) return;
@@ -880,7 +870,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
-    navigate(`${workspaceBase}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`);
+    const path = `${workspaceBase}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`;
+    if (browsing && chatFloating) onSessionAccepted(path, null);
+    else navigate(path);
   }
 
   function selectSession(target) {
@@ -914,7 +906,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       setDraft("");
       setLoadingHistory(true);
       const next = remainingSessions[0];
-      if (visible) navigate(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`);
+      if (browsing && chatFloating) onSessionAccepted(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`, next || null);
+      else if (visible) navigate(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`);
       else setSessionId("");
       if (!visible || !next) setLoadingHistory(false);
       clearContextPanel();
@@ -975,6 +968,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       setComposerError("");
       const supplementId = crypto.randomUUID();
       auxiliaryRequestRef.current = supplementId;
+      setPendingSupplements(items => [...items, { supplementId, sessionId, agentRunId: activeAgentRunId, text }]);
       try {
         const response = await apiResponse(`/api/sessions/${sessionId}/agent-runs/${activeAgentRunId}/supplements`, {
           method: "POST",
@@ -999,6 +993,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         setDraft(value => value === submittedDraft ? "" : value);
         setSubmissionRejected(false);
       } catch (requestError) {
+        setPendingSupplements(items => items.filter(item => item.supplementId !== supplementId));
         if (isCurrentRequest()) setComposerError(requestError?.message === "agent_run_supplement_unavailable" ? t("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry") : t("appRoute.unableToSendSupplementalInput"));
       } finally {
         if (auxiliaryRequestRef.current === supplementId) auxiliaryRequestRef.current = null;
@@ -1091,7 +1086,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         setPendingUserMessage(value => value === pendingMessage ? null : value);
         setWorkTime(null);
         if (rejected) setSubmissionRejected(true);
-        if (isWorkspacePreservationPending(errorValue)) return;
+        if (isWorkspacePreservationPending(errorValue)) {
+          setComposerError(t(errorValue.message === "session_workspace_preservation_blocked"
+            ? "appRoute.workspacePreservationBlocked" : "appRoute.workspacePreservationPending"));
+          return;
+        }
       }
       if (accepted) {
         setConversationError("operations.acceptedReadFailed");
@@ -1499,13 +1498,6 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   }
   const groupedSessions = useMemo(() => groupSessionNavigation(sessions, projects), [projects, sessions]);
   const SidebarContainer = compactLayout ? "dialog" : "div";
-  function handleQuickAction(prompt) {
-    setDraft(prompt);
-    window.requestAnimationFrame(() => {
-      document.getElementById("messageDraft")?.focus();
-    });
-  }
-
   const selectNavigationSession = useLatestCallback(selectSession);
   const startNavigationChat = useLatestCallback(startNewChat);
   const createNavigationProject = useLatestCallback(createProject);
@@ -1513,8 +1505,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const runControlUnknown = currentRunIdentityRef.current === undefined;
   const renderSessionRow = useCallback((session, options = {}) => <SessionNavigationRow key={session.id} workspaceId={workspace.id} session={session} actions={rowActions} active={session.id === sessionId} running={session.id === sessionId ? hasActiveAgentRun || runControlUnknown && session.hasActiveAgentRun : session.hasActiveAgentRun} onSelect={selectNavigationSession} {...options} />,
     [workspace.id, rowActions, sessionId, hasActiveAgentRun, runControlUnknown, selectNavigationSession]);
-  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onCreateProject: createNavigationProject, ready: navigationLoaded }),
-    [sessions, projects, groupedSessions, renderSessionRow, createNavigationProject, navigationLoaded]);
+  const openSidebarSession = useLatestCallback(openHistorySession);
+  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onOpenSession: openSidebarSession, onCreateProject: createNavigationProject, ready: navigationLoaded }),
+    [sessions, projects, groupedSessions, renderSessionRow, openSidebarSession, createNavigationProject, navigationLoaded]);
   const recentNavigation = useMemo(() => navigationError ? { error: true } : undefined, [navigationError]);
 
   async function answerQuestion(question, answer) {
@@ -1533,13 +1526,30 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setPendingQuestion(value => value?.continuationId === question.continuationId ? null : value);
   }
 
+  const dockedSessions = dockedSessionIds.flatMap(id => id === "draft" ? [{ id: "draft", title: t("work.conversation.untitled") }] : sessions.filter(session => session.id === id));
+  function keepChatTab() {
+    const id = activeSession?.id || "draft";
+    onKeepChatTab(id);
+  }
+  function openDockedSession(target) {
+    selectSession(target.id === "draft" ? null : target);
+    onOpenFloatingSession(target.id === "draft" ? null : target);
+  }
+  function openHistorySession(target) {
+    selectSession(target);
+    if (browsing) onOpenFloatingSession(target);
+    else navigate(sessionChatPath(workspace.id, target.id));
+  }
+  const historyProps = { workspaceId: workspace.id, currentSessionId: activeSession?.id, sessionProps: sidebarSessions, recentNavigation: navigationError ? { error: true } : { loading: !navigationLoaded }, onStartNewChat: startNavigationChat, onOpenSession: openHistorySession };
+  const chatTitleControl = <ConversationHistory {...historyProps} label={t("work.conversation.switch")} className="conversationSwitcher" side="bottom"><span title={activeSession?.title}>{activeSession?.title || t("work.conversation.untitled")}</span><ChevronDown /></ConversationHistory>;
+
   return (
     <main
       ref={workbenchRef}
-      className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
+      className={`workspaceWorkbench${chatFloating ? " isChatFloating" : ""} ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${browsing ? " isBrowsing" : ""}${overlayOnly ? " isOverlayOnly" : ""}${search.open ? " isSearching" : ""}`}
       style={{ "--workspace-sidebar-progress": initialSidebarProgress, "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
     >
-      {!compactLayout ? <button
+      {!compactLayout && !overlayOnly ? <button
         className="workspaceSidebarToggle shAvatarToggle"
         type="button"
         onClick={() => setWorkbenchSidebar(!isSidebarOpen)}
@@ -1549,7 +1559,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         disabled={search.open}
       ><PanelLeft aria-hidden="true" /></button> : null}
 
-      <SidebarContainer className={compactLayout ? "workspaceDrawer" : "workspaceSidebarSlot"} ref={sidebarRef}
+      {!overlayOnly ? <SidebarContainer className={compactLayout ? "workspaceDrawer" : "workspaceSidebarSlot"} ref={sidebarRef}
         inert={!compactLayout && !isSidebarOpen}
         aria-label={compactLayout ? t("shellSidebar.conversationNavigation") : undefined}
         onCancel={compactLayout ? () => setDrawerFor(null) : undefined}
@@ -1562,13 +1572,14 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           onCollapse={compactLayout ? collapseNavigation : undefined}
           onStartNewChat={startNavigationChat}
           recentNavigation={recentNavigation}
+          agentPath={location.pathname + location.search}
           sessionProps={sidebarSessions}
         />
-      </SidebarContainer>
+      </SidebarContainer> : null}
 
       <header className="workspaceTopbar" inert={search.open}>
         <div className="workspaceTopbarStart">
-          {compactLayout ? <button
+          {compactLayout && !overlayOnly && !chatFloating ? <button
             className="workspacePanelToggle"
             type="button"
             onClick={() => setDrawerFor(navigationKey)}
@@ -1578,16 +1589,19 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {!catalogContent && activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} /> : null}
-          {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
+          {!browsing || chatFloating ? activeSession ? <ChatTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} titleControl={chatTitleControl} /> : chatTitleControl : null}
+          {compactLayout && !overlayOnly && !chatFloating ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
-        {visible && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
+        <div className="conversationWindowActions">
+          {chatFloating ? <><button className="workspacePanelToggle" aria-label={t("work.conversation.minimize")} onClick={() => { keepChatTab(); onMinimizeChat(); }}><Minus /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.expand")} onClick={onExpandChat}><Maximize2 /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.close")} onClick={() => onCloseChatTab(activeSession?.id || "draft")}><X /></button></> : !browsing ? <button className="workspacePanelToggle" aria-label={t("work.conversation.dock")} onClick={() => { keepChatTab(); onDockChat(); }}><Minimize2 /></button> : null}
+        </div>
+        {contextPanelAvailable && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
           ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
         /> : null}
       </header>
 
-      <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent)}>
+      <section className="workspaceChatColumn" id={chatPanelId} role={dockedSessions.length ? "tabpanel" : undefined} aria-label={dockedSessions.length ? activeSession?.title || t("work.conversation.untitled") : undefined} inert={search.open || Boolean(browsing && !chatFloating)}>
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           {searchEventId && focusedTranscript.error ? <div className="workspaceToolOutputStatus" role="alert">
             <span>{t("searchOverlay.targetUnavailable")}</span>
@@ -1612,6 +1626,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
             onShowArtifact={showArtifact}
             onOpenSubagent={showSubagent}
             pendingUserMessage={searchEventId ? null : visiblePendingMessage}
+            pendingSupplements={searchEventId ? [] : pendingSupplements}
             submissionRejected={!searchEventId && rejectedSubmissionScopes.has(requestScopeKey)}
             onReleaseLoadedHistory={searchEventId ? undefined : releaseLoadedTranscriptHistory}
             running={!searchEventId && (hasActiveAgentRun || Boolean(sending && visiblePendingMessage && !["failed", "cancelled", "completed"].includes(visiblePendingMessage.status)))}
@@ -1622,7 +1637,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           />
 
           <div className="workspaceComposerDock">
-          {(!isSidebarOpen || compactLayout && !drawerOpen) && sessionActions.actionError?.sessionId === sessionId && deleteConfirmationSessionId !== sessionId
+          {sessionActions.actionError?.sessionId === sessionId && deleteConfirmationSessionId !== sessionId
             ? <div className="workspaceConversationFeedback workspaceToolOutputStatus isError" role="alert">{sessionActions.actionError.message}</div> : null}
           <ConversationReadFeedback {...readFeedbackProps} placement="content" />
           {pendingQuestion?.sessionId === sessionId && pendingQuestion.agentRunId === activeAgentRunId ? <SessionQuestionCard
@@ -1670,17 +1685,16 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
             onCancelActiveAgentRun={cancelActiveAgentRun}
           />
           </div>
-          {isHome ? <div className="shHomeFollowups">
-            <HomeQuickActions onQuickAction={handleQuickAction} />
-          </div> : null}
+
         </div>
       </section>
 
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
-        {catalogContent}
+        <ConversationDockContext.Provider value={{ container: dockContainer, chatFloating, openSession: openHistorySession, minimizeChat: () => { if (chatFloating) keepChatTab(); onMinimizeChat(); } }}>{catalogContent}</ConversationDockContext.Provider>
       </section> : null}
+      {dockContainer ? createPortal(<ConversationTabs panelId={chatPanelId} sessions={dockedSessions} activeId={activeSession?.id || "draft"} expanded={chatFloating && !search.open} onSelect={openDockedSession} onMinimize={onMinimizeChat} onClose={onCloseChatTab} />, dockContainer) : null}
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
-      {visible ? <WorkspaceContextPanel
+      {contextPanelAvailable ? <WorkspaceContextPanel
         id={previewPanelId}
         panel={contextPanel}
         subagentsRevision={subagentsVersion?.sessionId === sessionId ? subagentsVersion.revision : "0"}

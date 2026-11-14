@@ -450,7 +450,10 @@ Interpret the measurements independently:
 - Request preparation records `modelInputEstimate`, `promptCompaction`,
   `modelInputIntake`, `modelInputProjection`, `agentsInstructionsRead` and
   `agentsInstructionsReuse` with
-  their original `turnId`. Reads and projections are nested intervals. Count
+  their original `turnId`. The estimate projects message structure and image
+  counts without reading image contents; the formal projection resolves pixels.
+  Estimate and projection are separate intervals. AGENTS reads remain nested in
+  either interval. Count
   the reads for the first main request and compare their intervals with its HTTP
   start rather than adding parent and child durations.
   Core can reuse an AGENTS read, including an absent file, between the estimate

@@ -94,7 +94,8 @@ fn postgres_subagent_presentation_migrates_nineteen_forward_and_rejects_trigger_
         .unwrap();
     let before = db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=19 ORDER BY version", &[])
         .unwrap().into_iter().map(|row|(row.get::<_,i64>(0),row.get::<_,i64>(1))).collect::<Vec<_>>();
-    db.batch_execute("DROP TRIGGER runtime_subagent_presentation_v1 ON runtime.runtime_jobs; DROP FUNCTION runtime.notify_subagent_presentation_v1(); DELETE FROM runtime.schema_migrations WHERE version=20").unwrap();
+    super::super::schema::restore_model_input_image_fixture(&mut db);
+    db.batch_execute("DROP TRIGGER runtime_subagent_presentation_v1 ON runtime.runtime_jobs; DROP FUNCTION runtime.notify_subagent_presentation_v1(); DELETE FROM runtime.schema_migrations WHERE version>=20").unwrap();
     let reopened = PostgresRuntimeStore::new(&url).unwrap();
     let after = db
         .query(
@@ -106,7 +107,7 @@ fn postgres_subagent_presentation_migrates_nineteen_forward_and_rejects_trigger_
         .map(|row| (row.get::<_, i64>(0), row.get::<_, i64>(1)))
         .collect::<Vec<_>>();
     assert_eq!(&after[..19], before.as_slice());
-    assert_eq!(after.len(), 20);
+    assert_eq!(after.len(), 22);
     assert_eq!(after[19].0, 20);
     assert_eq!(reopened.get_runtime_job(&job.job_id).unwrap().unwrap(), job);
     db.batch_execute(

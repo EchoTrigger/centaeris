@@ -1,0 +1,27 @@
+/* Page header primary actions share the Library creation control's geometry. */
+:root button.workspacePagePrimaryButton {
+  display:inline-flex;
+  box-sizing:border-box;
+  flex-shrink:0;
+  align-items:center;
+  justify-content:center;
+  height:30px;
+  min-height:30px;
+  gap:7px;
+  padding:0 10px;
+  border:0;
+  border-radius:6px;
+  background:var(--solid-surface);
+  color:var(--solid-text);
+  font-family:inherit;
+  font-size:12px;
+  font-weight:500;
+  line-height:20px;
+  white-space:nowrap;
+  box-shadow:none;
+  cursor:pointer;
+}
+:root button.workspacePagePrimaryButton svg { width:15px; height:15px; flex-shrink:0; stroke-width:1.8; }
+:root button.workspacePagePrimaryButton:hover:not(:disabled) { opacity:.9; }
+:root button.workspacePagePrimaryButton:active { translate:none; }
+:root button.workspacePagePrimaryButton:disabled { opacity:.5; cursor:default; }

@@ -117,16 +117,8 @@ fn step_with_store(
     state: HttpServerState,
     agent_run_step: AgentRunStepRequest,
 ) -> Result<AgentRunStepOutcome, Failure> {
-    let HttpServerState {
-        runtime,
-        store,
-        job_store,
-        tool_layers,
-        tool_concurrency_registry,
-        native_model,
-        ..
-    } = state;
-    if job_store
+    if state
+        .job_store
         .require_execute_lease(&agent_run_step.job_id, &agent_run_step.lease_owner)
         .is_err()
     {
@@ -136,7 +128,7 @@ fn step_with_store(
         agent_run_step.job_id.as_str(),
         agent_run_step.lease_owner.as_str(),
         &agent_run_step.agent_run_start,
-        job_store.as_ref(),
+        state.job_store.as_ref(),
     ) {
         return Err(Failure::rejected(409, error.as_str()));
     }
@@ -144,20 +136,15 @@ fn step_with_store(
     let failure_agent_run_start = agent_run_step.agent_run_start.clone();
     let failure_job_id = agent_run_step.job_id.clone();
     let failure_lease_owner = agent_run_step.lease_owner.clone();
-    let failure_runtime = runtime.clone();
-    let failure_store = store.clone();
-    let failure_job_store = job_store.clone();
+    let failure_runtime = state.runtime.clone();
+    let failure_store = state.store.clone();
+    let failure_job_store = state.job_store.clone();
     let execution = catch_agent_run_step_panic(|| {
         execute_agent_run(
             agent_run_step.agent_run_start,
-            runtime,
-            store,
-            job_store,
+            state,
             agent_run_step.job_id,
             agent_run_step.lease_owner,
-            tool_layers.clone(),
-            tool_concurrency_registry,
-            native_model,
         )
     });
     if let Ok(Err(error)) = &execution {

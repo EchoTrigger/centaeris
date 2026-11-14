@@ -50,6 +50,7 @@ mod host_retirement_tests;
 mod lease_renewal_tests;
 mod maintenance_authority_tests;
 mod maintenance_completion_schema_tests;
+mod model_input_image_tests;
 pub(crate) mod owned_database;
 mod provision_authority_tests;
 mod question_response_tests;
@@ -2706,6 +2707,61 @@ fn postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups() {
     sender.join().expect("join irrelevant notifier");
     assert!(!idle.ready);
     assert_eq!(idle.next_run_at_ms, None);
+
+    // Reconstruct the previous notification function and migration history, then
+    // reopen the store. Existing job facts must survive the forward migration.
+    let old_function: String = listener
+        .query_one(
+            "SELECT pg_get_functiondef('runtime.notify_runtime_job_ready_v1()'::regprocedure)",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    listener
+        .batch_execute(
+            &old_function
+                .replace(", 'subagent.run'", "")
+                .replace(",'subagent.run'", ""),
+        )
+        .unwrap();
+    super::schema::restore_model_input_image_fixture(&mut listener);
+    listener
+        .execute(
+            "DELETE FROM runtime.schema_migrations WHERE version=21",
+            &[],
+        )
+        .unwrap();
+    drop(PostgresRuntimeStore::new(&url).expect("upgrade child job notifications"));
+    assert!(store.get_runtime_job("worker.noop:wait").unwrap().is_some());
+
+    let mut child = job("subagent.run:notify", "subagent.run:notify");
+    child.job_kind = "subagent.run".into();
+    child.session_id = None;
+    child.run_at_ms = now_ms;
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: child })
+        .unwrap();
+    // The local broadcast gets a wake even when the execute lane has no work.
+    let observed = std::sync::atomic::AtomicUsize::new(0);
+    let sender_url = url.clone();
+    let sender = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        let mut db = Client::connect(&sender_url, NoTls).unwrap();
+        db.execute("UPDATE runtime.runtime_jobs SET run_at_ms=run_at_ms+1 WHERE job_id='subagent.run:notify'", &[]).unwrap();
+    });
+    assert!(
+        !store
+            .wait_for_runtime_jobs_observed(&idle_kinds, Duration::from_millis(200), || {
+                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })
+            .unwrap()
+            .ready
+    );
+    sender.join().unwrap();
+    assert!(
+        observed.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+        "registration and a child commit wake local consumers"
+    );
 }
 
 #[test]

@@ -11,6 +11,7 @@ from django.core.validators import validate_email
 from django.db import IntegrityError, models, router, transaction
 from django.db.models.functions import Lower
 from .session_payload import SessionPayloadField
+from .environment_resources import default_environment_resources, validate_environment_resources
 
 from .agent_identity import (
     normalize_agent_description,
@@ -322,6 +323,8 @@ class Workspace(models.Model):
     description = models.TextField(blank=True, default="")
     execution_network = models.CharField(max_length=14, default="disabled",
         choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
+    execution_resources = models.JSONField(default=default_environment_resources)
+    execution_settings_revision = models.PositiveBigIntegerField(default=1, editable=False)
     status = models.CharField(max_length=32, default="active")
     createdBy = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -340,6 +343,11 @@ class Workspace(models.Model):
     class Meta:
         constraints = [models.CheckConstraint(condition=models.Q(execution_network__in=["disabled", "publicInternet"]),
             name="workspace_execution_network_valid"),
+            models.CheckConstraint(condition=models.Func("execution_resources",
+                function="public.workspace_environment_resources_valid_v1", output_field=models.BooleanField()),
+                name="workspace_execution_resources_valid"),
+            models.CheckConstraint(condition=models.Q(execution_settings_revision__gt=0),
+                name="workspace_execution_settings_revision_positive"),
             models.CheckConstraint(
                 condition=(models.Q(avatar_image__isnull=True, avatar_digest="")
                     | models.Q(avatar_image__isnull=False, avatar_digest__regex=r"^[0-9a-f]{64}$")),
@@ -349,6 +357,9 @@ class Workspace(models.Model):
     def save(self, *args, **kwargs):
         require_enum("Workspace.status", self.status, {"active", "archived"})
         require_enum("Workspace.execution_network", self.execution_network, {"disabled", "publicInternet"})
+        validate_environment_resources(self.execution_resources)
+        if type(self.execution_settings_revision) is not int or self.execution_settings_revision <= 0:
+            raise ValueError("workspace_execution_settings_revision_invalid")
         return super().save(*args, **kwargs)
 
 
@@ -555,6 +566,18 @@ class PasswordResetMail(models.Model):
         return super().save(*args, **kwargs)
 
 
+class UserWorkspaceGuideState(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE)
+    dismissedAt = models.DateTimeField(null=True, blank=True)
+    manualSteps = models.JSONField(default=dict)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=["user", "workspace"], name="user_workspace_guide_unique",
+        )]
+
+
 class WorkspacePluginEnablement(models.Model):
     workspace = models.ForeignKey(
         Workspace, on_delete=models.CASCADE, related_name="pluginEnablements"
@@ -617,6 +640,22 @@ class WorkspaceGroup(models.Model):
     def save(self, *args, **kwargs):
         require_enum("WorkspaceGroup.kind", self.kind, WORKSPACE_GROUP_KINDS)
         return super().save(*args, **kwargs)
+
+
+class WorkspaceModelDefaults(models.Model):
+    workspace = models.OneToOneField("Workspace", on_delete=models.CASCADE)
+    titleModelConfig = models.ForeignKey("ModelConfig", null=True, blank=True, on_delete=models.PROTECT)
+    titleThinkingMode = models.CharField(max_length=64, default="low", blank=True)
+
+
+class SessionTitleJob(models.Model):
+    session = models.OneToOneField("Session", on_delete=models.CASCADE)
+    firstRun = models.ForeignKey("AgentRun", on_delete=models.CASCADE)
+    titleRevision = models.PositiveBigIntegerField()
+    modelConfig = models.ForeignKey("ModelConfig", null=True, on_delete=models.PROTECT)
+    thinkingMode = models.CharField(max_length=64, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=16, default="pending")
 
 
 class ModelProvider(models.Model):
@@ -960,6 +999,7 @@ class Session(models.Model):
         null=True, blank=True, editable=False,
     )
     title = models.CharField(max_length=200, default="New chat")
+    titleRevision = models.PositiveBigIntegerField(default=0, db_default=0)
     origin = models.CharField(max_length=32, default="user")
     status = models.CharField(max_length=32, default="active")
     archivedAt = models.DateTimeField(null=True, blank=True)
@@ -1156,6 +1196,8 @@ class SessionEnvironment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     network = models.CharField(max_length=14, default="disabled", editable=False,
         choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
+    resource_defaults = models.JSONField(default=default_environment_resources, editable=False)
+    resource_defaults_revision = models.PositiveBigIntegerField(null=True, default=None, editable=False)
     environment_profile = models.JSONField(null=True, default=None, blank=True, editable=False)
     environment_profile_digest = models.CharField(max_length=71, default="", blank=True, editable=False)
     environment_profile_operation_id = models.CharField(max_length=128, default="", blank=True, editable=False)
@@ -1179,7 +1221,13 @@ class SessionEnvironment(models.Model):
 
     class Meta:
         constraints = [models.CheckConstraint(condition=models.Q(network__in=["disabled", "publicInternet"]),
-            name="environment_network_valid"), models.CheckConstraint(
+            name="environment_network_valid"),
+            models.CheckConstraint(condition=models.Func("resource_defaults",
+                function="public.workspace_environment_resources_valid_v1", output_field=models.BooleanField()),
+                name="environment_resource_defaults_valid"),
+            models.CheckConstraint(condition=(models.Q(resource_defaults_revision__isnull=True)
+                | models.Q(resource_defaults_revision__gt=0)), name="environment_resource_defaults_revision_positive"),
+            models.CheckConstraint(
             condition=(models.Q(controller_run__isnull=True, controller_maintenance_operation__isnull=True,
                                controller_lease_owner="", controller_released=True, controller_purpose="")
                 | (((models.Q(controller_run__isnull=False, controller_maintenance_operation__isnull=True)
@@ -1205,16 +1253,23 @@ class SessionEnvironment(models.Model):
             raise ValueError("environment_profile_requires_binding")
         using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
         if self._state.adding:
-            self.network = Workspace.objects.using(using).get(sessions__pk=self.session_id).execution_network
+            workspace = Workspace.objects.using(using).get(sessions__pk=self.session_id)
+            self.network = workspace.execution_network
+            self.resource_defaults = dict(workspace.execution_resources)
+            self.resource_defaults_revision = workspace.execution_settings_revision
         require_enum("SessionEnvironment.network", self.network, {"disabled", "publicInternet"})
+        validate_environment_resources(self.resource_defaults)
         if not self._state.adding:
             using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
-            stored = type(self).objects.using(using).values("session_id", "network", "environment_profile",
+            stored = type(self).objects.using(using).values("session_id", "network", "resource_defaults",
+                "resource_defaults_revision", "environment_profile",
                 "environment_profile_digest", "environment_profile_operation_id", "environment_profile_bound_at", "historical_profile",
                 "benchmark_setup_operation_id", "benchmark_setup_run_id", "benchmark_setup_instance_id",
                 "benchmark_setup_container_id", "benchmark_setup_completed_at").get(pk=self.pk)
             if stored["session_id"] != self.session_id:
                 raise ValueError("session_environment_identity_immutable")
+            if any(stored[field] != getattr(self, field) for field in ("resource_defaults", "resource_defaults_revision")):
+                raise ValueError("environment_resource_defaults_immutable")
             if stored["historical_profile"] != self.historical_profile:
                 raise ValueError("environment_profile_history_immutable")
             binding_profile = stored["environment_profile"] is None and self.environment_profile is not None
@@ -1241,7 +1296,7 @@ class SessionEnvironment(models.Model):
         if created:
             # PostgreSQL snapshots the authoritative default at INSERT time.
             # A concurrent settings update may have superseded our earlier read.
-            self.refresh_from_db(using=using, fields=["network"])
+            self.refresh_from_db(using=using, fields=["network", "resource_defaults", "resource_defaults_revision"])
         return result
 
 
@@ -2718,3 +2773,168 @@ class PresentationChangeOutbox(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=["key", "transactionId"],
             name="presentation_change_transaction_unique")]
+
+
+def new_issue_id() -> str:
+    return new_id("issue")
+
+
+def new_issue_event_id() -> str:
+    return new_id("issue_event")
+
+
+class Issue(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_issue_id)
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name="issues")
+    title = models.CharField(max_length=240)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=16, default="todo")
+    assignee = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name="assigned_issues")
+    creator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_issues")
+    version = models.PositiveIntegerField(default=1)
+    visibility = models.CharField(max_length=16, default="workspace")
+    templateKey = models.CharField(max_length=64, blank=True, default="")
+    templateSnapshot = models.JSONField(default=dict)
+    properties = models.JSONField(default=dict)
+    archivedAt = models.DateTimeField(null=True, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+    updatedAt = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["workspace", "-updatedAt", "id"], name="issue_workspace_updated")]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(status__in=["backlog", "todo", "inProgress", "done", "canceled"]), name="issue_status_valid"),
+            models.CheckConstraint(condition=models.Q(version__gte=1), name="issue_version_positive"),
+            models.CheckConstraint(condition=models.Q(visibility__in=["workspace", "participants"]), name="issue_visibility_valid"),
+        ]
+
+
+class IssueEvent(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_issue_event_id)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="events")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="issue_events")
+    type = models.CharField(max_length=32)
+    changes = models.JSONField(default=dict)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["issue", "createdAt", "id"], name="issue_event_chronological")]
+        constraints = [models.CheckConstraint(condition=models.Q(type__in=["created", "updated", "archived", "restored", "deliverableSubmitted", "deliverableFeedback", "deliverableAccepted"]), name="issue_event_type_valid")]
+
+
+
+def new_notification_id() -> str:
+    return new_id("notification")
+
+
+class IssueNotification(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_notification_id)
+    event = models.ForeignKey(IssueEvent, on_delete=models.CASCADE, related_name="notifications")
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="issue_notifications")
+    issueTitle = models.CharField(max_length=240)
+    kind = models.CharField(max_length=32)
+    readAt = models.DateTimeField(null=True, blank=True)
+    archivedAt = models.DateTimeField(null=True, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["recipient", "-createdAt", "-id"], name="notification_recipient_created")]
+        constraints = [
+            models.UniqueConstraint(fields=["event", "recipient"], name="notification_event_recipient_unique"),
+            models.CheckConstraint(condition=models.Q(kind__in=["assigned", "statusChanged", "deliverable"]), name="notification_kind_valid"),
+        ]
+
+
+class IssueMaterial(models.Model):
+    """A versioned reference; linking never changes the source object's access or retention."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="materials")
+    attachedBy = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    assetKind = models.CharField(max_length=32)
+    assetId = models.CharField(max_length=64)
+    displayName = models.CharField(max_length=255)
+    contentType = models.CharField(max_length=160)
+    contentGeneration = models.PositiveBigIntegerField()
+    sizeBytes = models.BigIntegerField()
+    sha256 = models.CharField(max_length=71)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["issue", "assetKind", "assetId"], name="issue_material_unique"),
+            models.CheckConstraint(condition=models.Q(assetKind__in=["sourceObject", "userLibraryObject"]), name="issue_material_kind_valid"),
+            models.CheckConstraint(condition=models.Q(contentGeneration__gte=1, sizeBytes__gte=0), name="issue_material_identity_valid"),
+        ]
+
+
+class IssueExecution(models.Model):
+    # One accepted run has one immutable Issue origin, separate from live Issue edits.
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="executions")
+    issuer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name="issued_issue_executions")
+    session = models.OneToOneField(Session, on_delete=models.CASCADE, related_name="issue_execution")
+    agent_run = models.OneToOneField(AgentRun, on_delete=models.CASCADE, related_name="issue_execution")
+    issueVersion = models.PositiveIntegerField()
+    issueTitle = models.CharField(max_length=240)
+    issueDescription = models.TextField(blank=True, default="")
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["issue", "issuer", "-createdAt", "id"],
+            name="issue_execution_owner_created")]
+        constraints = [models.CheckConstraint(condition=models.Q(issueVersion__gte=1),
+            name="issue_execution_version_positive")]
+
+
+class WorkspaceIssueTemplate(models.Model):
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name="issue_templates")
+    key = models.CharField(max_length=64)
+    name = models.CharField(max_length=160)
+    definition = models.JSONField(default=dict)
+    revision = models.PositiveIntegerField(default=1)
+    enabled = models.BooleanField(default=True)
+    updatedAt = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="issue_template_workspace_key"),
+            models.CheckConstraint(condition=models.Q(revision__gte=1), name="issue_template_revision_positive"),
+        ]
+
+
+class IssueDeliverable(models.Model):
+    """One deliberately shared result revision, never a grant to its private Session."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="deliverables")
+    execution = models.ForeignKey(IssueExecution, on_delete=models.PROTECT, related_name="deliverables")
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="deliverables")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="authored_deliverables")
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="received_deliverables")
+    revision = models.PositiveIntegerField()
+    replaces = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True, related_name="replacements")
+    summary = models.TextField(blank=True, default="")
+    artifacts = models.JSONField(default=list)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["issue", "revision"], name="issue_deliverable_revision_unique"),
+            models.CheckConstraint(condition=models.Q(revision__gte=1), name="issue_deliverable_revision_positive"),
+        ]
+
+
+class IssueDeliverableResponse(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deliverable = models.ForeignKey(IssueDeliverable, on_delete=models.CASCADE, related_name="responses")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="deliverable_responses")
+    action = models.CharField(max_length=16)
+    text = models.TextField(blank=True, default="")
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(action__in=["feedback", "accept"]), name="deliverable_response_action_valid"),
+            models.UniqueConstraint(fields=["deliverable"], condition=models.Q(action="accept"), name="deliverable_accept_once"),
+        ]

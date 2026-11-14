@@ -1,7 +1,7 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { useTranslation } from '../i18n';
 
-export function ConversationReadFeedback({ store, placement, error, paused, reconnecting, ready, loading, checking, onCheck, onRetry }) {
+export function ConversationReadFeedback({ store, placement, error, paused, reconnecting, loading, checking, onCheck, onRetry }) {
   const { t } = useTranslation();
   const list = useSyncExternalStore(store.subscribeList, store.getListSnapshot, store.getListSnapshot);
   const live = useSyncExternalStore(store.subscribeLive, store.getLiveSnapshot, store.getLiveSnapshot);
@@ -18,7 +18,7 @@ export function ConversationReadFeedback({ store, placement, error, paused, reco
   const hasBlocks = list.blockIds.length > 0 || live !== null;
   if ((placement === 'content') !== hasBlocks) return null;
   const message = error || (paused ? hasContent ? 'appRoute.streamPaused' : 'appRoute.initialHistoryFailed'
-    : !hasBlocks && ready && !reconnecting ? 'appRoute.emptyConversation' : null);
+    : null);
   if (!message || loading && !hasContent && !reconnecting) return null;
   return <div className={`workspaceConversationFeedback workspaceToolOutputStatus ${error || paused ? 'isError' : ''}`} role={error || paused ? 'alert' : 'status'}>
     <span>{t(message)}</span>

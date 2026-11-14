@@ -186,6 +186,8 @@ async def _produce(scope, loader, cursor, read_timeout):
     last_activity = None
     last_question = object()
     last_live = object()
+    live_cursor = None
+    live_run = None
     last_versions = None
     last_view_revision = None
     sent_references = set()
@@ -286,6 +288,8 @@ async def _produce(scope, loader, cursor, read_timeout):
                     if reset_reason is not None:
                         yield _encode(scope, "reset", reason=reset_reason)
                         reset_reason = None
+                        live_cursor = None
+                        last_live = object()
                     page = await _tail_read(loader, target, read_timeout)
                     generation = page["projectionGeneration"]
                     water = page["sourceHighWater"]
@@ -303,10 +307,22 @@ async def _produce(scope, loader, cursor, read_timeout):
                 last_state = state
         run = last_state["agentRun"] if last_state is not None else None
         if run is not None and run["status"] in {"queued", "running"}:
-            live = await _bounded(loader.live(run["agentRunId"]), read_timeout)
-            if live != last_live:
-                yield _encode(scope, "live", agentRunId=run["agentRunId"], live=live)
-                last_live = live
+            if live_run != run["agentRunId"]:
+                live_cursor = None
+                last_live = object()
+                live_run = run["agentRunId"]
+            live = await _bounded(loader.live(live_run, live_cursor), read_timeout)
+            if live.kind is not None:
+                marker = ((live_run, *(live.value[key] for key in ("turnId", "messageId", "afterSequence", "revision")))
+                          if live.value is not None else (live_run, None))
+                if marker != last_live:
+                    payload = {"delta" if live.kind == "liveDelta" else "live": live.value}
+                    yield _encode(scope, live.kind, agentRunId=live_run, **payload)
+                    last_live = marker
+                live_cursor = live.cursor
+        else:
+            live_cursor = None
+            live_run = None
         view_revision = {f"{kind}Revision": str(versions[kind]) for kind in ("context", "history", "work", "subagents")}
         if view_revision != last_view_revision:
             yield _encode(scope, "viewRevision", **view_revision)

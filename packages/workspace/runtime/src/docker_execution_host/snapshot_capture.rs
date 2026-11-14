@@ -279,6 +279,8 @@ fn read_capture<R: Read>(
             let empty = SandboxWorkspaceSnapshotManifest {
                 schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
                 files: vec![],
+                directories: Vec::new(),
+                symlinks: Vec::new(),
             };
             if response.manifest_sha256
                 != manifest_digest(artifact.manifest.as_ref().unwrap_or(&empty))?
@@ -309,6 +311,8 @@ mod tests {
                 sha256: format!("sha256:{:x}", Sha256::digest(b"abc")),
                 executable: false,
             }],
+            directories: Vec::new(),
+            symlinks: Vec::new(),
         }
     }
 
@@ -458,6 +462,8 @@ mod tests {
         let empty = SandboxWorkspaceSnapshotManifest {
             schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
             files: vec![],
+            directories: Vec::new(),
+            symlinks: Vec::new(),
         };
         let bytes = encoded(&full_response(&request, &empty));
         let SnapshotCaptureResult::Snapshot(artifact) =

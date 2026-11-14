@@ -268,15 +268,17 @@ sys.stdout.write(re.sub(pattern,replace,text))
         self.assertFalse(any("*" in value for value in allowed))
 
     def test_docker_release_gate_accepts_current_processor_ownership(self):
-        source = (ROOT / "scripts/workspace/docker-release-gate.sh").read_text(encoding="utf-8")
-        validator = source.split("python3 -c '\n", 1)[1].split("\n'\n", 1)[0]
         config = compose_config()
-        env = {**os.environ, "WORKSPACE_ROOT": str(ROOT)}
         def validate(value):
-            return subprocess.run([os.sys.executable, "-c", validator],
-                                  input=json.dumps(value), env=env, capture_output=True, text=True)
+            return subprocess.run([os.sys.executable, str(ROOT / "scripts/workspace/verify-deployment-compose.py")],
+                                  input=json.dumps(value), capture_output=True, text=True)
         accepted = validate(config)
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        for name in ("runtime", "web"):
+            with self.subTest(missing_image=name):
+                image = config["services"][name].pop("image")
+                self.assertNotEqual(validate(config).returncode, 0)
+                config["services"][name]["image"] = image
         del config["services"]["material-worker"]["depends_on"]["document-processor"]
         self.assertNotEqual(validate(config).returncode, 0)
 
@@ -417,7 +419,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
             compose_config(API_POSTGRES_POOL_MAX_SIZE="0")["services"]["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"],
             "0",
         )
-        for service in ("api-init", "material-worker", "material-scheduler", "gc", "mail-sender"):
+        for service in ("api-init", "material-worker", "material-scheduler", "title-worker", "gc", "mail-sender"):
             with self.subTest(service=service):
                 self.assertNotIn("API_POSTGRES_POOL_MAX_SIZE", services[service]["environment"])
                 self.assertNotEqual(services[service]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")

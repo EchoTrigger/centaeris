@@ -77,6 +77,7 @@ fn environment_runtime_server() {
     };
     let server = runtime.spawn(serve_http(listener, state.clone()));
     let mut lifecycle: Option<crate::lifecycle_executor::Executor> = None;
+    let work_wake = crate::lifecycle_executor::WorkWake::default();
     let mut subagent_worker: Option<tokio::task::JoinHandle<()>> = None;
     let mut physical_pin = None;
     println!("environment-runtime-ready:http://{address}");
@@ -88,7 +89,8 @@ fn environment_runtime_server() {
         }
         if command == "start-lifecycle" {
             assert!(lifecycle.is_none());
-            lifecycle = Some(crate::lifecycle_executor::start(state.clone()).unwrap());
+            lifecycle =
+                Some(crate::lifecycle_executor::start(state.clone(), work_wake.clone()).unwrap());
             println!("environment-runtime-lifecycle:{}", json!({"started":true}));
             io::stdout().flush().unwrap();
             continue;
@@ -99,6 +101,7 @@ fn environment_runtime_server() {
                 store.clone(),
                 backend.clone(),
                 state.tool_layers.clone(),
+                work_wake.clone(),
             )));
             println!(
                 "environment-runtime-subagent-worker:{}",

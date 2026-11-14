@@ -39,7 +39,7 @@ this inventory does not duplicate their field lists.
 
 ## Endpoint inventory
 
-There are 30 method/path entries, including the parameterized job read. All
+There are 31 method/path entries, including the parameterized job read. All
 require `X-Internal-Token` when reaching a supported operation. Admission and
 body/header validation occur before that token check. Successful responses are
 JSON; the status column below describes success, not every failure outcome.
@@ -73,6 +73,7 @@ the hosted Job kinds accepted by these operations.
 | POST | `/internal/jobs/yield` | Requeue the same job with its run time and transition reason under the current lease | 200 |
 | POST | `/internal/jobs/complete` | Complete a leased job, enforcing its output contract and equivalent completed replay | 200 |
 | POST | `/internal/jobs/fail` | Apply retry policy or atomically dead-letter and fail the job | 200 |
+| POST | `/internal/jobs/control/retry-workspace-preservation` | Resume the same blocked terminal cleanup Job after an administrator repairs its preservation input or implementation | 200 |
 | POST | `/internal/jobs/reconcile` | Reclaim expired leases; do not replay acknowledged terminal notifications | 200 |
 | GET | `/internal/jobs/{jobId}` | Read one validated job identity and its durable state | 200 |
 
@@ -82,6 +83,21 @@ one-segment axum `Path` extractor. Invalid identities return 400 `job_id_invalid
 Characterize repeated-prefix targets as well as ordinary malformed suffixes.
 For example, GET on `/internal/jobs/claim` reads the identity `claim`, while POST
 on that path is the claim operation.
+
+Deterministic workspace node, archive or budget failures retain the original
+environment and pause the canonical lifecycle Job as `queued` with
+`lastError=workspace_preservation_blocked`. Automatic cleanup claims exclude that
+marker. This pending cleanup is not a terminal Job fact and does not publish a
+terminal outbox generation. An administrator can acknowledge a completed repair
+with an authenticated POST to the preservation retry route using exactly
+`{"schema":"runtime.job.workspace_preservation.retry.v1","jobId":"agent_run.lifecycle:<runId>"}`.
+The operation requires the original signed authorization binding, committed
+terminal Run facts, the still-held original environment and allocation, and no
+active Job lease. It requeues that same Job exclusively for cleanup without
+resetting retry history or starting another Run. Unsupported requests return 400;
+an ineligible or changed target returns 409. Success returns
+`{"jobId":"agent_run.lifecycle:<runId>","disposition":"queued"}`; workspace
+preservation and immutable cleanup/release receipts must still complete normally.
 
 ### Terminal outbox and waiter recovery
 

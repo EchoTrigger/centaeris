@@ -34,6 +34,7 @@ fn run_inner(observation: &mut SnapshotObservation) -> Result<(), String> {
         require_idle,
         |observation| collect_snapshot_manifest(&load_inventory()?, observation),
         |manifest, sink, observation| {
+            verify_snapshot_nodes(manifest)?;
             for expected in &manifest.files {
                 copy_snapshot_file(expected, sink, observation)?;
             }
@@ -151,7 +152,7 @@ fn write_full_capture(
             manifest_sha256: format!("sha256:{:x}", Sha256::digest(manifest_bytes)),
         },
     )?;
-    if !manifest.files.is_empty() {
+    if !manifest.is_empty() {
         output
             .write_all(&(manifest_bytes.len() as u32).to_be_bytes())
             .map_err(|error| error.to_string())?;
@@ -172,6 +173,8 @@ mod tests {
     fn test_manifest(content: &[u8]) -> SandboxWorkspaceSnapshotManifest {
         SandboxWorkspaceSnapshotManifest {
             schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            directories: vec![],
+            symlinks: vec![],
             files: vec![SandboxWorkspaceSnapshotFile {
                 path: "data.bin".into(),
                 size_bytes: content.len() as u64,
@@ -311,6 +314,8 @@ mod tests {
         let empty = SandboxWorkspaceSnapshotManifest {
             schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
             files: vec![],
+            directories: vec![],
+            symlinks: vec![],
         };
         let mut executable = nonempty.clone();
         executable.files[0].executable = true;
@@ -343,8 +348,32 @@ mod tests {
             assert!(verified, "even an empty frame must finish the idle check");
             let (response, body) = decode(&output);
             assert_eq!(response.disposition, SnapshotCaptureDisposition::Snapshot);
-            assert_eq!(body.is_empty(), current.files.is_empty());
+            assert_eq!(body.is_empty(), current.is_empty());
         }
+    }
+
+    #[test]
+    fn directory_and_link_only_snapshots_emit_metadata_without_file_bodies() {
+        let manifest = SandboxWorkspaceSnapshotManifest {
+            schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            files: vec![],
+            directories: vec!["empty".into()],
+            symlinks: vec![SandboxWorkspaceSnapshotSymlink {
+                path: "external".into(),
+                target: "/etc/passwd".into(),
+            }],
+        };
+        let mut request = request(test_manifest(b"old"));
+        request.baseline = None;
+        let mut output = vec![];
+        write_capture(&request, &manifest, &mut output, |_| Ok(())).unwrap();
+        let (response, body) = decode(&output);
+        assert_eq!(response.disposition, SnapshotCaptureDisposition::Snapshot);
+        let length = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
+        let decoded: SandboxWorkspaceSnapshotManifest =
+            serde_json::from_slice(&body[4..4 + length]).unwrap();
+        assert_eq!(decoded, manifest);
+        assert_eq!(body.len(), 4 + length);
     }
 
     #[test]

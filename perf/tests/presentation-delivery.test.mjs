@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import test from 'node:test';
-import { observePresentation } from '../harness/presentation_delivery.mjs';
+import { observePresentation, observeLiveReplay, liveReplayFrames } from '../harness/presentation_delivery.mjs';
 
 const fixture = JSON.parse(readFileSync(new URL('../../tests/fixtures/workspace-presentation.json', import.meta.url)));
 const range = fixture.frames.find(item => item.kind === 'content');
@@ -38,4 +38,21 @@ test('presentation measurement uses the browser transport and resumes the applie
   ]);
   assert.equal(sample.ranges, 1);
   assert.ok(sample.firstRangeMs >= 0 && sample.checkpointMs >= sample.firstRangeMs && sample.resumeMs >= 0);
+});
+
+test('recorded live delivery reconstructs identical UTF-8 output with bounded delta traffic', async () => {
+  const identity = { workspaceId: 'workspace', sessionId: 'session' };
+  const text = '流式A\n'.repeat(64 * 1024 / 8);
+  const full = await observeLiveReplay({ identity, frames: liveReplayFrames(identity, text, true), expectedText: text });
+  const delta = await observeLiveReplay({ identity, frames: liveReplayFrames(identity, text, false), expectedText: text });
+  assert.equal(full.frameCount, 17);
+  assert.equal(delta.frameCount, full.frameCount);
+  assert.ok(delta.wireBytes < full.wireBytes / 4);
+  assert.equal(full.cursor, null);
+  assert.equal(delta.cursor, null);
+  for (const sample of [full, delta]) assert.ok(sample.parseMs >= 0 && sample.applyMs >= 0);
+  const tinyText = '流🙂';
+  const split = await observeLiveReplay({ identity,
+    frames: liveReplayFrames(identity, tinyText, false, 2), expectedText: tinyText });
+  assert.equal(split.frameCount, 3, 'byte-sized chunks preserve whole UTF-8 characters');
 });

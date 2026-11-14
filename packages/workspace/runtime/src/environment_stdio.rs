@@ -248,6 +248,7 @@ mod tests {
                 },
                 state: EnvironmentTaskState::Running,
                 exit_code: None,
+                timed_out: None,
                 output_complete: false,
                 cleanup_complete: false,
             };

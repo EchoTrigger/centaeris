@@ -8,14 +8,9 @@ import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def apache_package_paths():
-    licensing = (ROOT / "LICENSING.md").read_text(encoding="utf-8")
-    return {
-        line.rstrip("/") for line in licensing.split("```")[1].splitlines()
-        if line.startswith("packages/")
-    }
+INDEPENDENT_CRATE_PATHS = {
+    "packages/core", "packages/model-catalog", "packages/mcp", "packages/sqlite",
+}
 
 
 def workspace_packages():
@@ -47,22 +42,18 @@ def workspace_packages():
 
 
 class ProductLicensingTests(unittest.TestCase):
-    def test_foundation_licenses_and_dependency_boundaries(self):
-        apache_paths = apache_package_paths()
-        self.assertEqual(len(apache_paths), 4)
+    def test_workspace_packages_share_agpl_and_independent_crates_retain_the_text(self):
         packages = workspace_packages()
-        self.assertTrue(apache_paths <= {p["member"] for p in packages.values()})
-        apache_text = (ROOT / "LICENSE-APACHE").read_bytes()
+        self.assertTrue(INDEPENDENT_CRATE_PATHS <= {p["member"] for p in packages.values()})
+        agpl_text = (ROOT / "LICENSE").read_bytes()
         for directory, package in packages.items():
             member = package["member"]
-            expected = "Apache-2.0" if member in apache_paths else "AGPL-3.0-only"
-            self.assertEqual(package["license"], expected, member)
-            if member not in apache_paths:
-                continue
-            self.assertEqual((directory / "LICENSE").read_bytes(), apache_text, member)
+            self.assertEqual(package["license"], "AGPL-3.0-only", member)
+            if member in INDEPENDENT_CRATE_PATHS:
+                self.assertEqual((directory / "LICENSE").read_bytes(), agpl_text, member)
             for dependency in package["dependencies"]:
                 self.assertIn(dependency, packages, f"{member}: unknown path dependency {dependency}")
-                self.assertEqual(packages[dependency]["license"], "Apache-2.0",
+                self.assertEqual(packages[dependency]["license"], "AGPL-3.0-only",
                                  f"{member} depends on {packages[dependency]['name']}")
 
     def test_product_defaults_remain_agpl(self):
@@ -82,7 +73,7 @@ class ProductLicensingTests(unittest.TestCase):
 class CratePayloadTests(unittest.TestCase):
     def test_independent_crates_retain_license_and_attribution_files(self):
         for package in workspace_packages().values():
-            if package["member"] not in apache_package_paths():
+            if package["member"] not in INDEPENDENT_CRATE_PATHS:
                 continue
             with self.subTest(package=package["name"]):
                 files = subprocess.check_output(

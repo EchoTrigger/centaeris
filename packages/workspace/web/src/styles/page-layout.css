@@ -1,0 +1,37 @@
+/* Page headings, navigation and list containers share one content inset. */
+:root :is(.workPrototype,.catalogPage) { --workspace-page-gutter:16px; --workspace-page-inset:var(--workspace-page-gutter); }
+:root .workspaceWorkbench :is(.workPrototype,.catalogPage) .workHeader {
+  min-height:var(--workspace-header-height,44px);
+  padding:6px var(--workspace-page-gutter);
+  padding-inline-start:var(--workspace-page-inset);
+}
+:root .workPrototype .issueFilters.workTabs, :root .catalogPage .catalogTabs {
+  gap:28px;
+  padding:12px var(--workspace-page-gutter) 16px;
+  padding-inline-start:var(--workspace-page-inset);
+}
+:root .workPrototype .inboxTabs, :root .catalogPage .libraryFilters { gap:28px; }
+:root .workPrototype .inboxTabs { padding-inline:0; }
+:root .workPrototype :is(.issueFilters,.inboxTabs) > button, :root .catalogPage :is(.catalogTabs > a,.libraryFilters > button) {
+  min-height:30px;
+  padding:5px 0;
+  border:0;
+  border-radius:0;
+  font-size:12px;
+  line-height:20px;
+}
+:root .workPrototype > .inboxLayout { margin-inline:var(--workspace-page-inset) var(--workspace-page-gutter); }
+:root .workPrototype .issueList { padding-inline:var(--workspace-page-inset) var(--workspace-page-gutter); }
+:root .catalogPage :is(.libraryContent,.catalogBody,.catalogWorkspace:not(.spaceContents)) {
+  padding-inline:var(--workspace-page-inset) var(--workspace-page-gutter);
+}
+:root .catalogPage .libraryCatalogTabs { margin-inline:calc(-1 * var(--workspace-page-inset)) calc(-1 * var(--workspace-page-gutter)); }
+@media(min-width:761px) {
+  :root .workspaceWorkbench :is(.workPrototype,.catalogPage) {
+    --workspace-page-inset:calc(var(--workspace-page-gutter) + 28px * (1 - var(--workspace-sidebar-progress)));
+  }
+}
+@media(max-width:760px) {
+  :root :is(.workPrototype,.catalogPage) { --workspace-page-gutter:12px; }
+  :root .workspaceWorkbench .catalogPage { padding-top:6px; padding-inline:6px; }
+}

@@ -320,6 +320,18 @@ def plugin_projection_fixture(test, name, resources, *, workspace=None):
 @override_settings(INTERNAL_API_TOKEN="test-internal-token")
 class ApiVerticalSliceTests(TransactionTestCase):
     serialized_rollback = True
+
+    def setUp(self):
+        super().setUp()
+        # Runtime owns this table; the API test database supplies its read contract.
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")
+            cursor.execute("CREATE TABLE IF NOT EXISTS runtime.runtime_turn_supplement_queues("
+                "agent_run_id text PRIMARY KEY,lifecycle_job_id text NOT NULL UNIQUE,session_id text NOT NULL,"
+                "authorization_digest text NOT NULL,revision bigint NOT NULL,next_sequence bigint NOT NULL,"
+                "accepting bigint NOT NULL,entries_json text NOT NULL,dedupe_json text NOT NULL,"
+                "closed_reason text,updated_at_ms bigint NOT NULL)")
+
     def test_me_returns_json_unauthorized_instead_of_redirecting_to_django_login(self):
         response = self.client.get("/api/me")
 
@@ -3524,6 +3536,13 @@ class ApiVerticalSliceTests(TransactionTestCase):
             status="running",
         )
         append_started(run)
+        authorization = create_agent_run_authorization(run)
+        supplement = {"supplementId": "refresh-steer", "sequence": 1, "message": "直接给结果",
+            "createdAtMs": 3, "claimToken": None, "claimLeaseOwner": None}
+        with connection.cursor() as cursor:
+            cursor.execute("INSERT INTO runtime.runtime_turn_supplement_queues VALUES("
+                "%s,%s,%s,%s,1,2,1,%s,'{}',NULL,3)",
+                [run.id, "lifecycle:" + run.id, session.id, authorization.digest, json.dumps([supplement])])
         self.client.force_login(owner)
 
         response = self.client.get(
@@ -3537,6 +3556,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             {
                 "schema": "workspace.transcript.active_agent_run.v1",
                 "sessionId": session.id,
+                "pendingSupplements": [{"supplementId": "refresh-steer", "message": "直接给结果"}],
                 "agentRun": {
                     "agentRunId": run.id,
                     "status": "running",
@@ -3545,6 +3565,27 @@ class ApiVerticalSliceTests(TransactionTestCase):
             },
         )
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+        # A read must not claim or consume a queued input. A stale authorization
+        # binding must not disclose it, even within the same Session.
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT entries_json FROM runtime.runtime_turn_supplement_queues WHERE agent_run_id=%s", [run.id])
+            self.assertEqual(json.loads(cursor.fetchone()[0]), [supplement])
+            cursor.execute("UPDATE runtime.runtime_turn_supplement_queues SET authorization_digest='stale' WHERE agent_run_id=%s", [run.id])
+        self.assertEqual(self.client.get(f"/api/sessions/{session.id}/transcript/active-agent-run",
+            {"sourceHighWater": "2"}).json()["pendingSupplements"], [])
+
+        from .http.response_schema import ActiveTranscriptAgentRunEnvelope
+        ActiveTranscriptAgentRunEnvelope.model_validate(response.json())
+        self.assertEqual(self.client.get(f"/api/sessions/{session.id}/transcript/active-agent-run",
+            {"sourceHighWater": "3"}).status_code, 400)
+
+        stranger = User.objects.create_user(username="foreign-steer@example.test")
+        workspace.members.add(stranger)
+        self.client.force_login(stranger)
+        self.assertEqual(self.client.get(f"/api/sessions/{session.id}/transcript/active-agent-run",
+            {"sourceHighWater": "2"}).status_code, 404)
+        self.client.force_login(owner)
 
         workspace.members.remove(owner)
         revoked = self.client.get(

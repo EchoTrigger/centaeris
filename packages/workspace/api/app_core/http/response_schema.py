@@ -128,9 +128,16 @@ class WorkspaceMcpToolResponse(StrictSchema):
     scopes: list[str]
 
 
+class WorkspaceMcpToolDiscoveryResponse(StrictSchema):
+    name_prefix: str
+    concurrency_safe: bool
+    scopes: list[str]
+
+
 class WorkspaceMcpServerResponse(StrictSchema):
     id: str
-    model_contract_digest: str
+    model_contract_digest: str | None
+    tool_discovery: WorkspaceMcpToolDiscoveryResponse | None = None
     transport: WorkspaceMcpTransportResponse
     auth: WorkspaceMcpAuthResponse
     startup_timeout_ms: int
@@ -771,6 +778,24 @@ class AgentRunSupplementResponse(StrictSchema):
     supplement_id: str
     disposition: Literal["accepted", "duplicate"]
     queued_count: int = Field(ge=0, le=8)
+
+
+class PendingTranscriptSupplement(StrictSchema):
+    supplement_id: str
+    message: str
+
+
+class ActiveTranscriptAgentRun(StrictSchema):
+    agent_run_id: str
+    status: Literal["queued", "running"]
+    stream_cursor: str
+
+
+class ActiveTranscriptAgentRunEnvelope(StrictSchema):
+    schema_id: Literal["workspace.transcript.active_agent_run.v1"] = Field(alias="schema")
+    session_id: str
+    agent_run: ActiveTranscriptAgentRun | None
+    pending_supplements: list[PendingTranscriptSupplement] = Field(max_length=8)
 
 
 class TranscriptPublishedArtifact(StrictSchema):

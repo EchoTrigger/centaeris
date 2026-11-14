@@ -425,7 +425,7 @@ def test_model(
 
 
 @plugin_upload_router.post(
-    "/workspaces/{workspace_id}/plugins/upload", auth=session_auth, response={200: WorkspacePluginEnvelope} | COMMON_ERROR_RESPONSES
+    "/workspaces/{workspace_id}/plugins/upload", auth=session_auth, response={200: WorkspacePluginEnvelope, 413: ErrorResponse} | COMMON_ERROR_RESPONSES
 )
 def upload_plugin(request, workspace_id: str):
     from app_core.workspace_plugins import install_workspace_plugin

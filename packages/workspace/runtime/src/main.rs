@@ -494,11 +494,6 @@ fn main() -> Result<(), String> {
                     ProviderPollingSchedulerConfig::default(),
                 );
             provider_polling.start()?;
-            runtime.spawn(run_hosted_subagent_worker(
-                store.clone(),
-                job_store.clone(),
-                tool_layers.clone(),
-            ));
             Ok(())
         },
     )?;
@@ -514,7 +509,13 @@ fn main() -> Result<(), String> {
         request_policy: request_policy::RequestPolicy::from_env()?,
         native_model,
     };
-    let mut lifecycle = lifecycle_executor::start(state.clone())?;
+    let mut lifecycle = lifecycle_executor::start(state.clone(), Default::default())?;
+    runtime.spawn(run_hosted_subagent_worker(
+        state.store.clone(),
+        state.job_store.clone(),
+        state.tool_layers.clone(),
+        lifecycle.work_wake.clone(),
+    ));
     let result = runtime.block_on(serve_http(listener, state));
     runtime.block_on(lifecycle.shutdown());
     result
@@ -762,15 +763,27 @@ async fn run_hosted_subagent_worker(
     store: Arc<RuntimeStoreActor>,
     job_store: Arc<PostgresRuntimeStore>,
     contexts: ToolLayerRegistry,
+    work_wake: lifecycle_executor::WorkWake,
 ) {
     loop {
-        if let Err(error) =
-            run_next_hosted_subagent_batch(store.as_ref(), job_store.clone(), contexts.clone())
-                .await
+        let mut ready = work_wake.subscribe();
+        let wait = match run_next_hosted_subagent_batch(
+            store.as_ref(),
+            job_store.clone(),
+            contexts.clone(),
+        )
+        .await
         {
-            eprintln!("hosted subagent worker failed: {error}");
+            Ok(wait) => wait,
+            Err(error) => {
+                eprintln!("hosted subagent worker failed: {error}");
+                Duration::from_secs(1)
+            }
+        };
+        tokio::select! {
+            _ = ready.changed() => {},
+            _ = tokio::time::sleep(wait) => {},
         }
-        tokio::time::sleep(Duration::from_millis(HOSTED_SUBAGENT_IDLE_MS)).await;
     }
 }
 
@@ -778,9 +791,9 @@ async fn run_next_hosted_subagent_batch(
     store: &RuntimeStoreActor,
     job_store: Arc<PostgresRuntimeStore>,
     contexts: ToolLayerRegistry,
-) -> Result<(), String> {
+) -> Result<Duration, String> {
     let now = now_ms()?;
-    store.reclaim_expired_runtime_job_leases(now).await?;
+    // Lifecycle owns global expired-lease recovery, including child jobs.
     let jobs = store
         .list_runtime_jobs(ListRuntimeJobsRequest {
             statuses: vec![RuntimeJobStatus::Queued],
@@ -791,11 +804,24 @@ async fn run_next_hosted_subagent_batch(
             offset: 0,
         })
         .await?;
+    let wait = jobs
+        .iter()
+        .map(|job| {
+            Duration::from_millis(
+                job.run_at_ms
+                    .saturating_sub(now)
+                    .max(HOSTED_SUBAGENT_IDLE_MS as i64) as u64,
+            )
+        })
+        .min()
+        .unwrap_or(lifecycle_executor::IDLE_RECHECK)
+        .min(lifecycle_executor::IDLE_RECHECK);
     let batches = hosted_subagent_batches(&jobs, &contexts, now)?;
     run_hosted_subagent_batches(batches, |batch| {
         run_hosted_subagent_batch(store, job_store.clone(), batch, now)
     })
-    .await
+    .await?;
+    Ok(wait)
 }
 
 struct HostedSubagentBatch {
@@ -1081,7 +1107,7 @@ impl HostedSubagentRunner {
             config,
             self.context.tool_concurrency.clone(),
         );
-        runtime.validate_subagent_tool_contracts(&binding)?;
+        runtime.prepare_subagent_tool_contracts(&binding).await?;
         let agent_run_identity = RuntimeAgentRunIdentityV1 {
             agent_run_id: req.job.job_id.clone(),
             execution_id: self.context.agent_run_identity.execution_id.clone(),
@@ -1884,15 +1910,19 @@ fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
 
 fn execute_agent_run(
     agent_run_start: AgentRunStart,
-    runtime: Arc<tokio::runtime::Runtime>,
-    store: Arc<RuntimeStoreActor>,
-    job_store: Arc<PostgresRuntimeStore>,
+    state: HttpServerState,
     lifecycle_job_id: String,
     lifecycle_lease_owner: String,
-    tool_layers: ToolLayerRegistry,
-    tool_concurrency_registry: Arc<centaeris_core::runtime::ToolConcurrencyRegistry>,
-    native_model: Option<native_model::NativeModelGateway>,
 ) -> Result<AgentRunStepOutcome, String> {
+    let HttpServerState {
+        runtime,
+        store,
+        job_store,
+        tool_layers,
+        tool_concurrency_registry,
+        native_model,
+        ..
+    } = state;
     let startup_started = Instant::now();
     let redis_url = env::var("REDIS_URL").map_err(|_| "REDIS_URL is required".to_string())?;
     let ttl_seconds = env::var("RUNTIME_STREAM_TTL_SECONDS")
@@ -3539,12 +3569,16 @@ fn execute_agent_run(
                             "recoveryWorkspacePrepare",
                             &agent_run_start.agent_run_id,
                             || {
-                                docker_execution.prepare_recovery_workspace(
-                                    &workspace_lease,
-                                    checkpoint_id.as_str(),
-                                    &recovery_workspace_snapshot,
-                                    workspace_input_upper_bound_bytes,
-                                )
+                                docker_execution
+                                    .prepare_recovery_workspace(
+                                        &workspace_lease,
+                                        checkpoint_id.as_str(),
+                                        &recovery_workspace_snapshot,
+                                        workspace_input_upper_bound_bytes,
+                                    )
+                                    .map_err(|error| {
+                                        format!("workspace snapshot capture failed: {error}")
+                                    })
                             },
                         )?
                         else {
@@ -3767,6 +3801,9 @@ fn execute_agent_run(
                                     &baseline,
                                     workspace_input_upper_bound_bytes,
                                 )
+                                .map_err(|error| {
+                                    format!("workspace snapshot capture failed: {error}")
+                                })
                             },
                         )?
                         .ok_or("initial recovery checkpoint could not seal the workspace")?;
@@ -4972,9 +5009,7 @@ fn model_process_state_transition<'a>(
     event: &'a TurnUpdate,
     sequence: &AgentRunSessionState,
 ) -> Option<(&'a str, RuntimeProcessState)> {
-    let Some((turn_id, process_state)) = model_process_state_update(event) else {
-        return None;
-    };
+    let (turn_id, process_state) = model_process_state_update(event)?;
     let previous = sequence.model_process_state(turn_id);
     if previous == Some(process_state)
         || (process_state != RuntimeProcessState::Retrying
@@ -5545,6 +5580,16 @@ fn provider_response_was_interrupted(error: &str) -> bool {
 }
 
 fn public_agent_failure_reason<'a>(internal_error: &'a str, transition_reason: &'a str) -> &'a str {
+    if transition_reason == "session_workspace_commit_failed"
+        || internal_error.starts_with("sandbox helper snapshot-capture failed (")
+        || internal_error.starts_with("snapshot capture ")
+        || internal_error.starts_with("read snapshot capture ")
+        || internal_error.starts_with("decode snapshot capture ")
+        || internal_error.starts_with("wait for snapshot capture helper failed:")
+        || internal_error.starts_with("workspace snapshot ")
+    {
+        return "workspace_snapshot_failed";
+    }
     if let Some(reason) = internal_error
         .strip_prefix("read AGENTS.md failed: ")
         .or_else(|| internal_error.strip_prefix("resolve execution model input image failed: "))
@@ -5621,6 +5666,7 @@ fn failed_session_records(
             "execution_input_unknown" => Some("The task was started, but input delivery is unconfirmed. Do not repeat the operation.".into()),
             "execution_query_unknown" => Some("Task execution result could not be confirmed. Do not repeat the operation.".into()),
             "execution_output_unavailable" => Some("Task output is unavailable. The command must not be repeated automatically.".into()),
+            "workspace_snapshot_failed" => Some("The workspace could not be saved. Its execution environment is retained for recovery; completed commands must not be repeated automatically.".into()),
             _ => None,
         });
     let mut events = Vec::new();
@@ -6386,7 +6432,9 @@ fn upload_recovery_workspace(
     let after_collect = observed_workspace_generation(host);
     observations::timing("recoveryPostCaptureGeneration", generation_started, "ok");
     let generation = stable_workspace_generation(before_collect, after_collect);
-    let snapshot = host.upload_recovery_workspace(prepared)?;
+    let snapshot = host
+        .upload_recovery_workspace(prepared)
+        .map_err(|error| format!("workspace snapshot publication failed: {error}"))?;
     Ok(UploadedRecoveryWorkspace {
         snapshot,
         generation,
@@ -9017,6 +9065,55 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("existing tasks remain supervised"));
+    }
+
+    #[test]
+    fn snapshot_failure_commits_a_safe_specific_reason() {
+        let internal = "sandbox helper snapshot-capture failed (exitCode=1): execution_agent failed: workspace snapshot does not support symlinks";
+        let reason = public_agent_failure_reason(internal, "core_run_failed");
+        assert_eq!(reason, "workspace_snapshot_failed");
+        for (error, transition) in [
+            (
+                "workspace snapshot capture failed: private detail",
+                "core_run_failed",
+            ),
+            (
+                "workspace snapshot publication failed: private detail",
+                "core_run_failed",
+            ),
+            (
+                "private commit diagnostic",
+                "session_workspace_commit_failed",
+            ),
+        ] {
+            assert_eq!(
+                public_agent_failure_reason(error, transition),
+                "workspace_snapshot_failed"
+            );
+        }
+        let start = agent_run_start();
+        let mut sequence = agent_run_session_state(&start);
+        started_session_records(&start, &mut sequence, 1).unwrap();
+        let records = failed_session_records(
+            &start,
+            reason,
+            &AssistantTextProjection::default(),
+            &mut sequence,
+            2,
+        )
+        .unwrap();
+        let terminal = &records.last().unwrap().event;
+        assert_eq!(terminal.event_type, SessionRecordType::AgentRunFailed);
+        assert_eq!(terminal.payload["reasonType"], "workspace_snapshot_failed");
+        assert!(terminal.payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("retained for recovery"));
+        assert!(!terminal.payload.to_string().contains("symlinks"));
+        assert_eq!(
+            public_agent_failure_reason("an unrelated helper failed", "core_run_failed"),
+            "core_run_failed"
+        );
     }
 
     #[test]

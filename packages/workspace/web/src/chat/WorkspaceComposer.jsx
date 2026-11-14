@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "../i18n";
 import { ContextUsagePicker } from "../components/ContextUsagePicker";
-import { ModelPicker, ThinkingPicker, thinkingModeLabels } from "../components/ModelSelectionPickers";
+import { ModelPicker, ThinkingPicker } from "../components/ModelSelectionPickers";
 import { AttachmentCard, LocalAttachmentCard, localAttachmentKey } from "./AttachmentCard";
 
 export const WorkspaceComposer = memo(function WorkspaceComposer({
@@ -42,7 +42,6 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   onCancelActiveAgentRun,
 }) {
   const { t } = useTranslation();
-  const thinkingLabel = thinkingModeLabels(t)[thinkingMode] || thinkingMode;
   const showStop = hasActiveAgentRun && !draft.trim();
   return (
     <form ref={formRef} className={`workspaceComposer ${isHome ? "shComposerHero" : ""}`} onSubmit={onSubmit}>
@@ -75,7 +74,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
       {feedback}
       <div className="workspaceComposerFooter">
         <div className="workspaceComposerControlGroup">
-          <span className="workspaceComposerControl" data-tooltip={t("appRoute.add")}>
+          <span className="workspaceComposerControl">
             <button
               className="workspaceComposerIconButton"
               type="button"
@@ -86,20 +85,20 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
               {uploadingAttachment ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <Plus aria-hidden="true" />}
             </button>
           </span>
-          <span className="workspaceComposerControl isPending" data-tooltip={t("appRoute.settingsComingSoon")} role="img" aria-label={t("appRoute.settingsComingSoon2")}>
+          <span className="workspaceComposerControl isPending" role="img" aria-label={t("appRoute.settingsComingSoon2")}>
             <SlidersHorizontal aria-hidden="true" />
           </span>
           <ContextUsagePicker sessionId={sessionId} contextRevision={contextRevision} />
         </div>
         <input ref={fileInputRef} className="srOnly" type="file" multiple aria-label={t("appRoute.selectOneOrMoreMaterials")} onChange={onUploadAttachment} />
         <div className="workspaceComposerControlGroup isRuntime">
-          <span className="workspaceComposerControl" data-tooltip={thinkingMode ? t("appRoute.reasoningEffortValue", { value1: thinkingLabel }) : t("appRoute.reasoningEffort")}>
+          <span className="workspaceComposerControl">
             <ThinkingPicker model={currentModel} value={thinkingMode} onChange={onThinkingModeChange} disabled={!currentModel?.thinkingModes?.length || sending || hasActiveAgentRun} />
           </span>
-          <span className="workspaceComposerControl" data-tooltip={t("appRoute.aiModelValue", { value1: currentModel?.displayName || (modelGroups.length ? t("appRoute.selectAnOption") : t("appRoute.notConfigured")) })}>
+          <span className="workspaceComposerControl">
             <ModelPicker groups={modelGroups} model={currentModel} value={modelId} onChange={onModelIdChange} disabled={!modelGroups.length || sending} />
           </span>
-          <span className="workspaceComposerControl" data-tooltip={t(showStop ? "appRoute.stop" : "appRoute.send")}>
+          <span className="workspaceComposerControl">
             {showStop ? (
               <button
                 className="workspaceSendButton"

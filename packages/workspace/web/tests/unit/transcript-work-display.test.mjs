@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createJsxSubjectLoader } from "./jsxSubject.mjs";
 import { renderer, nodes } from "./componentHarness.mjs";
 import { createTranscriptViewStore } from "../../src/chat/transcriptViewStore.ts";
+import { hasCommittedSupplement } from "../../src/chat/transcriptTurns.ts";
 
 const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const loader = createJsxSubjectLoader(new Map([
@@ -26,12 +27,23 @@ const user = { blockId: "user", body: { kind: "userText" }, orderKey: { sourceSe
 const pending = { text: "same input", startedAtMs: 1000, sessionId: "session", agentRunId: "current-run" };
 const committedUser = (run, id = "committed") => ({ ...user, blockId: id, presentation: { agentRunId: run } });
 
-test("the work separator is present before and after the first final answer", async () => {
+test("the work clock stays visible without an empty disclosure before and after the final answer", async () => {
   const { WorkProgress } = await import(await loader(fileURLToPath(new URL("../../src/chat/WorkProgress.tsx", import.meta.url))));
   for (const finalStarted of [false, true]) {
-    const markup = renderToStaticMarkup(createElement(WorkProgress, { running: !finalStarted, finalStarted, startedAtMs: 1000 }));
+    const markup = renderToStaticMarkup(createElement(WorkProgress, { running: !finalStarted, finalStarted, hasProcess: false, startedAtMs: 1000 }));
     assert.equal((markup.match(/workProgressHeader/g) || []).length, 1);
+    assert.doesNotMatch(markup, /aria-expanded=/);
   }
+});
+
+test("final-only turns keep their answer and duration without an expansion control", () => {
+  const answer = { blockId: "final-answer", body: { kind: "assistantText" }, orderKey: { sourceSequence: "3" } };
+  const markup = render([user, answer], { startedAtMs: 1000, completedAtMs: 10000 });
+  assert.ok(markup.includes("final-answer"));
+  assert.ok(markup.includes("workProgress.worked"));
+  assert.doesNotMatch(markup, /aria-expanded=/);
+  const tool = { blockId: "tool", body: { kind: "tool" }, orderKey: { sourceSequence: "3" } };
+  assert.match(render([user, tool, answer]), /aria-expanded="false"/);
 });
 
 test("the pending input reserves the metadata row without displaying fake copy controls", () => {
@@ -169,4 +181,27 @@ test("an uncommitted terminal submission keeps its input and stops working witho
     assert.equal(markup.includes('role="status"'),false);
     assert.equal(markup.includes("agentChat.retry"), false);
   }
+});
+
+test("Steer stays visible when its surrounding process folds after the final answer", () => {
+  const before = { blockId: "before", body: { kind: "tool" }, orderKey: { sourceSequence: "3" } };
+  const input = { blockId: "message:turn:supplement:input", body: { kind: "notice", noticeType: "turn_supplement" }, orderKey: { sourceSequence: "4" } };
+  const after = { blockId: "after", body: { kind: "tool" }, orderKey: { sourceSequence: "5" } };
+  const answer = { blockId: "answer", body: { kind: "assistantText" }, orderKey: { sourceSequence: "6" } };
+  const markup = render([user, before, input, after, answer], { completedAtMs: 10000 });
+  assert.ok(markup.includes(input.blockId));
+  assert.ok(markup.includes("answer"));
+  assert.equal((markup.match(/aria-label="workProgress.worked[^"]*"/g) || []).length, 1);
+});
+
+test("a pending Steer is scoped to its Session and reconciles by identity rather than text", () => {
+  const pendingInput = { supplementId: "current-input", sessionId: "session", agentRunId: "run", text: "追加内容" };
+  const old = { blockId: "message:turn:supplement:older-input", body: { kind: "notice", noticeType: "turn_supplement", content: { inlineContent: pendingInput.text, sourceRef: null } } };
+  const current = { ...old, blockId: "message:turn:supplement:current-input" };
+  const read = id => [old, current].find(block => block.blockId === id);
+  assert.equal(hasCommittedSupplement(pendingInput, "session", [old.blockId], read), false);
+  assert.equal(hasCommittedSupplement(pendingInput, "session", [current.blockId], read), true);
+  assert.equal(hasCommittedSupplement(pendingInput, "other", [current.blockId], read), false);
+  assert.ok(render([user], { pendingSupplements: [pendingInput], running: true }).includes(pendingInput.text));
+  assert.ok(!render([user], { sessionId: "other", pendingSupplements: [pendingInput] }).includes(pendingInput.text));
 });

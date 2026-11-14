@@ -108,6 +108,8 @@ class EnvironmentProfileHttpTests(OperationFixture, TransactionTestCase):
         self.assertIsNone(self.environment.environment_profile)
 
     def test_first_binding_and_lost_response_replay_are_identical(self):
+        defaults = copy.deepcopy(self.environment.resource_defaults)
+        revision = self.environment.resource_defaults_revision
         first = self.bind()
         self.assertEqual(first.status_code, 200, first.content)
         self.assertEqual(first.json(), {'schema': 'workspace.environment_profile.bound.v1',
@@ -118,6 +120,9 @@ class EnvironmentProfileHttpTests(OperationFixture, TransactionTestCase):
         self.environment.refresh_from_db()
         self.assertEqual(self.environment.environment_profile, profile())
         self.assertEqual(self.environment.environment_profile_operation_id, 'bind-profile')
+        self.assertEqual(self.environment.resource_defaults, defaults)
+        self.assertEqual(self.environment.resource_defaults_revision, revision)
+        self.assertNotEqual(self.environment.environment_profile['resources'], defaults)
 
     def test_rebinding_operation_conflict_and_foreign_session_are_rejected(self):
         self.assertEqual(self.bind().status_code, 200)

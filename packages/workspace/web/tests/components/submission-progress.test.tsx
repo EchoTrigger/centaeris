@@ -5,6 +5,7 @@ import { TranscriptBlockList } from "../../src/chat/TranscriptBlockList";
 import { createTranscriptViewStore } from "../../src/chat/transcriptViewStore";
 import { TranscriptActivity } from "../../src/chat/TranscriptActivity";
 import { WorkProgress } from "../../src/chat/WorkProgress";
+import userEvent from "@testing-library/user-event";
 
 vi.mock("../../src/i18n", () => {
   const t = (key: string, options?: { count?: number }) => options?.count === undefined ? key : `${key}:${options.count}`;
@@ -13,11 +14,38 @@ vi.mock("../../src/i18n", () => {
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+test("a final-only response never exposes or mounts an empty process disclosure", () => {
+  const mounted = vi.fn();
+  function Process() { mounted(); return <p>Process details</p>; }
+  const { rerender } = render(<WorkProgress hasProcess={false} running finalStarted={false} response={<p>Streaming answer</p>}><Process /></WorkProgress>);
+  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.getByText("Streaming answer")).toBeTruthy();
+  rerender(<WorkProgress hasProcess={false} running={false} finalStarted response={<p>Final answer</p>}><Process /></WorkProgress>);
+  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.getByText("Final answer")).toBeTruthy();
+  expect(screen.queryByText("Process details")).toBeNull();
+  expect(mounted).not.toHaveBeenCalled();
+});
+
+test("real process content remains expandable without hiding the final response", async () => {
+  vi.stubGlobal("matchMedia", () => ({ matches: true }));
+  const user = userEvent.setup();
+  render(<WorkProgress hasProcess running={false} finalStarted response={<p>Final answer</p>}><p>Process details</p></WorkProgress>);
+  const toggle = screen.getByRole("button", { name: "workProgress.worked" });
+  expect(screen.queryByText("Process details")).toBeNull();
+  await user.click(toggle);
+  expect(screen.getByText("Process details")).toBeTruthy();
+  expect(screen.getByText("Final answer")).toBeTruthy();
+  await user.click(toggle);
+  expect(screen.queryByText("Process details")).toBeNull();
+  expect(screen.getByText("Final answer")).toBeTruthy();
+});
+
 test("activity moves below output while its work clock remains uninterrupted", async () => {
   vi.useFakeTimers(); vi.setSystemTime(10000);
   const props = { running: true, finalStarted: false, startedAtMs: 1000 };
   function View({ activity, running = true }: { activity: "thinking" | "working" | "waitingInput"; running?: boolean }) {
-    return <><WorkProgress {...props} running={running} completedAtMs={running ? undefined : 14000} /><p>Latest output</p>{running ? <TranscriptActivity activity={activity} /> : null}</>;
+    return <><WorkProgress hasProcess={false} {...props} running={running} completedAtMs={running ? undefined : 14000} /><p>Latest output</p>{running ? <TranscriptActivity activity={activity} /> : null}</>;
   }
   const { container, rerender } = render(<View activity="thinking" />);
   expect(screen.getByRole("status").textContent).toBe("transcriptActivity.thinking");
@@ -39,16 +67,16 @@ test("activity moves below output while its work clock remains uninterrupted", a
 test("delayed completion keeps the elapsed seconds already shown while history uses its recorded duration", async () => {
   vi.useFakeTimers(); vi.setSystemTime(10000);
   vi.stubGlobal("matchMedia", () => ({ matches: true }));
-  const { rerender, unmount } = render(<WorkProgress running finalStarted={false} startedAtMs={1000} />);
+  const { rerender, unmount } = render(<WorkProgress hasProcess={false} running finalStarted={false} startedAtMs={1000} />);
   await act(async () => { vi.advanceTimersByTime(3000); });
   expect(screen.getByText("workProgress.working workProgress.seconds:12")).toBeTruthy();
-  rerender(<WorkProgress running={false} finalStarted startedAtMs={1000} completedAtMs={11000} />);
-  expect(screen.getByRole("button", { name: "workProgress.worked workProgress.seconds:12" })).toBeTruthy();
+  rerender(<WorkProgress hasProcess={false} running={false} finalStarted startedAtMs={1000} completedAtMs={11000} />);
+  expect(screen.getByText("workProgress.worked workProgress.seconds:12")).toBeTruthy();
   await act(async () => { vi.advanceTimersByTime(5000); });
-  expect(screen.getByRole("button", { name: "workProgress.worked workProgress.seconds:12" })).toBeTruthy();
+  expect(screen.getByText("workProgress.worked workProgress.seconds:12")).toBeTruthy();
   unmount();
-  render(<WorkProgress running={false} finalStarted startedAtMs={1000} completedAtMs={11000} />);
-  expect(screen.getByRole("button", { name: "workProgress.worked workProgress.seconds:10" })).toBeTruthy();
+  render(<WorkProgress hasProcess={false} running={false} finalStarted startedAtMs={1000} completedAtMs={11000} />);
+  expect(screen.getByText("workProgress.worked workProgress.seconds:10")).toBeTruthy();
 });
 
 test.each(["failed", "cancelled", "completed"] as const)("%s submissions retain the original message and elapsed time without adding notices or actions", async (status) => {

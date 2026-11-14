@@ -461,7 +461,7 @@ fn restore_with_writer(
         .map_err(|error| format!("workspace file manifest invalid: {error}"))?
         != bytes
         || validate_workspace_snapshot_manifest(&manifest)? != stored.expanded_size_bytes
-        || manifest.files.len() as u64 != u64::from(stored.file_count)
+        || manifest.node_count() as u64 != u64::from(stored.file_count)
     {
         return Err("workspace_restore_stored_binding_rejected".into());
     }
@@ -562,6 +562,8 @@ mod tests {
         ];
         let manifest = SandboxWorkspaceSnapshotManifest {
             schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            directories: Vec::new(),
+            symlinks: Vec::new(),
             files: files
                 .iter()
                 .map(|(path, content, executable)| SandboxWorkspaceSnapshotFile {
@@ -615,6 +617,42 @@ mod tests {
         assert_eq!(artifact.descriptor.sha256, "");
         assert!(artifact.file_source.is_none());
         assert_eq!(encoding(artifact.descriptor.size_bytes), "frameV1");
+    }
+
+    #[test]
+    fn metadata_only_manifest_restores_without_file_downloads_or_losing_node_counts() {
+        let manifest = SandboxWorkspaceSnapshotManifest {
+            schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            files: Vec::new(),
+            directories: vec!["empty".into(), "links".into()],
+            symlinks: vec![
+                hosted_execution::protocol::SandboxWorkspaceSnapshotSymlink {
+                    path: "links/escape".into(),
+                    target: "/etc/passwd".into(),
+                },
+            ],
+        };
+        let frame = encode_frame(&manifest, b"").unwrap();
+        let mut stored = capture_snapshot_artifact(&mut Cursor::new(&frame), 4096).unwrap();
+        prepare(&mut stored).unwrap();
+        assert_eq!(stored.descriptor.file_count, 3);
+        assert_eq!(stored.descriptor.expanded_size_bytes, 0);
+        assert!(stored.file_source.as_ref().unwrap().ranges.is_empty());
+        let mut restored = restore(
+            &mut stored.file,
+            &stored.descriptor,
+            0,
+            WorkspaceProtection::new(),
+            |_| -> Result<Cursor<Vec<u8>>, String> {
+                panic!("metadata-only snapshots have no content objects")
+            },
+        )
+        .unwrap();
+        assert_eq!(restored.helper_frame.manifest, Some(manifest));
+        assert_eq!(restored.helper_frame.descriptor.file_count, 3);
+        let mut bytes = Vec::new();
+        restored.helper_frame.file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, frame);
     }
 
     #[test]
@@ -864,6 +902,8 @@ mod tests {
             .collect();
         let manifest = SandboxWorkspaceSnapshotManifest {
             schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            directories: Vec::new(),
+            symlinks: Vec::new(),
             files: contents
                 .iter()
                 .enumerate()

@@ -32,6 +32,8 @@ fn manifest(files: Vec<SandboxWorkspaceSnapshotFile>) -> SandboxWorkspaceSnapsho
     SandboxWorkspaceSnapshotManifest {
         schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
         files,
+        directories: Vec::new(),
+        symlinks: Vec::new(),
     }
 }
 
@@ -108,6 +110,47 @@ fn compressed(tar: &[u8]) -> Vec<u8> {
     encoder.include_checksum(true).unwrap();
     encoder.write_all(tar).unwrap();
     encoder.finish().unwrap()
+}
+
+#[test]
+fn node_metadata_roundtrip_keeps_literal_links_empty_directories_and_count_limits() {
+    use hosted_execution::protocol::SandboxWorkspaceSnapshotSymlink;
+
+    let mut nodes = manifest(Vec::new());
+    nodes.directories = vec!["empty".into(), "links".into()];
+    nodes.symlinks = [
+        ("links/cycle", "cycle"),
+        ("links/escape.docx", "/etc/hostname"),
+        ("links/leak.txt", "/etc/passwd"),
+        ("links/missing", "../../missing"),
+    ]
+    .map(|(path, target)| SandboxWorkspaceSnapshotSymlink {
+        path: path.into(),
+        target: target.into(),
+    })
+    .to_vec();
+    let bytes = encoded(&nodes, &[]);
+    let (summary, bodies) = restored(&bytes, limits()).unwrap();
+    assert_eq!(summary.manifest, nodes);
+    assert_eq!(summary.file_count, 6);
+    assert_eq!(summary.expanded_bytes, 0);
+    assert!(bodies.is_empty());
+    let mut frame = Vec::new();
+    decode_to_v1(bytes.as_slice(), &mut frame, limits()).unwrap();
+    assert_eq!(&frame[4..], serde_json::to_vec(&nodes).unwrap());
+    assert!(restored(
+        &bytes,
+        ArchiveLimits {
+            file_count: 5,
+            ..limits()
+        }
+    )
+    .is_err());
+
+    let mut malformed = nodes;
+    malformed.directories.push("links/leak.txt/child".into());
+    malformed.directories.sort();
+    assert!(encode_ordered(&malformed, io::empty(), io::sink(), limits()).is_err());
 }
 
 #[test]

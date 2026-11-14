@@ -14,7 +14,7 @@ from django.test import TransactionTestCase
 from .environment_authorization import build_environment_authorization
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .environment_lifecycle import acquire_environment_cleanup_controller, acquire_environment_controller, release_environment_controller
-from .models import AgentRun, Session, SessionWorkspacePreservation
+from .models import AgentRun, Session, SessionWorkspacePreservation, WorkspaceSnapshotFileReference
 from .runtime_contract import session_workspace_for_session
 from .test_execution_publication_fencing import ExecutionPublicationFixture, prepare_workspace_files
 
@@ -153,6 +153,33 @@ class SessionWorkspacePreservationTests(ExecutionPublicationFixture, Transaction
 
     def test_preserved_empty_root_replaces_legacy_archive_encoding(self):
         self.assert_snapshot_publication(preserve=True, content=None)
+
+    def test_preserved_v2_links_and_empty_directories_publish_without_file_objects(self):
+        manifest = {"schema": "workspace.snapshot.v2", "files": [],
+            "directories": ["_t", "empty"], "symlinks": [
+                {"path": "_t/escape.docx", "target": "/etc/hostname"},
+                {"path": "_t/leak.txt", "target": "/etc/passwd"}]}
+        snapshot = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode()
+        body, _ = self.preserve_body(content=None)
+        length = int.from_bytes(body[:4], "big")
+        metadata = json.loads(body[4:4 + length])
+        metadata.update(snapshotEncoding="fileManifestV1", snapshotSizeBytes=len(snapshot),
+            snapshotSha256="sha256:" + hashlib.sha256(snapshot).hexdigest(),
+            expandedSizeBytes=0, fileCount=4)
+        encoded = json.dumps(metadata, separators=(",", ":")).encode()
+        response = self.preserve(len(encoded).to_bytes(4, "big") + encoded + snapshot)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.workspaceSnapshotEncoding, "fileManifestV1")
+        self.assertEqual(self.session.workspaceFileCount, 4)
+        self.assertEqual(self.session.workspaceExpandedSizeBytes, 0)
+        self.assertEqual(response.json()["sessionWorkspace"], session_workspace_for_session(self.session))
+        receipt = SessionWorkspacePreservation.objects.get(pk=response.json()["preservationReceiptId"])
+        self.assertEqual(receipt.workspace, response.json()["sessionWorkspace"])
+        self.assertFalse(WorkspaceSnapshotFileReference.objects.filter(
+            snapshot__storageKey=self.session.workspaceStorageKey).exists())
+        with default_storage.open(self.session.workspaceStorageKey, "rb") as stored:
+            self.assertEqual(stored.read(), snapshot)
 
     def test_cleanup_commits_unknown_baseline_and_replays_lost_ack_without_changing_history(self):
         body,snapshot=self.preserve_body()

@@ -402,17 +402,9 @@ pub(crate) fn validate_plugin_name(name: &str) -> Result<(), String> {
 }
 
 pub(crate) fn validate_plugin_version(version: &str) -> Result<(), String> {
-    let parts = version.split('.').collect::<Vec<_>>();
-    if parts.len() != 3
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || !part.bytes().all(|byte| byte.is_ascii_digit())
-                || (part.len() > 1 && part.starts_with('0'))
-        })
-    {
-        return Err("plugin manifest version must be major.minor.patch".to_string());
-    }
-    Ok(())
+    semver::Version::parse(version)
+        .map(|_| ())
+        .map_err(|_| "plugin manifest version must be a valid SemVer version".to_string())
 }
 
 fn default_timeout_ms() -> u64 {
@@ -424,6 +416,29 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+
+    #[test]
+    fn plugin_versions_accept_releases_and_prereleases_without_normalization() {
+        for version in ["0.1.0", "1.1.0-rc.1", "2.1.0-rc", "1.0.0-alpha.2+build.001"] {
+            validate_plugin_version(version).expect(version);
+        }
+        for version in [
+            "1.0",
+            "v1.0.0",
+            "01.0.0",
+            "1.0.0-01",
+            "1.0.0-",
+            "1.0.0-rc_1",
+            "1.0.0+",
+            " 1.0.0",
+            "1.0.0\n",
+        ] {
+            assert!(
+                validate_plugin_version(version).is_err(),
+                "accepted {version:?}"
+            );
+        }
+    }
 
     #[test]
     fn plugin_manifest_lists_hook_declarations() {

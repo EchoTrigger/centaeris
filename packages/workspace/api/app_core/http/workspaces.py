@@ -47,6 +47,7 @@ from app_core.agent_run_authorization_factory import create_agent_run_authorizat
 from app_core.session_model_settings import selected_session_model, SessionModelSettingsError
 from app_core.session_deletion import purge_session_runtime, record_session_purge_intent
 from app_core.agent_run_stream import encode_stream_cursor
+from app_core.presentation_activity import pending_agent_run_supplements
 from app_core.runtime_client import (
     TranscriptRuntimeError,
     request_agent_run_cancellation,
@@ -89,6 +90,7 @@ from .response_schema import (
     AgentRunCancellationResponse,
     AgentRunEnvironmentResponse,
     AgentRunSupplementResponse,
+    ActiveTranscriptAgentRunEnvelope,
     SessionsEnvelope,
     SessionSearchEnvelope,
     WorkspacesEnvelope,
@@ -660,7 +662,8 @@ def update_session_metadata(
             if not title or len(title) > 200:
                 return Status(400, {"error": "session_title_invalid"})
             session.title = title
-            update_fields.append("title")
+            session.titleRevision += 1
+            update_fields.extend(["title", "titleRevision"])
         if "is_pinned" in fields:
             session.isPinned = payload.is_pinned
             update_fields.append("isPinned")
@@ -1119,7 +1122,7 @@ def session_transcript_turn_metadata(request, session_id: str):
 @router.get(
     "/sessions/{session_id}/transcript/active-agent-run",
     auth=usage_auth("sessions:read"),
-    response=None,
+    response={200: ActiveTranscriptAgentRunEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def session_transcript_active_agent_run(request, session_id: str):
     session = _authorized_transcript_session(request.user, session_id)
@@ -1135,7 +1138,7 @@ def session_transcript_active_agent_run(request, session_id: str):
             {"error": "transcript_active_agent_run_query_invalid"}, status=400
         )
     candidates = list(
-        session.agent_runs.filter(status__in={"queued", "running"})
+        session.agent_runs.select_related("authorization").filter(status__in={"queued", "running"})
         .order_by("-createdAt", "-id")[:2]
     )
     active_runs = []
@@ -1154,6 +1157,7 @@ def session_transcript_active_agent_run(request, session_id: str):
         {
             "schema": "workspace.transcript.active_agent_run.v1",
             "sessionId": session.id,
+            "pendingSupplements": pending_agent_run_supplements(active_run),
             "agentRun": (
                 {
                     "agentRunId": active_run.id,
@@ -1240,6 +1244,66 @@ def _canonical_waterline(value: str) -> bool:
         and len(value) <= 20
         and int(value) <= 18_446_744_073_709_551_615
     )
+
+
+def _accept_session_message(request, workspace, session, payload, prompt, attachment_refs,
+                            execution_profile, digest, *, grant=None, initial_title=None):
+    """Accept a message in the caller's transaction after authority/session locks."""
+    try:
+        model, thinking_mode = selected_session_model(workspace.id, payload.model_config_ref, payload.thinking_mode)
+    except SessionModelSettingsError as error:
+        raise AgentSessionCreationError(400, str(error)) from error
+    agent_run = AgentRun.objects.create(
+        workspace=workspace,
+        session=session,
+        user=request.user,
+        acting_app=grant.app if grant else None,
+        app_delegation=grant,
+        modelConfig=model,
+        thinkingMode=thinking_mode,
+        prompt=prompt,
+        agent_instructions="",
+        tailPolicy=("rewriteLastUser" if payload.tail_action else "append"),
+        rewriteTargetMessageId=(payload.tail_action.target_message_id if payload.tail_action else ""),
+        rewriteExpectedTailMessageId=(payload.tail_action.expected_tail_message_id if payload.tail_action else ""),
+    )
+    create_agent_run_authorization(
+        agent_run,
+        message_asset_refs=attachment_refs,
+        image_digest=execution_profile["imageDigest"],
+        personal_library=True,
+    )
+    from app_core.material_files import check_original_budget
+    from app_core.material_contract import KnowledgeError
+    try:
+        check_original_budget(agent_run)
+    except KnowledgeError as error:
+        raise AgentSessionCreationError(error.status, error.code) from error
+    if initial_title is not None:
+        session.title = initial_title
+    elif session.title == "New chat" and session.titleRevision == 0:
+        session.title = prompt[:80]
+    session.updatedAt = timezone.now()
+    session.save(update_fields=["title", "updatedAt"])
+    receipt = accept_operation(request.user, workspace, "submitMessage", payload.operation_id,
+                               digest, session, agent_run, app_delegation=grant)
+    if grant is None:
+        from app_core.session_titles import enqueue_session_title
+        enqueue_session_title(session, agent_run)
+    return agent_run, receipt
+
+
+def _schedule_accepted_agent_run(agent_run):
+    try:
+        schedule_agent_run_lifecycle(agent_run)
+    except Exception:
+        logger.exception(
+            "Workspace AgentRun lifecycle scheduling is pending reconciliation",
+            extra={"agentRunId": agent_run.id},
+        )
+        AgentRun.objects.filter(id=agent_run.id, status="queued").update(
+            transitionReason="agent_run_lifecycle_schedule_pending"
+        )
 
 
 @router.post(
@@ -1396,11 +1460,14 @@ def create_session_message(
                     return Status(409, {"error": "session_has_active_agent_run"})
                 # Cleanup publishes the final workspace under this same Session
                 # lock. Do not freeze the next Run's baseline before its release.
-                if session.agent_runs.filter(
+                pending_preservation = session.agent_runs.filter(
                     environment_id=session.current_environment_id,
                     status__in={"completed", "failed", "cancelled"},
                     environment_release__isnull=True,
-                ).exists():
+                )
+                if pending_preservation.filter(transitionReason="workspace_preservation_blocked").exists():
+                    return Status(409, {"error": "session_workspace_preservation_blocked"})
+                if pending_preservation.exists():
                     return Status(409, {"error": "session_workspace_preservation_pending"})
                 linked_attachment_refs = set(
                     session.assetLinks.filter(id__in=attachment_refs).values_list(
@@ -1410,42 +1477,10 @@ def create_session_message(
                 )
                 if linked_attachment_refs != set(attachment_refs):
                     return Status(403, {"error": "attachment_not_accessible"})
-            try:
-                model, thinking_mode = selected_session_model(workspace.id, payload.model_config_ref, payload.thinking_mode)
-            except SessionModelSettingsError as error:
-                raise AgentSessionCreationError(400, str(error)) from error
-            agent_run = AgentRun.objects.create(
-                workspace=workspace,
-                session=session,
-                user=request.user,
-                acting_app=grant.app if grant else None,
-                app_delegation=grant,
-                modelConfig=model,
-                thinkingMode=thinking_mode,
-                prompt=prompt,
-                agent_instructions="",
-                tailPolicy=("rewriteLastUser" if payload.tail_action else "append"),
-                rewriteTargetMessageId=(payload.tail_action.target_message_id if payload.tail_action else ""),
-                rewriteExpectedTailMessageId=(payload.tail_action.expected_tail_message_id if payload.tail_action else ""),
+            agent_run, receipt = _accept_session_message(
+                request, workspace, session, payload, prompt, attachment_refs,
+                execution_profile, digest, grant=grant,
             )
-            create_agent_run_authorization(
-                agent_run,
-                message_asset_refs=attachment_refs,
-                image_digest=execution_profile["imageDigest"],
-                personal_library=True,
-            )
-            from app_core.material_files import check_original_budget
-            from app_core.material_contract import KnowledgeError
-            try:
-                check_original_budget(agent_run)
-            except KnowledgeError as error:
-                raise AgentSessionCreationError(error.status, error.code) from error
-            if session.title == "New chat":
-                session.title = prompt[:80]
-            session.updatedAt = timezone.now()
-            session.save(update_fields=["title", "updatedAt"])
-            receipt = accept_operation(request.user, workspace, "submitMessage", payload.operation_id,
-                                       digest, session, agent_run, app_delegation=grant)
     except AcceptedOperationReplay as replay:
         _delete_stored_upload_batch(stored)
         return Status(202, serialize_operation(replay.receipt))
@@ -1465,16 +1500,7 @@ def create_session_message(
         except RuntimeError as cleanup_error:
             raise cleanup_error from database_error
         raise
-    try:
-        schedule_agent_run_lifecycle(agent_run)
-    except Exception:
-        logger.exception(
-            "Workspace AgentRun lifecycle scheduling is pending reconciliation",
-            extra={"agentRunId": agent_run.id},
-        )
-        AgentRun.objects.filter(id=agent_run.id, status="queued").update(
-            transitionReason="agent_run_lifecycle_schedule_pending"
-        )
+    _schedule_accepted_agent_run(agent_run)
     return Status(
         202,
         serialize_operation(receipt),

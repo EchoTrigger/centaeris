@@ -646,6 +646,14 @@ fn try_image_read_outcome(
             image
                 .validate()
                 .map_err(|message| FileToolError::new(FileToolErrorKind::InvalidInput, message))?;
+            if let (Some(store), Some(session_id)) = (
+                runtime_context.model_input_image_store.as_ref(),
+                runtime_context.session_id.as_deref(),
+            ) {
+                store
+                    .save_model_input_image(session_id, &image.sha256, bytes)
+                    .map_err(|message| FileToolError::new(FileToolErrorKind::Unknown, message))?;
+            }
             ModelInputImageSourceRefV1::ExecutionFile { image }
         }
         ImageReadSource::InputRef(input_ref) => ModelInputImageSourceRefV1::InputRef {

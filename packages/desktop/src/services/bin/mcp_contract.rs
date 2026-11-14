@@ -47,6 +47,9 @@ fn process(path: &Path, mode: Mode) -> Result<(), String> {
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| "MCP server id is required".to_string())?;
+        if server.contains_key("toolDiscovery") {
+            continue;
+        }
         let tools = serde_json::from_value::<Vec<McpToolDeclarationV1>>(
             server
                 .get("tools")
@@ -135,6 +138,35 @@ fn sync(path: &Path, snapshots: &[(String, PathBuf)]) -> Result<(), String> {
             .get("tools")
             .and_then(Value::as_array)
             .ok_or_else(|| format!("tools/list result.tools is missing: serverId={server_id}"))?;
+        if server.contains_key("toolDiscovery") {
+            let declaration = serde_json::from_value::<
+                centaeris_core::extension::McpServerDeclarationV1,
+            >(Value::Object(server.clone()))
+            .map_err(|error| format!("parse discovery declaration failed: {error}"))?;
+            let discovered = live_tools
+                .iter()
+                .map(|tool| {
+                    Ok(centaeris_core::extension::McpDiscoveredToolV1 {
+                        name: tool
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .ok_or("tools/list name is missing")?
+                            .to_string(),
+                        description: tool
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .ok_or("tools/list description is missing")?
+                            .to_string(),
+                        input_schema: tool
+                            .get("inputSchema")
+                            .cloned()
+                            .ok_or("tools/list inputSchema is missing")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            declaration.discovered_tool_declarations(discovered)?;
+            continue;
+        }
         let declared_tools = server
             .get_mut("tools")
             .and_then(Value::as_array_mut)

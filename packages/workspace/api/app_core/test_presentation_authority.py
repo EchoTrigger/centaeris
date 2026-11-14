@@ -72,3 +72,24 @@ class BrowserPresentationAuthorityTests(SessionRecordFixture, TransactionTestCas
         response = self.client.get(f"/api/workspaces/{self.workspace.pk}/presentation/events", {"sessionId": foreign.pk})
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"error": "presentation_scope_not_found"})
+
+    def test_agent_run_api_session_is_outside_browser_presentation_scope(self):
+        session = models.Session.objects.create(
+            workspace=self.workspace, owner=self.user, purpose="agentRunApi")
+        self.assert_authority(self.loaders(session=session), navigation=True, selected=False)
+        response = self.client.get(f"/api/workspaces/{self.workspace.pk}/presentation/events",
+            {"sessionId": session.pk})
+        self.assertEqual(response.status_code, 404)
+
+    def test_selected_session_must_belong_to_the_requested_workspace(self):
+        workspace = models.Workspace.objects.create(name="Other sessions", createdBy=self.user)
+        models.WorkspaceMembership.objects.create(workspace=workspace, user=self.user, role="owner")
+        session = models.Session.objects.create(workspace=workspace, owner=self.user)
+        self.assert_authority(self.loaders(session=session), navigation=True, selected=False)
+        request = RequestFactory().get("/")
+        request.user = self.user
+        loader = PresentationLoader(request, PresentationScope(workspace.pk, session.pk))
+        self.assertIs(async_to_sync(loader.authorized)(), True)
+        response = self.client.get(f"/api/workspaces/{self.workspace.pk}/presentation/events",
+            {"sessionId": session.pk})
+        self.assertEqual(response.status_code, 404)

@@ -138,6 +138,10 @@ pub(super) fn router(state: HttpServerState) -> Router {
             "/internal/jobs/control/start",
             post_job(job_protocol::control_start),
         )
+        .route(
+            "/internal/jobs/control/retry-workspace-preservation",
+            post_job(job_protocol::retry_workspace_preservation),
+        )
         .route("/internal/jobs/wait", post_job(job_protocol::wait))
         .route("/internal/jobs/start", post_job(job_protocol::start))
         .route(

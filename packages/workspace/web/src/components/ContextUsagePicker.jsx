@@ -53,7 +53,7 @@ export function ContextUsagePicker({ sessionId, contextRevision = "0" }) {
 
   return (
     <details className="workspaceContextUsage" ref={pickerRef}>
-      <summary aria-label={t("context.Context window")} title={t("context.Context window")}>
+      <summary aria-label={t("context.Context window")}>
         <span style={{ "--context-used": `${usedPercentage * 3.6}deg` }} />
       </summary>
       <div className="workspaceContextUsagePanel">
@@ -84,7 +84,7 @@ export function ContextUsagePicker({ sessionId, contextRevision = "0" }) {
                 <div>
                   {breakdown.mcpTools.map((tool) => (
                     <p key={`${tool.providerId}:${tool.name}`}>
-                      <span title={`${tool.providerId} · ${tool.name}`}>{tool.providerId} · {tool.name}</span>
+                      <span>{tool.providerId} · {tool.name}</span>
                       <strong>{formatTokens(tool.tokens)}</strong>
                     </p>
                   ))}

@@ -2,21 +2,10 @@
 import { useTranslation } from "../i18n";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { File, FileArchive, FileAudio, FileCode2, FileSpreadsheet, FileText, FileVideo, ImageOff, X } from "lucide-react";
+import { ImageOff, X } from "lucide-react";
 import { useModalDialog } from "../components/useModalDialog";
 import { attachmentIsImage, attachmentPreviewUrl } from "./attachments.mjs";
-
-function filePresentation(name, contentType) {
-  const extension = name.split(".").at(-1)?.toLowerCase();
-  const label = name.includes(".") && /^[a-z0-9]{1,6}$/.test(extension) ? extension.toUpperCase() : "FILE";
-  const Icon = /^(csv|xlsx?|ods)$/.test(extension) ? FileSpreadsheet
-    : /^(zip|rar|7z|tar|gz)$/.test(extension) ? FileArchive
-      : contentType.startsWith("audio/") ? FileAudio
-        : contentType.startsWith("video/") ? FileVideo
-          : /^(json|html|css|js|ts|jsx|tsx|py|rs|xml|yaml|yml)$/.test(extension) ? FileCode2
-            : contentType.startsWith("text/") || /^(pdf|docx?|odt|rtf)$/.test(extension) ? FileText : File;
-  return { Icon, label };
-}
+import { filePresentation } from "./filePresentation.mjs";
 
 export function AttachmentCard({ attachment, imageUrl, onPreview, onRemove, unavailable = false, className = "" }) {
   const { t } = useTranslation();
@@ -29,10 +18,10 @@ export function AttachmentCard({ attachment, imageUrl, onPreview, onRemove, unav
   const Content = onPreview && !unavailable ? "button" : "div";
   return (
     <div className={`attachmentCard ${className} ${image ? "isImage" : "isFile"} ${failed ? "isUnavailable" : ""}`}>
-      <Content className="attachmentCardContent" title={name} aria-label={onPreview && !unavailable ? t("attachmentCard.previewValue", { value1: name }) : name} {...(Content === "button" ? { type: "button", onClick: onPreview } : {})}>
+      <Content className="attachmentCardContent" aria-label={onPreview && !unavailable ? t("attachmentCard.previewValue", { value1: name }) : name} {...(Content === "button" ? { type: "button", onClick: onPreview } : {})}>
         {image ? source && !failed ? <img src={source} alt="" loading="lazy" decoding="async" onError={() => setFailedSource(source)} /> : <><ImageOff aria-hidden="true" /><small>{failed ? t("attachmentCard.imageUnavailable") : t("attachmentCard.image")}</small></> : <><Icon aria-hidden="true" /><small>{failed ? t("attachmentCard.unavailable") : label}</small><span className="attachmentCardName">{name}</span></>}
       </Content>
-      {onRemove ? <button className="attachmentCardRemove" type="button" onClick={onRemove} aria-label={t("attachmentCard.removeValueFromThisMessage", { value1: name })} title={t("attachmentCard.removeValue", { value1: name })}><X aria-hidden="true" /></button> : null}
+      {onRemove ? <button className="attachmentCardRemove" type="button" onClick={onRemove} aria-label={t("attachmentCard.removeValueFromThisMessage", { value1: name })}><X aria-hidden="true" /></button> : null}
     </div>
   );
 }

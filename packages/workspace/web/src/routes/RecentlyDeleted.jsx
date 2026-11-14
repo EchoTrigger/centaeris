@@ -178,7 +178,6 @@ export function RecentlyDeleted({ workspace }) {
   }
 
   const allLoaded = trash.loaded || trash.error;
-  const empty = allLoaded && !trash.items.length && !trash.error;
   return <section className="shTrashPage" aria-label={t("settingsRoute.recentlyDeleted")}>
       <div className="shTrashTools">
         <label className="shTrashSearch"><Search aria-hidden="true" /><input aria-label={t("trashPopover.searchTrash")} placeholder={t("trashPopover.searchInTrash")} value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} /></label>
@@ -192,6 +191,7 @@ export function RecentlyDeleted({ workspace }) {
             <option value="">{t("libraryRoute.all")}</option>
             {trash.filterOptions.deletedBy.map((item) => <option key={item.userId} value={item.userId}>{item.email}</option>)}
           </select><ChevronDown aria-hidden="true" /></label>
+          {allLoaded && !trash.loading && !trash.items.length && !trash.error && (search || location || deletedByUserId) ? <small role="status">{t("common.resultCount", { count: trash.items.length })}</small> : null}
         </div>
       </div>
       <div className="shTrashPopoverBody">
@@ -199,7 +199,6 @@ export function RecentlyDeleted({ workspace }) {
         <TrashSection feed={trash}>{(item) => {
           return <TrashItemRow key={item.id} item={item} busy={Boolean(busyKey)} error={!purgeTarget && actionError?.key === item.id ? actionError.message : ""} onRestore={restore} onPurge={target => { setActionError(null); setPurgeTarget(target); }} />;
         }}</TrashSection>
-        {empty ? <div className="shTrashAllEmpty" role="status"><Trash2 aria-hidden="true" /><p>{t(search || location || deletedByUserId ? "trashPopover.noMatchingItems" : "trashPopover.trashIsEmpty")}</p></div> : null}
       </div>
       <footer>{t("trashPopover.itemsStayInTrashFor30DaysBeforeBeing")}</footer>
       <ConfirmDialog open={Boolean(purgeTarget)} title={t("trashPopover.deleteThisMaterial")} popupClassName="settingsArchiveConfirm" message={actionError?.message} busy={Boolean(busyKey)} onCancel={() => setPurgeTarget(null)} onConfirm={() => void purge()} />

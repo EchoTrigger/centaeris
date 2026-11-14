@@ -14,6 +14,25 @@ function storage() {
 }
 function client(store, request) { return new OperationClient(scope, { storage: store, request }); }
 
+for (const [status, code] of [[403, "issue_material_unavailable"], [409, "issue_material_version_changed"], [409, "issue_version_conflict"], [409, "issue_archived"]]) {
+  test(`a definite ${code} rejection permits a corrected Issue delegation`, async () => {
+    const store = storage(); let rejectedId;
+    const rejected = client(store, async (_path, options) => {
+      rejectedId = JSON.parse(options.body).operationId;
+      throw new ApiError(code, status);
+    });
+    await assert.rejects(rejected.submit("/executions", { version: 1, modelConfigRef: "model" }));
+    assert.equal(rejected.pending(), null);
+    const corrected = client(store, async (_path, options) => {
+      const body = JSON.parse(options.body);
+      assert.notEqual(body.operationId, rejectedId);
+      assert.equal(body.version, 2);
+      return accepted(body.operationId);
+    });
+    assert.equal((await corrected.submit("/executions", { version: 2, modelConfigRef: "model" })).status, "accepted");
+  });
+}
+
 test("a lost POST response recovers the accepted receipt without another submission", async () => {
   const store = storage(); const calls = []; let id;
   const operation = client(store, async (path, options) => {

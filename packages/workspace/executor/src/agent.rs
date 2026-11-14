@@ -28,8 +28,9 @@ use crate::protocol::{
     SandboxArtifactRequest, SandboxFileSystemRequest, SandboxFileSystemResult,
     SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
     SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
-    SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_GENERATION_QUERY_LINE,
-    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SandboxWorkspaceSnapshotSymlink, SANDBOX_INPUT_INVENTORY_SCHEMA,
+    SANDBOX_WORKSPACE_GENERATION_QUERY_LINE, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1,
 };
 #[cfg(target_os = "linux")]
 use crate::protocol::{
@@ -497,7 +498,7 @@ pub fn run_snapshot_collect_once() -> Result<(), String> {
         require_root()?;
         secure_roots()?;
         let manifest = collect_snapshot_manifest(&load_inventory()?, &mut observation)?;
-        if manifest.files.is_empty() {
+        if manifest.is_empty() {
             return Ok(());
         }
         write_snapshot_frame(&manifest, &mut observation)
@@ -540,6 +541,19 @@ fn restore_snapshot_frame(
         return Err("snapshot manifest is not canonical".to_string());
     }
     let mut created_directories = BTreeSet::new();
+    for directory in &manifest.directories {
+        // Ancestor directories may already contain current protected inputs.
+        // An old directory at or below an input cannot replace that authority.
+        if inputs.inputs.iter().any(|input| {
+            directory == &input.virtual_path
+                || directory
+                    .strip_prefix(&input.virtual_path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) {
+            continue;
+        }
+        create_snapshot_directories(&workspace_root()?.join(directory), &mut created_directories)?;
+    }
     for file in &manifest.files {
         if inputs
             .inputs
@@ -550,6 +564,18 @@ fn restore_snapshot_frame(
             continue;
         }
         restore_snapshot_file(input, file, &mut created_directories)?;
+    }
+    // Links are created last. Neither a file nor a directory can traverse one
+    // while this snapshot is being restored.
+    for link in &manifest.symlinks {
+        if inputs
+            .inputs
+            .iter()
+            .any(|input| snapshot_paths_conflict(&link.path, &input.virtual_path))
+        {
+            continue;
+        }
+        restore_snapshot_symlink(link, &mut created_directories)?;
     }
     let mut trailing = [0_u8; 1];
     if input
@@ -656,7 +682,7 @@ fn collect_snapshot_manifest(
         .iter()
         .map(|input| input.virtual_path.as_str())
         .collect::<BTreeSet<_>>();
-    let mut paths = Vec::new();
+    let mut paths = SnapshotPaths::default();
     collect_snapshot_paths(
         workspace_root()?,
         "",
@@ -664,33 +690,49 @@ fn collect_snapshot_manifest(
         &mut paths,
         observation,
     )?;
-    paths.sort_unstable();
+    paths.files.sort_unstable();
+    paths.directories.sort_unstable();
+    paths
+        .symlinks
+        .sort_unstable_by(|left, right| left.path.cmp(&right.path));
     let files = paths
+        .files
         .iter()
         .map(|path| snapshot_file_metadata(path.as_str(), observation))
         .collect::<Result<Vec<_>, _>>()?;
-    collected_snapshot_manifest(files)
+    collected_snapshot_manifest(files, paths.directories, paths.symlinks)
 }
 
 fn collected_snapshot_manifest(
     files: Vec<SandboxWorkspaceSnapshotFile>,
+    directories: Vec<String>,
+    symlinks: Vec<SandboxWorkspaceSnapshotSymlink>,
 ) -> Result<SandboxWorkspaceSnapshotManifest, String> {
     let manifest = SandboxWorkspaceSnapshotManifest {
         schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.to_string(),
         files,
+        directories,
+        symlinks,
     };
-    if manifest.files.is_empty() {
+    if manifest.is_empty() {
         return Ok(manifest);
     }
     canonical_snapshot_manifest_bytes(&manifest)?;
     Ok(manifest)
 }
 
+#[derive(Default)]
+struct SnapshotPaths {
+    files: Vec<String>,
+    directories: Vec<String>,
+    symlinks: Vec<SandboxWorkspaceSnapshotSymlink>,
+}
+
 fn collect_snapshot_paths(
     directory: &Path,
     prefix: &str,
     protected_paths: &BTreeSet<&str>,
-    paths: &mut Vec<String>,
+    paths: &mut SnapshotPaths,
     observation: &mut SnapshotObservation,
 ) -> Result<(), String> {
     for entry in fs::read_dir(directory)
@@ -711,10 +753,25 @@ fn collect_snapshot_paths(
         validate_snapshot_path(relative.as_str())?;
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|error| format!("inspect workspace entry failed: {error}"))?;
+        if protected_paths.contains(relative.as_str()) {
+            validate_registered_input_file(&metadata)?;
+            continue;
+        }
         if metadata.file_type().is_symlink() {
-            return Err("workspace snapshot does not support symlinks".to_string());
+            let target = fs::read_link(entry.path())
+                .map_err(|error| format!("read workspace link failed: {error}"))?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "workspace link target is not valid UTF-8".to_string())?;
+            validate_snapshot_symlink_target(&target)?;
+            paths.symlinks.push(SandboxWorkspaceSnapshotSymlink {
+                path: relative,
+                target,
+            });
+            continue;
         }
         if metadata.is_dir() {
+            paths.directories.push(relative.clone());
             collect_snapshot_paths(
                 entry.path().as_path(),
                 relative.as_str(),
@@ -727,11 +784,7 @@ fn collect_snapshot_paths(
         if !metadata.is_file() {
             return Err("workspace snapshot does not support this node type".to_string());
         }
-        if protected_paths.contains(relative.as_str()) {
-            validate_registered_input_file(&metadata)?;
-            continue;
-        }
-        paths.push(relative);
+        paths.files.push(relative);
     }
     Ok(())
 }
@@ -800,6 +853,7 @@ fn write_snapshot_frame(
     observation: &mut SnapshotObservation,
 ) -> Result<(), String> {
     let manifest_bytes = canonical_snapshot_manifest_bytes(manifest)?;
+    verify_snapshot_nodes(manifest)?;
     let manifest_length = u32::try_from(manifest_bytes.len())
         .map_err(|_| "snapshot manifest is too large".to_string())?;
     let mut stdout = std::io::stdout().lock();
@@ -905,7 +959,13 @@ fn canonical_snapshot_manifest_bytes(
 }
 
 fn validate_snapshot_manifest(manifest: &SandboxWorkspaceSnapshotManifest) -> Result<(), String> {
-    if manifest.schema != SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA || manifest.files.is_empty() {
+    if !matches!(
+        manifest.schema.as_str(),
+        SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA | SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1
+    ) || manifest.is_empty()
+        || (manifest.schema == SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1
+            && (!manifest.directories.is_empty() || !manifest.symlinks.is_empty()))
+    {
         return Err("snapshot manifest is invalid".to_string());
     }
     let mut previous = None;
@@ -926,6 +986,70 @@ fn validate_snapshot_manifest(manifest: &SandboxWorkspaceSnapshotManifest) -> Re
             .checked_add(file.size_bytes)
             .ok_or_else(|| "snapshot expanded size overflow".to_string())?;
         previous = Some(file.path.as_str());
+    }
+    let mut paths = std::collections::BTreeMap::new();
+    for file in &manifest.files {
+        paths.insert(file.path.as_str(), false);
+    }
+    let mut previous = None;
+    for directory in &manifest.directories {
+        validate_snapshot_path(directory)?;
+        if previous.is_some_and(|value: &str| value >= directory.as_str())
+            || paths.insert(directory, true).is_some()
+        {
+            return Err("snapshot manifest paths are not sorted and unique".into());
+        }
+        previous = Some(directory.as_str());
+    }
+    let mut previous = None;
+    for link in &manifest.symlinks {
+        validate_snapshot_path(&link.path)?;
+        validate_snapshot_symlink_target(&link.target)?;
+        if previous.is_some_and(|value: &str| value >= link.path.as_str())
+            || paths.insert(&link.path, false).is_some()
+        {
+            return Err("snapshot manifest paths are not sorted and unique".into());
+        }
+        previous = Some(link.path.as_str());
+    }
+    for path in paths.keys() {
+        for (index, _) in path.match_indices('/') {
+            if paths.get(&path[..index]) == Some(&false) {
+                return Err("snapshot manifest parent is not a directory".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_symlink_target(target: &str) -> Result<(), String> {
+    // A target is literal link data, not a workspace path to resolve.
+    if target.is_empty() || target.len() > SNAPSHOT_PATH_MAX_BYTES || target.contains('\0') {
+        return Err("snapshot symlink target is invalid".into());
+    }
+    Ok(())
+}
+
+fn verify_snapshot_nodes(manifest: &SandboxWorkspaceSnapshotManifest) -> Result<(), String> {
+    for directory in &manifest.directories {
+        let metadata = fs::symlink_metadata(workspace_root()?.join(directory))
+            .map_err(|_| "workspace snapshot source changed".to_string())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("workspace snapshot source changed".into());
+        }
+    }
+    for link in &manifest.symlinks {
+        let path = workspace_root()?.join(&link.path);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| "workspace snapshot source changed".to_string())?;
+        if !metadata.file_type().is_symlink()
+            || fs::read_link(path)
+                .map_err(|_| "workspace snapshot source changed".to_string())?
+                .as_os_str()
+                != std::ffi::OsStr::new(&link.target)
+        {
+            return Err("workspace snapshot source changed".into());
+        }
     }
     Ok(())
 }
@@ -1009,24 +1133,35 @@ fn restore_snapshot_file(
     expected: &SandboxWorkspaceSnapshotFile,
     created_directories: &mut BTreeSet<PathBuf>,
 ) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::MetadataExt;
 
     let target = workspace_root()?.join(expected.path.as_str());
     let parent = target
         .parent()
         .ok_or_else(|| "snapshot target has no parent".to_string())?;
-    create_snapshot_directories(parent, created_directories)?;
-    match fs::symlink_metadata(target.as_path()) {
-        Ok(_) => return Err("snapshot restore target already exists".to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("inspect snapshot restore target failed: {error}")),
+    let parent = create_snapshot_directories(parent, created_directories)?;
+    let name = CString::new(expected.path.rsplit('/').next().unwrap())
+        .map_err(|_| "snapshot restore target is invalid".to_string())?;
+    // SAFETY: the parent descriptor is held and every component was opened
+    // without following links. O_EXCL also rejects an existing final node.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(format!(
+            "create snapshot restore target failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
-    let mut output = File::options()
-        .write(true)
-        .create_new(true)
-        .open(target.as_path())
-        .map_err(|error| format!("create snapshot restore target failed: {error}"))?;
+    // SAFETY: openat returned a new, owned descriptor.
+    let mut output = unsafe { File::from_raw_fd(descriptor) };
     let mode = if expected.executable { 0o755 } else { 0o644 };
     if unsafe { libc::fchmod(output.as_raw_fd(), mode) } != 0 {
         return Err(format!(
@@ -1057,8 +1192,8 @@ fn restore_snapshot_file(
     {
         return Err("snapshot restore file integrity mismatch".to_string());
     }
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
+    parent
+        .sync_all()
         .map_err(|error| format!("sync snapshot restore directory failed: {error}"))
 }
 
@@ -1075,44 +1210,138 @@ fn restore_snapshot_file(
 fn create_snapshot_directories(
     target: &Path,
     created_directories: &mut BTreeSet<PathBuf>,
-) -> Result<(), String> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+) -> Result<File, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let root = workspace_root()?;
     if !target.starts_with(root) {
         return Err("snapshot restore parent escaped its workspace".to_string());
     }
     let mut current = root.to_path_buf();
+    let mut directory = File::options()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(root)
+        .map_err(|error| format!("open snapshot workspace failed: {error}"))?;
     for component in target
         .strip_prefix(root)
         .map_err(|_| "snapshot restore parent escaped its workspace".to_string())?
         .components()
     {
+        let std::path::Component::Normal(component) = component else {
+            return Err("snapshot restore parent is invalid".into());
+        };
         current.push(component);
-        match fs::symlink_metadata(current.as_path()) {
-            Ok(metadata)
-                if metadata.is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && metadata.uid() == 0
-                    && metadata.gid() == 0
-                    && metadata.mode() & 0o7777 == 0o755 => {}
-            Ok(_) => return Err("snapshot restore parent contains an unsupported node".to_string()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(current.as_path())
-                    .map_err(|error| format!("create snapshot restore parent failed: {error}"))?;
-                fs::set_permissions(current.as_path(), fs::Permissions::from_mode(0o755))
-                    .map_err(|error| format!("protect snapshot restore parent failed: {error}"))?;
-                let metadata = fs::symlink_metadata(current.as_path())
-                    .map_err(|error| format!("inspect snapshot restore parent failed: {error}"))?;
-                if metadata.uid() != 0 || metadata.gid() != 0 {
-                    return Err("snapshot restore parent initial ownership is invalid".to_string());
-                }
-                created_directories.insert(current.clone());
+        let name = CString::new(component.as_bytes())
+            .map_err(|_| "snapshot restore parent is invalid".to_string())?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        // SAFETY: name is a single validated component and directory is held open.
+        let mut descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        let mut created = false;
+        if descriptor < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+        {
+            // SAFETY: creation is relative to the same anchored parent.
+            if unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) } != 0 {
+                return Err(format!(
+                    "create snapshot restore parent failed: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
-            Err(error) => return Err(format!("inspect snapshot restore parent failed: {error}")),
+            created = true;
+            // SAFETY: the new directory is reopened without following a link.
+            descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
         }
+        if descriptor < 0 {
+            return Err("snapshot restore parent contains an unsupported node".into());
+        }
+        // SAFETY: openat returned a new, owned descriptor.
+        let next = unsafe { File::from_raw_fd(descriptor) };
+        if created {
+            // SAFETY: permissions apply only to this newly created descriptor.
+            if unsafe { libc::fchmod(next.as_raw_fd(), 0o755) } != 0 {
+                return Err("protect snapshot restore parent failed".into());
+            }
+            created_directories.insert(current.clone());
+        }
+        let metadata = next
+            .metadata()
+            .map_err(|error| format!("inspect snapshot restore parent failed: {error}"))?;
+        if !metadata.is_dir()
+            || metadata.uid() != 0
+            || metadata.gid() != 0
+            || metadata.mode() & 0o7777 != 0o755
+        {
+            return Err("snapshot restore parent contains an unsupported node".into());
+        }
+        directory = next;
     }
-    Ok(())
+    Ok(directory)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_snapshot_directories(
+    _target: &Path,
+    _created_directories: &mut BTreeSet<PathBuf>,
+) -> Result<File, String> {
+    Err("sandbox helper requires Linux".into())
+}
+
+#[cfg(target_os = "linux")]
+fn restore_snapshot_symlink(
+    link: &SandboxWorkspaceSnapshotSymlink,
+    created_directories: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+
+    let target_path = workspace_root()?.join(&link.path);
+    let parent = create_snapshot_directories(
+        target_path.parent().ok_or("snapshot link has no parent")?,
+        created_directories,
+    )?;
+    let name = CString::new(link.path.rsplit('/').next().unwrap())
+        .map_err(|_| "snapshot link path is invalid")?;
+    let target =
+        CString::new(link.target.as_str()).map_err(|_| "snapshot link target is invalid")?;
+    let identity = workspace::context()?;
+    // SAFETY: link data is not resolved; the destination is one component
+    // beneath a held no-follow parent descriptor. Existing nodes are rejected.
+    if unsafe { libc::symlinkat(target.as_ptr(), parent.as_raw_fd(), name.as_ptr()) } != 0 {
+        return Err(format!(
+            "create snapshot restore link failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: AT_SYMLINK_NOFOLLOW assigns the link itself, never its target.
+    if unsafe {
+        libc::fchownat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            identity.uid,
+            identity.gid,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(format!(
+            "assign snapshot restore link ownership failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    parent
+        .sync_all()
+        .map_err(|error| format!("sync snapshot restore directory failed: {error}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restore_snapshot_symlink(
+    _link: &SandboxWorkspaceSnapshotSymlink,
+    _created_directories: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    Err("sandbox helper requires Linux".into())
 }
 
 #[cfg(target_os = "linux")]
@@ -1124,7 +1353,14 @@ fn seal_snapshot_directories(directories: &BTreeSet<PathBuf>) -> Result<(), Stri
     // Existing directories can contain protected inputs even when an ordinary
     // restored output shares their parent. Only seal directories we created.
     for path in directories.iter().rev() {
-        let metadata = fs::symlink_metadata(path.as_path())
+        let relative = path
+            .strip_prefix(workspace_root()?)
+            .map_err(|_| "snapshot restore parent escaped its workspace")?
+            .to_str()
+            .ok_or("snapshot restore parent is invalid")?;
+        let directory = open_artifact_beneath(relative)?;
+        let metadata = directory
+            .metadata()
             .map_err(|error| format!("inspect snapshot restore parent failed: {error}"))?;
         if !metadata.is_dir()
             || metadata.file_type().is_symlink()
@@ -1134,8 +1370,6 @@ fn seal_snapshot_directories(directories: &BTreeSet<PathBuf>) -> Result<(), Stri
         {
             return Err("snapshot restore parent final ownership is invalid".to_string());
         }
-        let directory = File::open(path.as_path())
-            .map_err(|error| format!("open snapshot restore parent failed: {error}"))?;
         if unsafe { libc::fchown(directory.as_raw_fd(), identity.uid, identity.gid) } != 0 {
             return Err(format!(
                 "assign snapshot restore parent ownership failed: {}",
@@ -2604,6 +2838,8 @@ mod tests {
             let frame = |files: &[(&str, &[u8], bool)]| {
                 let manifest = SandboxWorkspaceSnapshotManifest {
                     schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+                    directories: vec![],
+                    symlinks: vec![],
                     files: files
                         .iter()
                         .map(|(path, bytes, executable)| SandboxWorkspaceSnapshotFile {
@@ -2684,6 +2920,64 @@ mod tests {
                 assert_eq!(metadata.gid(), 0, "protected parent {parent}");
             }
             assert_eq!(fs::metadata(root.join("reports")).unwrap().uid(), AGENT_UID);
+            let links = SandboxWorkspaceSnapshotManifest {
+                schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+                files: vec![],
+                directories: vec!["empty".into(), "links".into()],
+                symlinks: [
+                    ("inputs/exact.txt", "/etc/hostname"),
+                    ("links/broken", "missing"),
+                    ("links/cycle-a", "cycle-b"),
+                    ("links/cycle-b", "cycle-a"),
+                    ("links/external", "/etc/passwd"),
+                ]
+                .into_iter()
+                .map(|(path, target)| SandboxWorkspaceSnapshotSymlink {
+                    path: path.into(),
+                    target: target.into(),
+                })
+                .collect(),
+            };
+            let metadata = canonical_snapshot_manifest_bytes(&links).unwrap();
+            let mut metadata_frame = (metadata.len() as u32).to_be_bytes().to_vec();
+            metadata_frame.extend_from_slice(&metadata);
+            restore_snapshot_frame(&mut std::io::Cursor::new(metadata_frame), &inventory).unwrap();
+            assert!(root.join("empty").is_dir());
+            assert_eq!(
+                fs::read(root.join("inputs/exact.txt")).unwrap(),
+                b"current original"
+            );
+            for link in links.symlinks.iter().skip(1) {
+                let path = root.join(&link.path);
+                assert_eq!(fs::read_link(&path).unwrap(), PathBuf::from(&link.target));
+                assert_eq!(fs::symlink_metadata(path).unwrap().uid(), AGENT_UID);
+            }
+            // Destination parents are opened component-by-component without
+            // following an existing symlink, including for metadata-only nodes.
+            let outside = root.parent().unwrap().join("outside");
+            fs::create_dir(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("escape-parent")).unwrap();
+            let mut created = BTreeSet::new();
+            let escaped = SandboxWorkspaceSnapshotFile {
+                path: "escape-parent/output.txt".into(),
+                size_bytes: 0,
+                sha256: format!("sha256:{:x}", Sha256::digest(b"")),
+                executable: false,
+            };
+            assert!(restore_snapshot_file(&mut &b""[..], &escaped, &mut created).is_err());
+            assert!(
+                create_snapshot_directories(&root.join("escape-parent/empty"), &mut created)
+                    .is_err()
+            );
+            assert!(restore_snapshot_symlink(
+                &SandboxWorkspaceSnapshotSymlink {
+                    path: "escape-parent/link".into(),
+                    target: "/etc/passwd".into(),
+                },
+                &mut created
+            )
+            .is_err());
+            assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
             let repaired =
                 collect_snapshot_manifest(&inventory, &mut SnapshotObservation::default()).unwrap();
             assert_eq!(
@@ -2739,7 +3033,9 @@ mod tests {
     fn snapshot_manifest_requires_canonical_non_overlapping_paths() {
         let hash = format!("sha256:{}", "a".repeat(64));
         let manifest = SandboxWorkspaceSnapshotManifest {
-            schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.to_string(),
+            schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA_V1.to_string(),
+            directories: vec![],
+            symlinks: vec![],
             files: vec![SandboxWorkspaceSnapshotFile {
                 path: "report.txt".to_string(),
                 size_bytes: 0,
@@ -2767,10 +3063,81 @@ mod tests {
 
     #[test]
     fn empty_collected_workspace_has_no_snapshot_frame() {
-        let manifest = collected_snapshot_manifest(Vec::new()).expect("empty workspace");
+        let manifest = collected_snapshot_manifest(Vec::new(), Vec::new(), Vec::new())
+            .expect("empty workspace");
 
         assert!(manifest.files.is_empty());
         assert!(canonical_snapshot_manifest_bytes(&manifest).is_err());
+    }
+
+    #[test]
+    fn snapshot_node_paths_preserve_directory_ancestors_and_reject_link_traversal() {
+        let mut manifest = SandboxWorkspaceSnapshotManifest {
+            schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            files: vec![],
+            directories: vec!["folder".into(), "folder/empty".into()],
+            symlinks: vec![SandboxWorkspaceSnapshotSymlink {
+                path: "folder/link".into(),
+                target: "../../outside".into(),
+            }],
+        };
+        assert!(canonical_snapshot_manifest_bytes(&manifest).is_ok());
+        manifest.directories.push("folder/link/child".into());
+        assert!(canonical_snapshot_manifest_bytes(&manifest).is_err());
+        manifest.directories.pop();
+        manifest.symlinks[0].path = "folder".into();
+        assert!(canonical_snapshot_manifest_bytes(&manifest).is_err());
+        manifest.symlinks[0].path = "folder/link".into();
+        manifest.symlinks[0].target = "bad\0target".into();
+        assert!(canonical_snapshot_manifest_bytes(&manifest).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_scan_preserves_literal_links_without_reading_their_targets() {
+        let root = std::env::temp_dir().join(format!(
+            "snapshot-links-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("empty")).unwrap();
+        for (path, target) in [
+            ("external", "/etc/passwd"),
+            ("broken", "missing"),
+            ("cycle-a", "cycle-b"),
+            ("cycle-b", "cycle-a"),
+        ] {
+            std::os::unix::fs::symlink(target, root.join(path)).unwrap();
+        }
+        let mut paths = SnapshotPaths::default();
+        let mut observation = SnapshotObservation::default();
+        let result =
+            collect_snapshot_paths(&root, "", &BTreeSet::new(), &mut paths, &mut observation);
+        fs::remove_dir_all(&root).unwrap();
+        result.unwrap();
+        assert!(paths.files.is_empty());
+        assert_eq!(paths.directories, ["empty"]);
+        paths
+            .symlinks
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(
+            paths
+                .symlinks
+                .iter()
+                .map(|link| (link.path.as_str(), link.target.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("broken", "missing"),
+                ("cycle-a", "cycle-b"),
+                ("cycle-b", "cycle-a"),
+                ("external", "/etc/passwd")
+            ]
+        );
+        assert_eq!(observation.source_read_bytes, 0);
     }
 
     #[cfg(target_os = "linux")]
@@ -2956,7 +3323,7 @@ mod tests {
             operation_id: Some("synthetic-observation".into()),
             ..Default::default()
         };
-        let mut paths = Vec::new();
+        let mut paths = SnapshotPaths::default();
         let result =
             collect_snapshot_paths(&root, "", &BTreeSet::new(), &mut paths, &mut observation);
         fs::remove_file(root.join("nested/second")).unwrap();
@@ -2964,8 +3331,9 @@ mod tests {
         fs::remove_dir(root.join("nested")).unwrap();
         fs::remove_dir(root).unwrap();
         result.unwrap();
-        paths.sort();
-        assert_eq!(paths, ["first", "nested/second"]);
+        paths.files.sort();
+        assert_eq!(paths.files, ["first", "nested/second"]);
+        assert_eq!(paths.directories, ["nested"]);
         assert_eq!(observation.scanned_entries, 3);
     }
 

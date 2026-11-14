@@ -246,5 +246,7 @@ class _ObservedLoader:
         await self.group.set_live_run(run["agentRunId"] if run is not None and run["status"] in {"queued", "running"} else None)
         return state
 
-    async def live(self, run):
-        return await self.group.memo("live", lambda: self.original.live(run), identity=run)
+    async def live(self, run, cursor=None):
+        # Cursors belong to each connected reader. Sharing a complete live
+        # snapshot here would restore full Redis reads for every publication.
+        return await self.original.live(run, cursor)

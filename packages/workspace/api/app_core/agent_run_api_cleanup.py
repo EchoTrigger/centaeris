@@ -139,7 +139,7 @@ def _purge_payloads(operations, session):
     try:
         for operation in operations:
             prefix = f"workspace-agent:agent-run:{{{operation.agentRunId}}}"
-            transient.delete(f"{prefix}:signals", f"{prefix}:live:text", f"{prefix}:live:meta")
+            transient.delete(f"{prefix}:signals", f"{prefix}:live:text", f"{prefix}:live:meta", f"{prefix}:live:reasoning")
     finally:
         transient.close()
     representations = models.DerivedRepresentation.objects.filter(ownerKind="artifact", ownerId__in=artifact_ids)

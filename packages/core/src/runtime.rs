@@ -334,7 +334,9 @@ impl<
         let message_handler = MessageHandler::new(MessageHandlerConfig {
             max_message_chars: config.max_message_chars,
         });
-        let tools_port = tools_port.with_external_context_store(Arc::new(store.clone()));
+        let tools_port = tools_port
+            .with_external_context_store(Arc::new(store.clone()))
+            .with_model_input_image_store(Arc::new(store.clone()));
         let prompt_compaction_config = PromptCompactionConfig {
             model_context_tokens: config.model_context_tokens,
             model_max_output_tokens: config.model_max_output_tokens,
@@ -520,7 +522,20 @@ impl<
         &self,
         binding: &SubagentWorkPacketRuntimeBindingV1,
     ) -> Result<(), String> {
-        binding.validate_tool_contracts(&self.tools_port)
+        binding.validate_tool_contracts(&self.tools_port)?;
+        self.tools_port.freeze_dynamic_tool_catalogs();
+        Ok(())
+    }
+
+    /// Resolves missing packet contracts once, then freezes delegated authority.
+    pub async fn prepare_subagent_tool_contracts(
+        &self,
+        binding: &SubagentWorkPacketRuntimeBindingV1,
+    ) -> Result<(), String> {
+        if binding.validate_tool_contracts(&self.tools_port).is_err() {
+            self.tools_port.refresh_dynamic_tool_catalogs().await?;
+        }
+        self.validate_subagent_tool_contracts(binding)
     }
 
     pub fn run_session_start_hook(
@@ -649,20 +664,7 @@ impl<
         )?;
         Ok(
             crate::extension::composition::AgentCompositionEnvironmentV1 {
-                tool_contracts: {
-                    let mut contracts = tool_projection::build_generate_tool_contracts(
-                        self.tools_port.dynamic_tool_registry(),
-                        self.config.allowed_tools.as_deref(),
-                        self.tools_port.execution_host_kind(),
-                    )?;
-                    if self.config.question_input
-                        == question::QuestionInputCapability::PersistentResponses
-                        && self.config.allowed_tools.is_none()
-                    {
-                        contracts.push(question::tool_contract());
-                    }
-                    contracts
-                },
+                tool_contracts: self.model_tool_contracts()?,
                 skill_catalog_digest,
                 plugin_activation_digest,
                 hook_composition_digest: self.lifecycle_hooks.composition_digest()?,
@@ -671,6 +673,27 @@ impl<
                 model_binding_override: self.config.resolved_model_binding.clone(),
             },
         )
+    }
+
+    fn model_tool_contracts(&self) -> Result<Vec<crate::tool::ToolContract>, String> {
+        self.model_tool_contracts_for(&self.tools_port)
+    }
+
+    fn model_tool_contracts_for(
+        &self,
+        tools: &ToolLayer,
+    ) -> Result<Vec<crate::tool::ToolContract>, String> {
+        let mut contracts = tool_projection::build_generate_tool_contracts(
+            tools.dynamic_tool_registry().as_ref(),
+            self.config.allowed_tools.as_deref(),
+            self.tools_port.execution_host_kind(),
+        )?;
+        if self.config.question_input == question::QuestionInputCapability::PersistentResponses
+            && self.config.allowed_tools.is_none()
+        {
+            contracts.push(question::tool_contract());
+        }
+        Ok(contracts)
     }
 }
 

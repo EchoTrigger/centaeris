@@ -1408,6 +1408,7 @@ impl<
         session_id: &str,
         call: ToolCallEnvelope,
         _session: &SessionStateSnapshot,
+        execution_tools: &ToolLayer,
     ) -> Result<PreparedToolCall, String> {
         let pre_tool = self.run_pre_tool_use_hook(
             session_id,
@@ -1438,8 +1439,11 @@ impl<
             })?;
         }
 
-        let permission = self
-            .evaluate_tool_permission_decision(call.name.as_str(), Some(call.args_json.as_str()));
+        let permission = self.evaluate_tool_permission_decision_with_tools(
+            call.name.as_str(),
+            Some(call.args_json.as_str()),
+            execution_tools,
+        );
         let permission_hook =
             self.run_permission_request_hook(session_id, call.name.as_str(), &permission)?;
         contexts.extend(lifecycle_hook_context_texts(&permission_hook));
@@ -1506,6 +1510,7 @@ impl<
             None,
             stream_sink,
             None,
+            None,
         )
         .await
     }
@@ -1523,7 +1528,9 @@ impl<
         agent_run_identity: Option<&RuntimeAgentRunIdentityV1>,
         mut stream_sink: Option<&mut (dyn FnMut(TurnUpdate) + Send + '_)>,
         tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
+        execution_tools: Option<&ToolLayer>,
     ) -> Result<ToolExecutionBatch, String> {
+        let execution_tools = execution_tools.unwrap_or(&self.tools_port);
         let mut execution_facts =
             Self::load_tool_execution_facts(&self.runtime_store, session_id, turn_id)?;
         let mut indexed_reports: Vec<(usize, ToolExecutionResult)> = vec![];
@@ -1546,7 +1553,11 @@ impl<
         }
 
         for (index, call) in generate_result.tool_calls.into_iter().enumerate() {
-            if !self.tool_is_projected_for_execution(session, call.name.as_str())? {
+            if !self.tool_is_projected_for_execution(
+                session,
+                call.name.as_str(),
+                execution_tools,
+            )? {
                 return Err(format!(
                     "tool call is not permitted by the projected tool policy: {}",
                     call.name
@@ -1555,9 +1566,7 @@ impl<
             let original_call = call.clone();
             model_calls_by_id.insert(original_call.id.clone(), original_call.clone());
             if let Some(intent) = execution_facts.intents.get(call.id.as_str()).cloned() {
-                let contract = self
-                    .tools_port
-                    .tool_contract(intent.source_tool_name.as_str())?;
+                let contract = execution_tools.tool_contract(intent.source_tool_name.as_str())?;
                 let provider_id = contract
                     .provider_id
                     .as_deref()
@@ -1595,7 +1604,7 @@ impl<
                     lifecycle_hook_contexts.extend(receipt.pre_hook_contexts.clone());
                     pre_hook_contexts_by_id
                         .insert(call.id.clone(), receipt.pre_hook_contexts.clone());
-                    self.tools_port.consume_tool_execution_outputs(
+                    execution_tools.consume_tool_execution_outputs(
                         &effective_call.id,
                         &tool_execution_receipt_event_id(session_id, turn_id, &effective_call.id),
                     );
@@ -1622,13 +1631,16 @@ impl<
                 indexed_reports.push((index, report));
                 continue;
             }
-            let (prepared_call, contexts, hook_report) =
-                self.prepare_tool_call_with_lifecycle_hooks(session_id, call, session)?;
+            let (prepared_call, contexts, hook_report) = self
+                .prepare_tool_call_with_lifecycle_hooks(
+                    session_id,
+                    call,
+                    session,
+                    execution_tools,
+                )?;
             lifecycle_hook_contexts.extend(contexts.clone());
             let effective_call = prepared_call.as_ref().unwrap_or(&original_call);
-            let contract = self
-                .tools_port
-                .tool_contract(effective_call.name.as_str())?;
+            let contract = execution_tools.tool_contract(effective_call.name.as_str())?;
             let provider_id = contract
                 .provider_id
                 .as_deref()
@@ -1681,15 +1693,20 @@ impl<
             };
             pre_hook_contexts_by_id.insert(call.id.clone(), contexts);
             lifecycle_hook_calls_by_id.insert(call.id.clone(), call.clone());
-            let has_dynamic_contract = self
-                .tools_port
+            let has_dynamic_contract = execution_tools
                 .dynamic_tool_registry()
                 .find_contract(call.name.as_str())
                 .is_some();
 
             if call.name == "agent" && !has_dynamic_contract {
                 let mut report = self
-                    .execute_agent_tool_call(session_id, turn_id, agent_run_identity, &call)
+                    .execute_agent_tool_call_with_tools(
+                        session_id,
+                        turn_id,
+                        agent_run_identity,
+                        &call,
+                        execution_tools,
+                    )
                     .await;
                 report.parallel_group = Some("serial".to_string());
                 let report = self.persist_tool_execution_receipt(
@@ -1745,7 +1762,7 @@ impl<
         }
 
         if !local_tool_requests.is_empty() {
-            let executor = self.build_tool_batch_executor_async();
+            let executor = self.build_tool_batch_executor_async(session_id, execution_tools);
             let mut progress_sink = |event| {
                 let progress_event =
                     build_runtime_event_tool_progress_event(session_id, turn_id, &event);
@@ -1957,11 +1974,16 @@ impl<
         &self,
         session: &SessionStateSnapshot,
         generate_result: &GenerateResult,
+        execution_tools: &ToolLayer,
     ) -> Result<Option<question::ValidatedQuestionCall>, String> {
         let mut complete_turn_call_count = 0usize;
         let mut question_call = None;
         for call in &generate_result.tool_calls {
-            if !self.tool_is_projected_for_execution(session, call.name.as_str())? {
+            if !self.tool_is_projected_for_execution(
+                session,
+                call.name.as_str(),
+                execution_tools,
+            )? {
                 return Err(format!(
                     "tool call is not permitted by the projected tool policy: {}",
                     call.name
@@ -1971,7 +1993,7 @@ impl<
                 question_call = question::ValidatedQuestionCall::from_result(generate_result)?;
                 continue;
             }
-            if self.tools_port.tool_turn_behavior(call.name.as_str())?
+            if execution_tools.tool_turn_behavior(call.name.as_str())?
                 == ToolTurnBehavior::CompleteTurnOnSuccess
             {
                 complete_turn_call_count = complete_turn_call_count.saturating_add(1);
@@ -2016,9 +2038,11 @@ impl<
         &self,
         session: &SessionStateSnapshot,
         tool_name: &str,
+        execution_tools: &ToolLayer,
     ) -> Result<bool, String> {
         let canonical = canonicalize_tool_name(tool_name).unwrap_or(tool_name);
-        let (definitions, _) = self.build_generate_tool_projection(session)?;
+        let (definitions, _) =
+            self.build_generate_tool_projection_with_tools(session, execution_tools)?;
         Ok(definitions
             .iter()
             .any(|definition| definition.name == canonical))
@@ -2249,7 +2273,7 @@ impl<
     ) -> Result<String, String> {
         let definitions = build_generate_tool_projection(
             session,
-            self.tools_port.dynamic_tool_registry(),
+            self.tools_port.dynamic_tool_registry().as_ref(),
             self.config.allowed_tools.as_deref(),
             self.tools_port.execution_host_kind(),
         )?
@@ -2267,12 +2291,14 @@ impl<
         &self,
         _session: &SessionStateSnapshot,
         tool_calls: &[ToolCallEnvelope],
+        execution_tools: &ToolLayer,
     ) -> HashMap<String, PermissionDecision> {
         let mut preview = HashMap::with_capacity(tool_calls.len());
         for call in tool_calls {
-            let decision = self.evaluate_tool_permission_decision(
+            let decision = self.evaluate_tool_permission_decision_with_tools(
                 call.name.as_str(),
                 Some(call.args_json.as_str()),
+                execution_tools,
             );
             preview.insert(call.id.clone(), decision);
         }
@@ -2284,15 +2310,23 @@ impl<
         tool_name: &str,
         args_json: Option<&str>,
     ) -> PermissionDecision {
+        self.evaluate_tool_permission_decision_with_tools(tool_name, args_json, &self.tools_port)
+    }
+
+    fn evaluate_tool_permission_decision_with_tools(
+        &self,
+        tool_name: &str,
+        args_json: Option<&str>,
+        execution_tools: &ToolLayer,
+    ) -> PermissionDecision {
         let mut request =
             ToolPermissionRequest::new(tool_name.to_string(), args_json.map(ToString::to_string));
         if canonicalize_tool_name(tool_name) == Some("bash") {
-            if let Some(workspace_root) = self.tools_port.cwd() {
+            if let Some(workspace_root) = execution_tools.cwd() {
                 request = request.with_bash_cwd(workspace_root.to_path_buf());
             }
         }
-        if self
-            .tools_port
+        if execution_tools
             .dynamic_tool_registry()
             .find_contract(tool_name)
             .is_some()
@@ -2302,6 +2336,7 @@ impl<
         evaluate_tool_action(&request)
     }
 
+    #[cfg(test)]
     pub(super) async fn execute_agent_tool_call(
         &self,
         session_id: &str,
@@ -2309,9 +2344,33 @@ impl<
         agent_run_identity: Option<&RuntimeAgentRunIdentityV1>,
         call: &ToolCallEnvelope,
     ) -> ToolExecutionResult {
+        self.execute_agent_tool_call_with_tools(
+            session_id,
+            turn_id,
+            agent_run_identity,
+            call,
+            &self.tools_port,
+        )
+        .await
+    }
+
+    async fn execute_agent_tool_call_with_tools(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        agent_run_identity: Option<&RuntimeAgentRunIdentityV1>,
+        call: &ToolCallEnvelope,
+        execution_tools: &ToolLayer,
+    ) -> ToolExecutionResult {
         let started_at_ms = now_ms();
         let result = self
-            .build_and_schedule_agent_run(session_id, turn_id, agent_run_identity, call)
+            .build_and_schedule_agent_run(
+                session_id,
+                turn_id,
+                agent_run_identity,
+                call,
+                execution_tools,
+            )
             .await;
         match result {
             Ok(output) => ToolExecutionResult {
@@ -2354,6 +2413,7 @@ impl<
         turn_id: &str,
         agent_run_identity: Option<&RuntimeAgentRunIdentityV1>,
         call: &ToolCallEnvelope,
+        execution_tools: &ToolLayer,
     ) -> Result<Value, crate::session::store::job::JobStoreError> {
         let agent_run_identity = agent_run_identity
             .ok_or_else(|| "Agent requires the active runtime AgentRun identity".to_string())?;
@@ -2362,7 +2422,7 @@ impl<
             .map_err(|err| format!("Agent args_json is invalid: {err}"))?
             .validate()?;
         let parent_tool_contracts = build_generate_tool_contracts(
-            self.tools_port.dynamic_tool_registry(),
+            execution_tools.dynamic_tool_registry().as_ref(),
             self.config.allowed_tools.as_deref(),
             self.tools_port.execution_host_kind(),
         )?;
