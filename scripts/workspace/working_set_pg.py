@@ -355,6 +355,23 @@ def percentile(values, fraction):
     return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)] if ordered else None
 
 
+def measurement_start(output, ready, wait_for_start):
+    pending = output / "setup-ready.pending"
+    with pending.open("x", encoding="utf-8") as stream:
+        json.dump(ready, stream, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(pending, output / "setup-ready.json")
+    if not wait_for_start:
+        return "notRequested"
+    deadline = time.monotonic() + 1200
+    while time.monotonic() < deadline:
+        if (output / "start.request").exists():
+            return "signalled"
+        time.sleep(0.25)
+    raise TimeoutError("measurement start signal deadline")
+
+
 def compare(paths):
     arms = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
     if len(arms) != 4 or {(arm["version"], arm["history"]) for arm in arms} != {
@@ -422,6 +439,12 @@ def run(args):
     try:
         report["stage"] = "historySetup"
         session = seed_history(driver, args.history, args.model_control, setup)
+        report["stage"] = "measurementStart"
+        report["measurementStart"] = measurement_start(output, {
+            "schema": "runtime.working_set.setup_ready.v1", "sessionId": session,
+            "sourceRevision": driver.manifest["sourceRevision"], "setup": setup,
+            "waitForStart": args.wait_for_start,
+        }, args.wait_for_start)
         release = ReleaseControl(driver)
         server = ThreadingHTTPServer(("127.0.0.1", 0), release.handler())
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -472,6 +495,7 @@ def main():
     execute.add_argument("--history", choices=HISTORIES, type=int, required=True)
     execute.add_argument("--model-control", required=True)
     execute.add_argument("--saturation", action="store_true")
+    execute.add_argument("--wait-for-start", action="store_true")
     args = parser.parse_args()
     if args.command == "plan":
         value = plan()
