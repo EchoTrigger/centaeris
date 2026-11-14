@@ -39,7 +39,7 @@
 .shWsName, .shAccountMail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shAccountMail { flex: 1; }
 .shWsMenuPositioner { z-index: 65; }
-.shWsMenuPopover { width: min(calc(var(--workspace-sidebar-width) - 20px), calc(100vw - 20px)); padding: 4px; border:0; border-radius: 7px; background:var(--surface-raised); box-shadow: 0 6px 18px rgba(0, 0, 0, .14); font-size: 14px; outline: none; }
+.shWsMenuPopover { width: min(calc(var(--workspace-sidebar-width) - 20px), calc(100vw - 20px)); padding: 4px; border:0; border-radius: 7px; background:var(--surface-raised); box-shadow:var(--workspace-floating-shadow); font-size: 14px; outline: none; }
 .shWsMenuItem { display: flex; width: 100%; min-height: 30px; align-items: center; gap: 9px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--on-surface); font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
 .shWsMenuItem[data-highlighted], .shWsMenuItem[data-popup-open] { outline: 1px solid var(--outline); font-weight: 500; }
 .shWsMenuItem[data-disabled] { opacity: .55; cursor: default; }
@@ -159,7 +159,7 @@
 .shProjectAction svg { width: 13px; height: 13px; }
 .shProject .workspaceSessionList.isProject { padding-left: 22px; }
 
-.shProjectCreateDialog { position: relative; display: grid; width: min(360px, calc(100vw - 32px)); gap: 14px; border:0; border-radius: 14px; background:var(--surface-raised); padding: 18px 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, .24); }
+.shProjectCreateDialog { position: relative; display: grid; width: min(360px, calc(100vw - 32px)); gap: 14px; border:0; border-radius: 14px; background:var(--surface-raised); padding: 18px 20px; box-shadow:var(--workspace-floating-shadow); }
 .shProjectCreateDialog > header { display: flex; min-height: 24px; align-items: center; justify-content: center; }
 .shProjectCreateDialog > header > .quietCloseButton { position: absolute; top: 10px; left: 10px; }
 .shProjectCreateDialog h2 { margin: 0; color: var(--on-surface); font-size: 18px; line-height: 1.2; }
@@ -209,7 +209,7 @@
 .shNewAgentTile > svg { padding: 13px; border: 1px dashed var(--outline-variant); color: var(--process-text); }
 .shAgentStrip > a.isActive { font-weight: var(--navigation-selected-weight); }
 .shAgentStrip > a:hover, .shAgentStrip > a.isActive { color: var(--on-surface); }
-.shNewAgentTile:hover > svg { box-shadow: 0 3px 10px rgba(0, 0, 0, .08); }
+.shNewAgentTile:hover > svg { box-shadow:none; }
 .shAgentLink small { margin-left: auto; color: var(--process-text); font-size: 10px; }
 .shEmptyHint { margin: 5px 8px; color: var(--process-text); font-size: 12px; }
 .shSidebar .workspaceSessionList { padding: 0; }
@@ -218,7 +218,7 @@
 .shSidebar .workspaceSessionButton:hover, .shSidebar .workspaceSessionButton.isActive { color: var(--on-surface); }
 
 .shPrivateCreateBackdrop { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(20, 20, 20, .56); }
-.shPrivateCreateDialog { display: flex; width: min(1000px, calc(100vw - 48px)); height: min(650px, calc(100vh - 48px)); flex-direction: column; overflow: hidden; border:0; border-radius: 13px; background:var(--surface-raised); box-shadow: 0 28px 90px rgba(0, 0, 0, .3); }
+.shPrivateCreateDialog { display: flex; width: min(1000px, calc(100vw - 48px)); height: min(650px, calc(100vh - 48px)); flex-direction: column; overflow: hidden; border:0; border-radius: 13px; background:var(--surface-raised); box-shadow:var(--workspace-floating-shadow); }
 .shPrivateCreateHeader { display: grid; height: 68px; flex: none; grid-template-columns: 1fr minmax(260px, 300px) 1fr; align-items: center; padding: 0 22px; }
 .shPrivateCreateHeader > div { display: flex; align-items: center; gap: 7px; color: var(--process-text); font-size: 12px; }
 .shPrivateCreateHeader > div > button { margin-right: 5px; }
@@ -237,14 +237,11 @@
 .shPrivateCreateContent > h2 { display: flex; align-items: center; gap: 6px; margin: 26px 0 12px; color: var(--process-text); font-size: 13px; font-weight: 550; }
 .shPrivateCreateContent > h2 svg { width: 15px; }
 .shPrivateTemplateGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.shPrivateTemplateCard { --template-tint: #edf3ef; min-height: 174px; overflow: hidden; border: 0; border-radius: 10px; background: var(--template-tint); padding: 0; color: var(--on-surface); text-align: left; }
-.shPrivateTemplateCard:nth-child(4n+2) { --template-tint: #edf2f7; }
-.shPrivateTemplateCard:nth-child(4n+3) { --template-tint: #f5f1ec; }
-.shPrivateTemplateCard:nth-child(4n+4) { --template-tint: #f6eeee; }
+.shPrivateTemplateCard { --template-tint:var(--surface-variant); min-height: 174px; overflow: hidden; border: 0; border-radius: 10px; background: var(--template-tint); padding: 0; color: var(--on-surface); text-align: left; }
 .shPrivateTemplateCard > span { display: block; min-height: 67px; padding: 14px 18px 10px; }
 .shPrivateTemplateCard > span > strong { display: block; font-size: 14px; font-weight: 550; }
 .shPrivateTemplateCard > span > small { display: block; margin-top: 3px; color: var(--process-text); font-size: 11px; }
-.shPrivateTemplatePreview { min-height: 108px; margin: 0 18px -14px; border: 1px solid var(--outline-variant); border-radius: 7px 7px 0 0; background: color-mix(in srgb, var(--surface-color) 94%, transparent); padding: 11px 13px; box-shadow: 0 2px 8px rgba(0, 0, 0, .04); }
+.shPrivateTemplatePreview { min-height: 108px; margin: 0 18px -14px; border: 1px solid var(--outline-variant); border-radius: 7px 7px 0 0; background:var(--surface-variant); padding: 11px 13px; box-shadow:none; }
 .shPrivateTemplatePreview > strong { display: block; margin-bottom: 8px; font-size: 10px; font-weight: 600; }
 .shPrivateTemplatePreview > i { display: grid; height: 18px; grid-template-columns: minmax(44px, 1fr) auto; align-items: center; gap: 8px; border-top: 1px solid var(--outline-variant); font-style: normal; }
 .shPrivateTemplatePreview > i > span { display: block; width: 72%; height: 4px; border-radius: 3px; background: color-mix(in srgb, var(--on-surface) 9%, transparent); }
@@ -261,7 +258,7 @@
   border-radius: 16px;
   background: var(--surface-color);
   color: var(--on-surface);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, .05);
+  box-shadow: none;
 }
 .shHomeFollowups { grid-row: 3; width: var(--workspace-draft-width); margin: 10px auto 0; }
 .shQuickActions { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px clamp(7px, 2vw, 20px); }
@@ -377,12 +374,12 @@
 .shAgentSection p { margin: 0; color: var(--on-surface); font-size: 14px; line-height: 1.8; }
 .shAgentSection textarea { width: 100%; min-height: 96px; resize: vertical; border: 1px solid var(--outline-variant); border-radius: 8px; outline: 0; padding: 11px; font: inherit; line-height: 1.7; }
 .shModalBackdrop { position: fixed; z-index: 90; inset: 0; display: grid; min-height: 0; place-items: center; padding: 28px; background: rgba(15, 15, 15, .56); }
-.shAgentCreate { position: relative; display: grid; width: min(720px, calc(100vw - 40px)); max-height: min(880px, calc(100vh - 40px)); gap: 18px; overflow-y: auto; overscroll-behavior: contain; padding: 42px 46px 28px; border-radius: 18px; background:var(--surface-raised); box-shadow: 0 28px 80px rgba(0, 0, 0, .26); }
+.shAgentCreate { position: relative; display: grid; width: min(720px, calc(100vw - 40px)); max-height: min(880px, calc(100vh - 40px)); gap: 18px; overflow-y: auto; overscroll-behavior: contain; padding: 42px 46px 28px; border-radius: 18px; background:var(--surface-raised); box-shadow:var(--workspace-floating-shadow); }
 .shAgentCreate h1 { margin: 0 0 4px; color: var(--on-surface); font-size: 27px; line-height: 1.2; text-align: center; text-wrap: balance; }
 .shModalClose { position: absolute; z-index: 1; top: 14px; left: 14px; }
 .shAgentCreate button:focus-visible, .shAgentCreate input:focus-visible, .shAgentCreate textarea:focus-visible { outline: 1px solid var(--outline); outline-offset: 2px; }
 .shAgentIdentity { display: grid; justify-items: center; gap: 9px; padding-top: 2px; }
-.shAgentHeroMark { width: 112px; height: 112px; border-radius: 24px !important; box-shadow: 0 14px 30px rgba(0, 0, 0, .14); }
+.shAgentHeroMark { width: 112px; height: 112px; border-radius: 24px !important; box-shadow:none; }
 .shAgentAvatarEdit { position: relative; display: grid; border: 0; border-radius: 24px; background: transparent; padding: 0; cursor: pointer; }
 .shAgentAvatarEdit > span:last-child { position: absolute; right: -4px; bottom: -2px; display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--outline-variant); border-radius: 50%; background: var(--surface-color); color: var(--on-surface); }
 .shAgentAvatarEdit > span:last-child svg { width: 13px; height: 13px; }
@@ -473,7 +470,7 @@
 .shQuietButton.isDanger:hover:not(:disabled) { background: var(--danger-button-hover); }
 
 .shWorkspaceChooser { display: grid; min-height: 100vh; place-items: center; padding: 16px; background: var(--surface-variant); }
-.shWorkspaceChooser > section { width: min(340px, 100%); padding: 18px; border:0; border-radius: 10px; background:var(--surface-raised); box-shadow: 0 12px 32px rgba(0, 0, 0, .07); }
+.shWorkspaceChooser > section { width: min(340px, 100%); padding: 18px; border:0; border-radius: 10px; background:var(--surface-raised); box-shadow:var(--workspace-floating-shadow); }
 .shWorkspaceChooser h1 { margin: 0; font-size: 18px; }
 .shWorkspaceChooser p { margin: 5px 0 13px; color: var(--process-text); font-size: 12px; }
 .shWorkspaceChooser nav { display: grid; gap: 2px; }
@@ -515,7 +512,7 @@
 .shWorkspaceRowMenu > summary { display: grid; width: var(--control-height-compact); height: var(--control-height-compact); place-items: center; list-style: none; border-radius: var(--control-radius); color: var(--process-text); cursor: pointer; }
 .shWorkspaceRowMenu > summary::-webkit-details-marker { display: none; }
 .shWorkspaceRowMenu > summary svg { width: 15px; }
-.shWorkspaceRowMenu > div { position: absolute; z-index: 10; top: calc(var(--control-height-compact) + 2px); right: 0; width: 150px; padding: 5px; border:0; border-radius: 8px; background:var(--surface-raised); box-shadow: 0 10px 28px rgba(0, 0, 0, .14); }
+.shWorkspaceRowMenu > div { position: absolute; z-index: 10; top: calc(var(--control-height-compact) + 2px); right: 0; width: 150px; padding: 5px; border:0; border-radius: 8px; background:var(--surface-raised); box-shadow:var(--workspace-floating-shadow); }
 .shWorkspaceRowMenu button { display: block; width: 100%; min-height: var(--control-height-compact); border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 8px; font-size: 13px; text-align: left; }
 .shWorkspaceRowMenu button.isDanger { color: var(--danger); }
 .shWorkspaceInvitationRow { display: grid; min-height: 62px; grid-template-columns: minmax(0, 1fr) 86px 132px auto; align-items: center; gap: 12px; padding: 8px 0; color: var(--process-text); font-size: 12px; }
@@ -526,7 +523,7 @@
 .shWorkspaceSettingsEmpty, .shWorkspaceSettingsState { padding: 32px 4px; color: var(--process-text); font-size: 13px; text-align: center; }
 .shWorkspaceSettingsState.isError { color: var(--danger); }
 .shWorkspaceSettingsState button { display: block; margin: 9px auto 0; border: 0; background: transparent; color: var(--primary-color); }
-.shWorkspaceToast { position: fixed; z-index: 220; right: 24px; bottom: 24px; max-width: min(420px, calc(100vw - 48px)); padding: 10px 13px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--solid-surface); color: var(--solid-text); box-shadow: 0 10px 28px rgba(0, 0, 0, .18); font-size: 12px; }
+.shWorkspaceToast { position: fixed; z-index: 220; right: 24px; bottom: 24px; max-width: min(420px, calc(100vw - 48px)); padding: 10px 13px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--solid-surface); color: var(--solid-text); box-shadow:var(--workspace-floating-shadow); font-size: 12px; }
 .shWorkspaceNotice { margin: 0 0 18px; color: var(--error); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
 
 .themeConfirmDialog.shWorkspaceDialog { width: min(440px, 100%); }

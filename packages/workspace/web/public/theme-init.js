@@ -3,6 +3,7 @@
   const key = "centaeris:theme:v1";
   const root = document.documentElement;
   const system = matchMedia("(prefers-color-scheme: dark)");
+  const backgrounds = { light: "#f7f7f7", dark: "#111111" };
   const normalize = (value) => value === "dark" || value === "light" ? value : "system";
   let saved;
   try { saved = localStorage.getItem(key); } catch { /* Storage may be unavailable. */ }
@@ -15,8 +16,8 @@
     root.style.colorScheme = resolved;
     let meta = document.querySelector('meta[name="theme-color"]');
     if (!meta) { meta = document.createElement("meta"); meta.name = "theme-color"; document.head.append(meta); }
-    meta.content = resolved === "dark" ? "#242424" : "#f5f5f4";
-    root.style.backgroundColor = resolved === "dark" ? "#191919" : "#ffffff";
+    meta.content = backgrounds[resolved];
+    root.style.backgroundColor = backgrounds[resolved];
     dispatchEvent(new Event("centaeris-theme-applied"));
   }
   apply();

@@ -31,6 +31,7 @@
 :root :is([data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="dropdown-menu-content"], [data-slot="popover-content"], [data-slot="select-content"]) {
   background-color: var(--surface-raised);
   border-color: transparent;
+  box-shadow: var(--workspace-floating-shadow);
 }
 :root :is([data-slot="input"], [data-slot="textarea"]) {
   background-color: var(--surface-input);
