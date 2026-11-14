@@ -15,7 +15,6 @@ function storage() {
   return { data, getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, value), removeItem: key => data.delete(key) };
 }
 function deferred<T = unknown>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
-async function until(check) { for (let i = 0; i < 100; i++) { if (check()) return; await new Promise(resolve => setImmediate(resolve)); } assert.fail("controlled request did not reach boundary"); }
 function setup(request, cancel = async () => requested, store = storage()) {
   const operations = new OperationClient(scope, { storage: store, request });
   const control = new SubmissionControl({ operations, scope, storage: store, cancel });
@@ -36,11 +35,12 @@ test("Stop is accepted synchronously during preparation and prevents a first POS
 
 test("Stop before the receipt targets that original acceptance and duplicate cancellation shares one promise", async () => {
   const receipt = deferred(); const cancellation = deferred(); const calls = []; const cancelled = [];
-  const f = setup(async (_path, options) => { calls.push(options?.method || "GET"); return receipt.promise; }, async value => { cancelled.push(value); return cancellation.promise; });
-  f.control.begin(); const sending = submit(f); await until(() => calls.length === 1);
+  const dispatched = deferred<void>(); const cancelling = deferred<void>();
+  const f = setup(async (_path, options) => { calls.push(options?.method || "GET"); dispatched.resolve(); return receipt.promise; }, async value => { cancelled.push(value); cancelling.resolve(); return cancellation.promise; });
+  f.control.begin(); const sending = submit(f); await dispatched.promise;
   await f.control.stop(); assert.equal(f.control.getSnapshot().feedback, "stopRecorded");
   const operationId = f.operations.pending()!.operationId; receipt.resolve(accepted(operationId)); await sending;
-  await until(() => cancelled.length === 1);
+  await cancelling.promise;
   const first = f.control.stop(), second = f.control.stop(); assert.equal(first, second);
   assert.equal(f.control.getSnapshot().feedback, "stopInProgress");
   cancellation.resolve(requested); await first;
@@ -89,9 +89,9 @@ test("persisted stop metadata is strictly versioned and transport failure remain
 });
 
 test("matching terminal before receipt is irreversible and prevents cancellation of a finished Run", async () => {
-  const receipt = deferred(); let cancelled = 0;
-  const f = setup(async () => receipt.promise, async () => { cancelled++; return terminal; });
-  f.control.begin(); const sending = submit(f); await until(() => Boolean(f.operations.pending()));
+  const receipt = deferred(); const dispatched = deferred<void>(); let cancelled = 0;
+  const f = setup(async () => { dispatched.resolve(); return receipt.promise; }, async () => { cancelled++; return terminal; });
+  f.control.begin(); const sending = submit(f); await dispatched.promise;
   await f.control.stop(); f.control.observeTerminal({ ...target, status: "completed", completedAtMs: 123 });
   receipt.resolve(accepted(f.operations.pending()!.operationId)); await sending;
   assert.equal(f.control.getSnapshot().phase, "terminal"); assert.equal(f.control.getSnapshot().terminal.status, "completed");
@@ -165,14 +165,15 @@ test("a current Run may be adopted after presentation has consumed an old pendin
 
 test("separate current-Run controls preserve both pending cancellations and restore only their own target", async () => {
   const store = storage(); const firstResult = deferred(); const secondResult = deferred();
+  const firstCancelling = deferred<void>(); const secondCancelling = deferred<void>();
   const other = { sessionId: "other-session", agentRunId: "other-run" }; const cancelled = [];
   const create = (identity, cancel) => new SubmissionControl({ operations: { pending: () => null, recover: async () => null },
     scope: { ...scope, controlId: JSON.stringify([identity.sessionId, identity.agentRunId]) }, storage: store, cancel });
-  const first = create(target, async value => { cancelled.push(value); return firstResult.promise; });
-  const second = create(other, async value => { cancelled.push(value); return secondResult.promise; });
+  const first = create(target, async value => { cancelled.push(value); firstCancelling.resolve(); return firstResult.promise; });
+  const second = create(other, async value => { cancelled.push(value); secondCancelling.resolve(); return secondResult.promise; });
   first.setTarget(target); const stoppingFirst = first.stop();
   second.setTarget(other); const stoppingSecond = second.stop();
-  await until(() => cancelled.length === 2);
+  await Promise.all([firstCancelling.promise, secondCancelling.promise]);
   assert.deepEqual(cancelled, [target, other]); assert.equal(first.getSnapshot().phase, "cancelling");
   assert.equal(second.getSnapshot().phase, "cancelling");
   const restoredFirst = create(target, async value => { assert.deepEqual(value, target); return terminal; });
@@ -238,13 +239,13 @@ test("a rejected retry cannot erase an earlier unknown cancellation when another
 });
 
 test("Stop settles a blocked file preparation immediately and its late completion cannot affect a new attempt", async () => {
-  const bytes = deferred<ArrayBuffer>(); let reading = false; const posts = [];
+  const bytes = deferred<ArrayBuffer>(); const reading = deferred<void>(); const posts = [];
   const f = setup(async (_path, options) => { const body = JSON.parse(options.body); posts.push(body); return accepted(body.operationId); });
   const file = new File(["synthetic attachment"], "synthetic.txt");
-  Object.defineProperty(file, "arrayBuffer", { value: () => { reading = true; return bytes.promise; } });
+  Object.defineProperty(file, "arrayBuffer", { value: () => { reading.resolve(); return bytes.promise; } });
   f.control.begin(); const sending = f.control.submit(hooks => f.operations.submit("/messages", input, [file], [], false, hooks));
   const rejected = assert.rejects(sending, /operation_dispatch_stopped/);
-  await until(() => reading); await f.control.stop();
+  await reading.promise; await f.control.stop();
   try {
     assert.equal(f.control.getSnapshot().phase, "idle"); assert.equal(f.control.getSnapshot().feedback, "stoppedBeforeDispatch");
     await Promise.race([rejected, new Promise((_, reject) => setImmediate(() => reject(Error("local stop is still blocked on file preparation"))))]);
