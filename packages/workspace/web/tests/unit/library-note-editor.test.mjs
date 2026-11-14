@@ -10,6 +10,7 @@ const load = subjectLoader({ extraOverrides: [
   ["../i18n", url('export const t=key=>key; export const useTranslation=()=>({t}); export const i18n={language:"en"};')],
   ["react-router", url(`import {context} from ${JSON.stringify(harness)}; export const useBlocker=()=>context.blocker; export const useNavigate=()=>context.navigate; export const useLocation=()=>context.location; export const useParams=()=>({libraryObjectId:context.noteId}); export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:{workspace:context.workspace}; export const useSearchParams=()=>[new URLSearchParams(context.location.search)];`)],
   ["../components/SpreadsheetPreview", url("export default ()=>null;")],
+  ["./SpaceMaterialView", url("export const SpaceMaterialView=()=>null;")],
 ] });
 const { default: NotePage } = await import(await load(fileURLToPath(new URL("../../src/routes/LibraryObjectRoute.jsx", import.meta.url))));
 function Page() { return NotePage().props.children.type(); }

@@ -10,7 +10,7 @@ const loader = subjectLoader({ extraOverrides: [
   ["../i18n", stub("export const t=key=>key; export const i18n={language:'en'}; export const useTranslation=()=>({t});")],
   ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect,useId} from ${JSON.stringify(harness)}; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,snapshot)=>snapshot();`)],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
-  ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>({loadTail:async()=>context.tail,loadPatches:async()=>{},loadActiveAgentRun:async(...args)=>context.activeRun?context.activeRun(...args):({agentRun:null})});`)],
+  ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>({loadTail:async()=>context.tail,loadPatches:async()=>{},loadActiveAgentRun:async(...args)=>context.activeRun?context.activeRun(...args):({agentRun:null,pendingSupplements:[]})});`)],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.presentation(options);`)],
   ...["../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
@@ -25,7 +25,7 @@ async function setup(t, draft=false, navigationRead=null, controls={}) {
   globalThis.window={location:{pathname:draft?"/w/workspace/app":"/w/workspace/sessions/session"},requestAnimationFrame(){},addEventListener(){},removeEventListener(){}};
   globalThis.document={hidden:false,addEventListener(){},removeEventListener(){}};
   const calls=[]; let options; let serverRun=null;
-  const env=environment({tail:page,activeRun:controls.activeRun || (async()=>({agentRun:serverRun})),request:async(path,request)=>{
+  const env=environment({tail:page,activeRun:controls.activeRun || (async()=>({agentRun:serverRun,pendingSupplements:[]})),request:async(path,request)=>{
     calls.push([path,request]);
     const override = await controls.request?.(path,request);
     if (override !== undefined) return override;
@@ -111,7 +111,7 @@ test('selecting a running Session keeps its known badge until current Run contro
   const selectedRow = () => { const sidebar=nodes(f.subject.tree,n=>n.type.name==='ShellSidebar')[0].props.sessionProps;
     return sidebar.renderSessionRow(sidebar.sessions.find(session=>session.id==='session')); };
   assert.equal(selectedRow().props.running,true,'the directory fact survives unknown local control');
-  currentRun.resolve({agentRun:null}); await tick(); await f.subject.settle();
+  currentRun.resolve({agentRun:null,pendingSupplements:[]}); await tick(); await f.subject.settle();
   assert.equal(selectedRow().props.running,false,'a fresh authoritative empty Run read clears the badge');
 });
 test('switching Sessions retains the directory and restores a checkpointed view before the new stream responds', async t => {
@@ -175,7 +175,7 @@ test("an accepted Run can be stopped before its Session read or first checkpoint
 test("old checkpoints cannot discard an accepted target but matching terminal can",async t=>{
   let submitted=false;
   const f=await setup(t,false,null,{
-    activeRun:async()=>({agentRun:submitted?{agentRunId:"run-new",status:"queued",streamCursor:"current"}:null}),
+    activeRun:async()=>({agentRun:submitted?{agentRunId:"run-new",status:"queued",streamCursor:"current"}:null,pendingSupplements:[]}),
     request:async(path,request)=>{if(path.endsWith("/messages")){submitted=true;return receipt(request);}},
   });
   await f.send("snapshot",{page});await startSend(f);
@@ -212,7 +212,7 @@ test("an already terminal cancellation refreshes presentation without reporting 
 });
 
 test("current queued Run is cancellable without waiting for presentation",async t=>{
-  const f=await setup(t,false,null,{activeRun:async()=>({agentRun:{agentRunId:"queued-run",status:"queued",streamCursor:"cursor"}})});
+  const f=await setup(t,false,null,{activeRun:async()=>({agentRun:{agentRunId:"queued-run",status:"queued",streamCursor:"cursor"},pendingSupplements:[]})});
   assert.equal(composer(f).activeAgentRunId,"queued-run");
   assert.equal(composer(f).hasActiveAgentRun,true);
 });
@@ -221,7 +221,7 @@ test("a late active-Run read cannot overwrite a newer checkpoint",async t=>{
   let release;
   const f=await setup(t,false,null,{activeRun:()=>new Promise(resolve=>{release=resolve;})});
   await f.send("snapshot",{page});await f.send("checkpoint",checkpoint(run()),"queued");
-  release({agentRun:null});await tick();await f.subject.settle();
+  release({agentRun:null,pendingSupplements:[]});await tick();await f.subject.settle();
   assert.equal(composer(f).activeAgentRunId,"run-new");
 });
 
@@ -230,7 +230,7 @@ test("new Session acceptance exposes Stop before its follow-up read and preserve
   let releaseRead;let acceptedPath;let submitted=false;
   const f=await setup(t,true,null,{
     accepted:path=>{acceptedPath=path;},
-    activeRun:async()=>({agentRun:{agentRunId:"run-new",status:"queued",streamCursor:"cursor"}}),
+    activeRun:async()=>({agentRun:{agentRunId:"run-new",status:"queued",streamCursor:"cursor"},pendingSupplements:[]}),
     request:async(path,request)=>{
       if(path.endsWith("/messages")){submitted=true;return receipt(request);}
       if(path==="/api/sessions/session" && submitted) return new Promise(resolve=>{releaseRead=resolve;});
@@ -313,7 +313,7 @@ test("a current presentation permission denial clears the cancellation target",a
 test("an accepted target converges when presentation skips directly to a later Run",async t=>{
   let submitted=false;
   const f=await setup(t,false,null,{
-    activeRun:async()=>({agentRun:submitted?{agentRunId:"later-run",status:"running",streamCursor:"later"}:null}),
+    activeRun:async()=>({agentRun:submitted?{agentRunId:"later-run",status:"running",streamCursor:"later"}:null,pendingSupplements:[]}),
     request:async(path,request)=>{if(path.endsWith("/messages")){submitted=true;return receipt(request);}},
   });
   await f.send("snapshot",{page});await startSend(f);
@@ -340,7 +340,7 @@ for(const current of [null,"run-new"]){
   test(`repeated stale checkpoints cannot overwrite a current Run read of ${current}`,async t=>{
     let submitted=false;
     const f=await setup(t,false,null,{
-      activeRun:async()=>({agentRun:submitted && current?{agentRunId:current,status:"queued",streamCursor:"current"}:null}),
+      activeRun:async()=>({agentRun:submitted && current?{agentRunId:current,status:"queued",streamCursor:"current"}:null,pendingSupplements:[]}),
       request:async(path,request)=>{if(path.endsWith("/messages")){submitted=true;return receipt(request);}},
     });
     await f.send("snapshot",{page});await startSend(f);
@@ -354,7 +354,7 @@ for(const current of [null,"run-new"]){
 test("a stale empty checkpoint after receipt handoff cannot remove a currently queued Run",async t=>{
   let submitted=false;
   const f=await setup(t,false,null,{
-    activeRun:async()=>({agentRun:submitted?{agentRunId:"run-new",status:"queued",streamCursor:"current"}:null}),
+    activeRun:async()=>({agentRun:submitted?{agentRunId:"run-new",status:"queued",streamCursor:"current"}:null,pendingSupplements:[]}),
     request:async(path,request)=>{if(path.endsWith("/messages")){submitted=true;return receipt(request);}},
   });
   await f.send("snapshot",{page});await startSend(f);

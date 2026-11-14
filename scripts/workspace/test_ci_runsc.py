@@ -99,7 +99,7 @@ if args[0] == "compose":
     elif args[0] == "build" and args[-1] == os.environ["GATE_FAIL"]:
         raise SystemExit(23)
     elif args[0] == "ps" and "--status" in args:
-        print("postgres\nredis\napi\nruntime\nplatform-reconciler\nmaterial-broker\nmaterial-worker\nmaterial-scheduler\nweb")
+        print("postgres\nredis\napi\nruntime\nplatform-reconciler\nmaterial-broker\nmaterial-worker\nmaterial-scheduler\ntitle-worker\nweb")
 else:
     event["action"] = args[0]
     record()
