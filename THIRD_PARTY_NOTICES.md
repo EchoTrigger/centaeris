@@ -1,5 +1,10 @@
 # Third-party notices
 
+Hosted Web builds generate `THIRD_PARTY_LICENSES.md` in the distribution root
+with Vite's bundled-dependency license collector. Distribute that generated file
+with the Web assets, including the Markdown, code highlighting, KaTeX, Mermaid,
+and SVG sanitization dependencies and their transitive dependencies.
+
 The model catalog bundles provider logo SVGs under their original licenses
 and attribution notices. These are not covered by the project's AGPL-3.0-only
 grant. Preserve [`the logo notice`](packages/model-catalog/centaeris_model_catalog/logos/LICENSE)

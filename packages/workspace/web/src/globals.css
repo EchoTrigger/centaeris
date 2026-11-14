@@ -392,9 +392,9 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .workspaceMessages { position: relative; min-height: 0; overflow: auto; padding: 28px var(--workspace-reading-gutter, 16px) 36px; scrollbar-width: none; overflow-anchor: none; }
 .workspaceAgentRunList .workspaceMessages { height: 100%; box-sizing: border-box; }
 .workspaceMessages::-webkit-scrollbar { width: 0; height: 0; }
-.workspaceJumpToLatest { position: absolute; z-index: 2; bottom: 16px; left: 50%; display: grid; width: 32px; height: 32px; place-items: center; border: 0; border-radius: 50%; background: var(--surface-container); color: var(--on-surface-variant); cursor: pointer; transform: translateX(-50%); }
-.workspaceJumpToLatest:hover { color: var(--on-surface); }
-.workspaceJumpToLatest:focus-visible { outline: 1px solid var(--outline); outline-offset: 2px; }
+.workspaceJumpToLatest { position: absolute; z-index: 2; bottom: 16px; left: 50%; display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid color-mix(in srgb, var(--outline) 55%, var(--surface-raised)); border-radius: 50%; background: var(--surface-raised); color: var(--on-surface); cursor: pointer; transform: translateX(-50%); }
+.workspaceJumpToLatest:hover { background: var(--surface-hover); border-color: var(--outline); }
+.workspaceJumpToLatest:focus-visible { outline: 2px solid var(--outline); outline-offset: 2px; }
 .workspaceJumpToLatest svg { width: 17px; height: 17px; }
 .workspaceEmptyState { display: grid; min-height: 100%; align-content: center; justify-items: center; gap: 5px; color: var(--on-surface-variant); text-align: center; }
 .workspaceEmptyState h2 { margin: 0; color: var(--on-surface); font-size: 20px; font-weight: 650; letter-spacing: -.025em; }

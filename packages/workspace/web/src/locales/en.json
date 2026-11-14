@@ -1451,5 +1451,11 @@
   "searchOverlay.deliverables": "Submitted results",
   "searchOverlay.match.material": "Material",
   "searchOverlay.match.deliverable": "Result",
-  "searchOverlay.loadMoreResources": "Load more materials and results"
+  "searchOverlay.loadMoreResources": "Load more materials and results",
+  "markdown.copyCode": "Copy code",
+  "markdown.diagram": "Diagram",
+  "markdown.mermaidError": "Unable to render this diagram. The current source is shown.",
+  "markdown.mermaidView": "Diagram view",
+  "markdown.source": "Source",
+  "markdown.renderError": "Unable to render Markdown. The current source is shown."
 }

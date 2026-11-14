@@ -1451,5 +1451,11 @@
   "searchOverlay.deliverables": "已提交成果",
   "searchOverlay.match.material": "资料正文",
   "searchOverlay.match.deliverable": "成果正文",
-  "searchOverlay.loadMoreResources": "加载更多资料与成果"
+  "searchOverlay.loadMoreResources": "加载更多资料与成果",
+  "markdown.copyCode": "复制代码",
+  "markdown.diagram": "图表",
+  "markdown.mermaidError": "无法绘制此图表，已显示当前源码。",
+  "markdown.mermaidView": "图表视图",
+  "markdown.source": "源码",
+  "markdown.renderError": "无法解析 Markdown，已显示当前原文。"
 }
