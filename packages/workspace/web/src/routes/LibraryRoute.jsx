@@ -462,7 +462,7 @@ function LibraryPageContent({ embedded = false } = {}) {
           <WorkBreadcrumb parents={folderPath.length ? [{ label: t("libraryObjectRoute.library"), to: `${base}/library` }, ...folderPath.slice(0, -1).map(folder => ({ label: folder.displayName, to: libraryUrl(folder.id) }))] : []} current={folderPath.at(-1)?.displayName || t("libraryObjectRoute.library")} />
           {libraryView === "materials" ? <div className="libraryHeaderActions">
             <Menu.Root open={newMenuOpen} onOpenChange={setNewMenuOpen}>
-              <Menu.Trigger className="libraryNewButton">{t("libraryRoute.new")}<ChevronDown aria-hidden="true" /></Menu.Trigger>
+              <Menu.Trigger className="workspacePagePrimaryButton">{t("libraryRoute.new")}<ChevronDown aria-hidden="true" /></Menu.Trigger>
               <Menu.Portal><Menu.Positioner className="workMenuPositioner" side="bottom" align="end" sideOffset={6}><Menu.Popup className="workMenu libraryCreateMenu">
                 <Menu.Item className="workMenuItem" disabled={uploading} onClick={openUploadDialog}><Upload aria-hidden="true" />{t("libraryRoute.uploadFiles")}</Menu.Item>
                 <Menu.Item className="workMenuItem" onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setError(""); setDialog("folder"); }}><Folder aria-hidden="true" />{t("libraryRoute.folder")}</Menu.Item>

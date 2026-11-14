@@ -43,7 +43,6 @@
 .catalogPage .libraryContent { width:100%; margin:0; padding:0 16px 24px; }
 .catalogPage .libraryCatalogTabs { margin-inline:-16px; }
 .catalogPage .libraryCatalogTools { min-height:44px; margin-bottom:12px; }
-.catalogPage .libraryNewButton { min-height:30px; font-size:12px; font-weight:500; padding-inline:10px; background:var(--solid-surface); }
 .catalogPage .libraryList { padding:0; border:0; border-radius:0; box-shadow:none; background:transparent; }
 .catalogPage .libraryRow { min-height:48px; }
 .catalogPage .libraryRow + .libraryRow { border-top:1px solid color-mix(in srgb,var(--outline-variant) 55%,transparent); }
@@ -70,7 +69,6 @@
 .catalogPage .pluginSettingsSection { background:transparent; border:0; border-radius:0; box-shadow:none; padding:0 0 24px;  }
 .catalogPage .extensionSkillFacts, .catalogPage .extensionSkillDocument { background:transparent; border:0; box-shadow:none; padding:16px 0; }
 .catalogPage .pluginSettingsToggle { font-size:12px; }
-.catalogPage .extensionUpload button { min-height:30px; }
 .workPrototype > .inboxLayout { display:grid; grid-template-columns:336px minmax(0,1fr); flex:1 1 0; min-height:0; margin-inline:8px;  }
 .inboxList { min-width:0; overflow:auto;  padding:12px 12px 24px 0; scrollbar-width:thin; }
 .inboxTabs { margin-bottom:14px; }

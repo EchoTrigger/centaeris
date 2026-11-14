@@ -238,7 +238,7 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
     : plugins;
   const uploadControl = canManage ? <>
     <input ref={uploadInputRef} type="file" accept=".zip,application/zip" aria-label={t("workspaceResources.choosePackage")} disabled={Boolean(busyPlugin)} onChange={event => upload(event.target.files?.[0])} />
-    <button type="button" disabled={Boolean(busyPlugin)} onClick={() => uploadInputRef.current?.click()}><Upload aria-hidden="true" />{t("workspaceResources.uploadPackage")}</button>
+    <button type="button" className={catalog?.view === "plugins" ? "workspacePagePrimaryButton" : undefined} disabled={Boolean(busyPlugin)} onClick={() => uploadInputRef.current?.click()}><Upload aria-hidden="true" />{t("workspaceResources.uploadPackage")}</button>
   </> : null;
   const uploadHints = <>
     <small>{t("workspaceResources.skillPackageHint")}</small>

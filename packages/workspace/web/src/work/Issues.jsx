@@ -86,7 +86,7 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
   const issue = data?.issue;
   return <section className="issuesSurface" aria-busy={!data && !error}>
     <header className="workHeader"><WorkBreadcrumb parents={issueId ? [{ to: listUrl, label: inboxReturn ? t("work.inbox") : title }] : []} current={creating ? t("issues.new") : detail ? issue?.title || "" : title} count={!issueId ? data?.total : undefined} />
-      {!issueId ? <Button variant="outline" onClick={() => navigate(`${base}/new${query}`)}><Plus aria-hidden="true" />{t("issues.new")}</Button> : null}
+      {!issueId ? <Button variant="solid" className="workspacePagePrimaryButton" onClick={() => navigate(`${base}/new${query}`)}>{!mine ? <Plus aria-hidden="true" /> : null}{t("issues.new")}</Button> : null}
     </header>
     {error ? <div className="issueError" role="alert"><span>{error.status === 409 ? t("issues.conflict") : t("issues.failed", { message: error.message })}</span><Button variant="ghost" disabled={pending} onClick={() => setRevision(value => value + 1)}>{t("issues.reload")}</Button></div> : null}
     {!issueId ? <>

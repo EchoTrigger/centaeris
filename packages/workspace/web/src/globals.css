@@ -1,4 +1,5 @@
 @import "./styles/theme.css";
+@import "./styles/page-actions.css";
 @import "./styles/transcript-theme.css";
 @import "./assets/fonts/noto-sans-cjk-sc.css";
 @import "./styles/typography.css";
@@ -234,8 +235,6 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .librarySearch input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 15px; }
 .librarySearch input::placeholder { color: var(--process-text); }
 .libraryNewMenu { position: relative; }
-.libraryNewButton { display: inline-flex; min-height: 36px; align-items: center; gap: 7px; border: 0; border-radius: 6px; background: var(--primary-color); color: var(--solid-text); padding: 0 13px; font-size: 14px; font-weight: 550; }
-.libraryNewButton svg { width: 15px; height: 15px; }
 .libraryNewMenuPanel { position: absolute; z-index: 2; top: calc(100% + 8px); right: 0; display: grid; min-width: 154px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 13px; background: var(--surface); box-shadow: 0 12px 30px rgba(0, 0, 0, .13); }
 .libraryNewMenuPanel button { display: flex; min-height: 38px; align-items: center; gap: 9px; border: 0; border-radius: 8px; background: transparent; color: var(--text); padding: 0 9px; text-align: left; }
 .libraryNewMenuPanel button svg { width: 17px; height: 17px; }
@@ -1112,7 +1111,6 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .extensionPage .pluginSettings { padding: 0; }
 .extensionPage .managementRow { gap: 14px; padding: 14px 10px; }
 .extensionPage .extensionUpload { padding: 0; }
-.extensionUpload button { min-height: 32px; font-size: 12px; }
 .extensionToolbar { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; margin-bottom: 14px; }
 .extensionSearch { width: auto; min-width: min(180px, 100%); flex: 1; }
 .extensionSearch input { font-size: 14px; }
