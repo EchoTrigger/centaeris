@@ -111,9 +111,6 @@
 .workHomeBody { display:flex; flex-direction:column; gap:32px; width:min(780px,100%); margin:36px auto; padding:0 32px 48px; }
 .workPrototype .workHomeBody > h2 { margin-bottom:8px; font-size:24px; font-weight:500; }
 .workPrototype .workHomeBody h3 { margin-bottom:16px; }
-@media(min-width:761px) {
-  .workspaceWorkbench .catalogPage .catalogHeader { padding-inline-start:calc(16px + 28px * (1 - var(--workspace-sidebar-progress))); }
-}
 @media(max-width:760px) {
   .catalogPage { padding-inline:4px; }
   .catalogBody { padding-inline:12px; }

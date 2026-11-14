@@ -246,11 +246,6 @@
 
 @media (min-width:761px) {
   .workPrototype { padding-top:0; }
-  .workspaceWorkbench .workHeader {
-    min-height:var(--workspace-header-height);
-    padding-block:6px;
-    padding-inline-start:calc(16px + 28px * (1 - var(--workspace-sidebar-progress)));
-  }
 }
 
 /* Shared button variants own their fill; work pages do not add perimeter borders. */
