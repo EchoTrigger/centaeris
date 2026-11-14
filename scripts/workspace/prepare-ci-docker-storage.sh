@@ -35,7 +35,12 @@ import json, pathlib
 runsc = json.loads(pathlib.Path("/etc/docker/daemon.json").read_text())["runtimes"]["runsc"]
 config = {"runtimes": {"runsc": runsc}, "features": {"containerd-snapshotter": False}}
 pathlib.Path("/run/centaeris-runtime-containerd/docker.json").write_text(json.dumps(config))
-pathlib.Path("/run/centaeris-builder/docker.json").write_text(json.dumps({"features": {"containerd-snapshotter": False}}))
+pathlib.Path("/run/centaeris-builder/docker.json").write_text(json.dumps({
+    "features": {"containerd-snapshotter": False},
+    "iptables": False,
+    "ip6tables": False,
+    "ip-masq": False,
+}))
 '
 # No running containers belong to the stock daemon. Its ext4 data root becomes
 # the builder; the default client socket belongs only to the XFS runtime.
@@ -54,10 +59,13 @@ systemd-run --unit=centaeris-ci-runtime-docker --service-type=exec --property=De
   --data-root "$runtime_root/docker" --pidfile /run/docker.pid --storage-driver overlay2 \
   --containerd "$runtime_containerd_socket"
 
-# Docker 28 checks for each shared firewall chain before creating it. Finish
-# runtime initialization before the builder can create the same chains.
+# Runtime owns Docker's global firewall chains. The builder must not flush those
+# chains during startup; its dedicated bridge only needs outbound NAT/forwarding.
 for endpoint in unix:///var/run/docker.sock "$builder_socket"; do
   if [[ "$endpoint" == "$builder_socket" ]]; then
+    iptables --wait -t nat -A POSTROUTING -s 172.30.0.0/24 ! -o ct-build0 -j MASQUERADE
+    iptables --wait -I DOCKER-USER -i ct-build0 ! -o ct-build0 -j ACCEPT
+    iptables --wait -I DOCKER-USER -o ct-build0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
     systemd-run --unit=centaeris-ci-builder-docker --service-type=exec --property=Delegate=yes \
       dockerd --host "$builder_socket" --config-file /run/centaeris-builder/docker.json \
       --data-root "$builder_root" --exec-root /run/centaeris-builder/exec \
