@@ -49,9 +49,10 @@ def model_control(base, path, value=None):
         raise ValueError("loopback model control required")
     request = urllib.request.Request(base + path, data=None if value is None else json.dumps(value).encode(),
                                      headers={"Content-Type": "application/json"})
+    limit = 256 * 1024 * 1024 if path == "/boundaries" and value is None else 4 * 1024 * 1024
     with urllib.request.urlopen(request, timeout=5) as response:
-        data = response.read(4 * 1024 * 1024 + 1)
-    if len(data) > 4 * 1024 * 1024:
+        data = response.read(limit + 1)
+    if len(data) > limit:
         raise ValueError("model observation exceeded bound")
     return json.loads(data)
 
