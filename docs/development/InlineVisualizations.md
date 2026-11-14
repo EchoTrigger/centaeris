@@ -182,12 +182,32 @@ from the Core catalog into the skill's `references/catalog.md`. The same check
 that verifies browser artifacts verifies this reference. The skill is packaged
 and discovered alongside other built-in System Skills.
 
-Desktop bundles this skill with its application. Hosted discovery requires the
-same skill to be installed in both the Runtime catalog and execution environment.
-Updating only the Web container enables rendering without changing skill
-installation or an existing environment's pinned image. Discovery and file reads
-remain owned by the established skill mechanism; the browser does not inject
-model instructions or change Agent execution semantics.
+The portable skill has one source at `system-skills/inline-visualizations/`.
+Desktop and TUI bundle that directory through their existing System Skill bundle.
+The Hosted Runtime and Executor Dockerfiles copy the same directory to
+`/opt/centaeris/system-skills/inline-visualizations`, alongside the Hosted
+skills from `skills/system/`. The Runtime's read-only filesystem route serves
+System Skill reads and listings from this Runtime-owned catalog, using the same
+absolute paths advertised to the model. Parent paths, escaped symbolic links,
+mutations and reads exceeding the requested byte or entry budget are rejected.
+Other workspace, Plugin and private Memory reads retain their existing routes.
+New execution images also contain these files for direct shell reads.
+
+The Hosted-only `skills/system/web-output/` skill declares the Workspace Web
+answer surface's Markdown GFM, Mermaid fenced code, KaTeX math and
+`centaeris_visual` capabilities. Its catalog description makes diagram and math
+requests discoverable; the body directs the model to emit inline syntax directly
+and use diagram-rendering tools when an exported file is requested. The portable
+skill retains its cross-client content contract; Web-specific formats do not
+enter the Core Harness or the Desktop/TUI skill catalog.
+
+Updating the Runtime image makes the guidance discoverable and readable through
+the `read` tool in existing sessions, including environments with an older pinned
+image. Existing environment image pins remain immutable. Updating only the Web
+container changes rendering without installing skills; new execution images
+carry the same System Skills for direct shell access.
+Discovery and file reads remain owned by the established skill mechanism; the
+browser does not inject model instructions or change Agent execution semantics.
 
 The model emits one portable format for every client. Desktop and Web use the
 shared Nova mapping, and TUI projects the same text and relationships.

@@ -2514,6 +2514,13 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 "projected Skill and Plugin files are read-only",
             ));
         }
+        if system_skill_path {
+            return run_system_skill_file_system_operation_at(
+                Path::new(SYSTEM_SKILL_CONTAINER_ROOT),
+                request.model_path.as_str(),
+                request.operation,
+            );
+        }
         if !read_only_path && !memory_path {
             self.refresh_materialized_inputs()
                 .map_err(filesystem_input_unavailable)?;
@@ -2754,6 +2761,35 @@ fn authorized_plugin_path(
         ExecutionFileSystemErrorKind::PermissionDenied,
         "Plugin package is not activated for this AgentRun",
     ))
+}
+
+fn run_system_skill_file_system_operation_at(
+    root: &Path,
+    model_path: &str,
+    operation: ExecutionFileSystemOperation,
+) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+    let path = if model_path == SYSTEM_SKILL_CONTAINER_ROOT {
+        root.to_path_buf()
+    } else {
+        let relative = model_path
+            .strip_prefix(&format!("{SYSTEM_SKILL_CONTAINER_ROOT}/"))
+            .ok_or_else(|| {
+                ExecutionFileSystemError::new(
+                    ExecutionFileSystemErrorKind::InvalidPath,
+                    "System Skill path is invalid",
+                )
+            })?;
+        root.join(relative)
+    };
+    centaeris_core::execution::run_policy_scoped_execution_file_system_operation(
+        ExecutionFileSystemRequest {
+            operation_id: None,
+            cwd: root.to_path_buf(),
+            policy: ExecutionPolicy::read_only_no_network(root),
+            model_path: path.to_string_lossy().into_owned(),
+            operation,
+        },
+    )
 }
 
 fn authorized_system_skill_path(model_path: &str) -> Result<bool, ExecutionFileSystemError> {
@@ -7302,6 +7338,94 @@ mod tests {
         assert!(
             authorized_plugin_path(&[], "/opt/centaeris/plugins/legal-research/SKILL.md").is_err()
         );
+    }
+
+    #[test]
+    fn read_root_system_catalog_uses_runtime_read_only_projection() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("catalog");
+        let skill = root.join("web-output");
+        fs::create_dir_all(&skill).unwrap();
+        let content = b"Runtime-provided instructions\n";
+        fs::write(skill.join("SKILL.md"), content).unwrap();
+        fs::write(skill.join("reference.md"), b"Reference").unwrap();
+        fs::write(fixture.path().join("private.txt"), b"Not a System Skill").unwrap();
+        let model_path = format!("{SYSTEM_SKILL_CONTAINER_ROOT}/web-output/SKILL.md");
+        let run = |path: &str, operation| {
+            run_system_skill_file_system_operation_at(&root, path, operation)
+        };
+        let read = run(
+            &model_path,
+            ExecutionFileSystemOperation::ReadFile {
+                max_bytes: content.len(),
+            },
+        )
+        .unwrap();
+        let ExecutionFileSystemOutput::ReadFile(read) = read else {
+            panic!("expected System Skill file contents");
+        };
+        assert_eq!(read.bytes, content);
+
+        let list = run(
+            SYSTEM_SKILL_CONTAINER_ROOT,
+            ExecutionFileSystemOperation::ListDirectory {
+                recursive: false,
+                max_entries: 1,
+            },
+        )
+        .unwrap();
+        let ExecutionFileSystemOutput::ListDirectory(list) = list else {
+            panic!("expected System Skill catalog listing");
+        };
+        assert_eq!(list.entries.len(), 1);
+        assert_eq!(list.entries[0].path, "web-output");
+
+        for operation in [
+            ExecutionFileSystemOperation::InspectMutationPath,
+            ExecutionFileSystemOperation::WriteFile {
+                content: b"Changed instructions".to_vec(),
+                observed_file_hash: None,
+                create_only: false,
+            },
+            ExecutionFileSystemOperation::DeleteFile {
+                expected_file_hash: read.file_hash,
+            },
+        ] {
+            assert_eq!(
+                run(&model_path, operation).unwrap_err().kind,
+                ExecutionFileSystemErrorKind::PermissionDenied
+            );
+        }
+        assert_eq!(fs::read(skill.join("SKILL.md")).unwrap(), content);
+        assert_eq!(
+            run(
+                &format!("{SYSTEM_SKILL_CONTAINER_ROOT}/../private.txt"),
+                ExecutionFileSystemOperation::ReadFile { max_bytes: 64 },
+            )
+            .unwrap_err()
+            .kind,
+            ExecutionFileSystemErrorKind::PermissionDenied
+        );
+        for (path, operation) in [
+            (
+                model_path,
+                ExecutionFileSystemOperation::ReadFile {
+                    max_bytes: content.len() - 1,
+                },
+            ),
+            (
+                format!("{SYSTEM_SKILL_CONTAINER_ROOT}/web-output"),
+                ExecutionFileSystemOperation::ListDirectory {
+                    recursive: false,
+                    max_entries: 1,
+                },
+            ),
+        ] {
+            assert_eq!(
+                run(&path, operation).unwrap_err().kind,
+                ExecutionFileSystemErrorKind::TooLarge
+            );
+        }
     }
 
     #[test]

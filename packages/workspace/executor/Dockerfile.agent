@@ -64,6 +64,7 @@ COPY --from=build /src/target/static-helper/execution_agent /opt/centaeris/bin/e
 COPY LICENSE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris-workspace/
 COPY packages/model-catalog/centaeris_model_catalog/logos/LICENSE /usr/share/licenses/centaeris-workspace/packages/model-catalog/centaeris_model_catalog/logos/LICENSE
 COPY skills/system /opt/centaeris/system-skills
+COPY system-skills/inline-visualizations /opt/centaeris/system-skills/inline-visualizations
 
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \

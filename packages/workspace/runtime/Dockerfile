@@ -33,5 +33,6 @@ COPY --from=build /src/target/release/runtime_server /usr/local/bin/runtime_serv
 COPY LICENSE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris-workspace/
 COPY packages/model-catalog/centaeris_model_catalog/logos/LICENSE /usr/share/licenses/centaeris-workspace/packages/model-catalog/centaeris_model_catalog/logos/LICENSE
 COPY skills/system /opt/centaeris/system-skills
+COPY system-skills/inline-visualizations /opt/centaeris/system-skills/inline-visualizations
 
 CMD ["runtime_server"]
