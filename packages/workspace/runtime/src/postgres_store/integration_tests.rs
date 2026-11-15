@@ -521,9 +521,9 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
     db.batch_execute(
         "DROP TABLE IF EXISTS public.app_core_sessionevent CASCADE;
         DROP TABLE IF EXISTS public.app_core_session CASCADE;
-        CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL);
-        CREATE TABLE public.app_core_sessionevent(agent_run_id text,session_level boolean NOT NULL);
-        INSERT INTO public.app_core_session VALUES('cancel-session','cancel-workspace');
+        CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL,status text NOT NULL DEFAULT 'active',\"purgedAt\" timestamptz);
+        CREATE TABLE public.app_core_sessionevent(agent_run_id text,session_level boolean NOT NULL,session_id text,payload jsonb NOT NULL DEFAULT '{}');
+        INSERT INTO public.app_core_session(id,workspace_id) VALUES('cancel-session','cancel-workspace');
         INSERT INTO public.app_core_agentrun(id,session_id) VALUES('cancel-run','cancel-session');",
     )
     .unwrap();
@@ -649,7 +649,7 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
     );
     cancellation_result.unwrap();
     db.execute(
-        "INSERT INTO public.app_core_sessionevent VALUES('cancel-run',false)",
+        "INSERT INTO public.app_core_sessionevent(agent_run_id,session_level) VALUES('cancel-run',false)",
         &[],
     )
     .unwrap();

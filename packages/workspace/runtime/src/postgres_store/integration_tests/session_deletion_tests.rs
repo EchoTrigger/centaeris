@@ -185,7 +185,11 @@ fn postgres_session_purge_erases_descendants_atomically_and_preserves_receipts()
             .schedule_runtime_job(ScheduleRuntimeJobRequest { job })
             .unwrap();
         store
-            .save_agent_runtime_snapshot(child, "private child snapshot", 1)
+            .save_agent_runtime_snapshot(
+                child,
+                &session_snapshot_fixture(child, "private child snapshot"),
+                1,
+            )
             .unwrap();
         store
             .append_event(RuntimeEvent {
@@ -200,7 +204,11 @@ fn postgres_session_purge_erases_descendants_atomically_and_preserves_receipts()
             .unwrap();
     }
     store
-        .save_agent_runtime_snapshot("sess_1", "private parent snapshot", 1)
+        .save_agent_runtime_snapshot(
+            "sess_1",
+            &session_snapshot_fixture("sess_1", "private parent snapshot"),
+            1,
+        )
         .unwrap();
     store
         .append_event(RuntimeEvent {
@@ -214,7 +222,11 @@ fn postgres_session_purge_erases_descendants_atomically_and_preserves_receipts()
         })
         .unwrap();
     store
-        .save_agent_runtime_snapshot("unrelated", "retained", 1)
+        .save_agent_runtime_snapshot(
+            "unrelated",
+            &session_snapshot_fixture("unrelated", "retained"),
+            1,
+        )
         .unwrap();
     let mut unrelated = job("unrelated-job", "unrelated-job");
     unrelated.session_id = Some("unrelated".into());
