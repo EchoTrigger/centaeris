@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 25;
+pub(super) const STORE_SCHEMA_VERSION: i64 = 25;
 const SESSION_HISTORY_DDL: &str = r#"
 CREATE TABLE runtime.session_message_history_entries(
  session_id text NOT NULL,record_id text NOT NULL,message_id text NOT NULL,entry_json text NOT NULL,

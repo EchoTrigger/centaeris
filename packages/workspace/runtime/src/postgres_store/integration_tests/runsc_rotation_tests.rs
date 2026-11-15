@@ -246,7 +246,7 @@ fn postgres_runsc_forward_migration_preserves_populated_residents() {
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        22
+        super::super::schema::STORE_SCHEMA_VERSION
     );
     assert_eq!(
         db.query_one("SELECT count(*) FROM runtime.runsc_environment_power", &[])
