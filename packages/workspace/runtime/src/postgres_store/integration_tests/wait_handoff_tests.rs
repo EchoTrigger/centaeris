@@ -760,7 +760,7 @@ fn postgres_input_usage_anchor_upgrade_rolls_back_on_damaged_anchor_or_receipt()
             f.handoff.snapshot_json = previous.to_string();
             f.store.with_client(|db| db.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&f.checkpoint.checkpoint_id,&serde_json::to_string(&f.handoff).unwrap()]).map(|_| ()).map_err(|error| error.to_string())).unwrap();
         } else {
-            f.store.with_client(|db| db.execute("UPDATE public.app_core_sessionevent SET payload=jsonb_set(payload,'{payload,payloadSha256}',to_jsonb('sha256:damaged'::text)) WHERE session_id=$1 AND sequence=9", &[&SESSION]).map(|_| ()).map_err(|error| error.to_string())).unwrap();
+            f.store.with_client(|db| db.execute("UPDATE public.app_core_sessionevent SET payload=jsonb_set(payload,'{payload,payloadSha256}',to_jsonb('sha256:' || repeat('0',64))) WHERE session_id=$1 AND sequence=9", &[&SESSION]).map(|_| ()).map_err(|error| error.to_string())).unwrap();
         }
         let before = usage_migration_facts(&f);
         let error = PostgresRuntimeStore::new(&test_url()).unwrap_err();
