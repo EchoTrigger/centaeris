@@ -31,7 +31,7 @@ mod sqlite_turn_supplement;
 pub mod job_store;
 mod sqlite_job_connection;
 
-pub const STORE_SCHEMA_VERSION: i64 = 7;
+pub const STORE_SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone)]
 pub struct SqliteRuntimeStore {

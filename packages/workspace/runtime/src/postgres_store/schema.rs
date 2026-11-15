@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 24;
+const STORE_SCHEMA_VERSION: i64 = 25;
 const SESSION_HISTORY_DDL: &str = r#"
 CREATE TABLE runtime.session_message_history_entries(
  session_id text NOT NULL,record_id text NOT NULL,message_id text NOT NULL,entry_json text NOT NULL,
@@ -247,8 +247,14 @@ const TABLE_SHAPES: &[(&str, &str)] = &[
         "model_observation_contents",
         "session_id:text:NO,content_digest:text:NO,kind:text:NO,content_json:text:NO,content_bytes:bigint:NO,first_seen_at_ms:bigint:NO",
     ),
-    ("session_source_mutations", "session_id:text:NO,revision:bigint:NO"),
-    ("session_source_checkpoints", "session_id:text:NO,source_sequence:bigint:NO,mutation_revision:bigint:NO,snapshot_json:text:NO,observations_json:text:NO"),
+    (
+        "session_source_mutations",
+        "session_id:text:NO,revision:bigint:NO",
+    ),
+    (
+        "session_source_checkpoints",
+        "session_id:text:NO,source_sequence:bigint:NO,mutation_revision:bigint:NO,snapshot_json:text:NO,observations_json:text:NO",
+    ),
     (
         "model_observation_manifests",
         "session_id:text:NO,manifest_digest:text:NO,parent_digest:text:YES,manifest_json:text:NO,manifest_bytes:bigint:NO,first_seen_at_ms:bigint:NO",
@@ -392,11 +398,80 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_dispatch_schema(client, 22, MODEL_INPUT_IMAGE_DDL)?;
         upgrade_session_history(client)?;
         upgrade_session_source_checkpoints(client)?;
+        upgrade_prompt_usage_anchors(client)?;
     } else {
         create_schema(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
+}
+
+fn upgrade_prompt_usage_anchors(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=24).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|error| error.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|error| error.to_string())?;
+    if schema_versions(&mut tx)? != (1..=24).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    for table in ["session_runtime_snapshots", "session_source_checkpoints"] {
+        let mut after = None::<String>;
+        loop {
+            let Some(row) = tx.query_opt(
+                &format!("SELECT session_id,snapshot_json FROM runtime.{table} WHERE ($1::text IS NULL OR session_id>$1) ORDER BY session_id LIMIT 1 FOR UPDATE"),
+                &[&after],
+            ).map_err(|error| error.to_string())? else { break; };
+            let session_id: String = row.get(0);
+            let raw: String = row.get(1);
+            let upgraded =
+                centaeris_core::session::history::migrate_prompt_usage_anchor_snapshot(&raw)?;
+            let snapshot: centaeris_core::session::state::SessionStateSnapshot =
+                serde_json::from_str(&upgraded).map_err(|error| error.to_string())?;
+            if snapshot.session_id != session_id {
+                return Err("usage_anchor_snapshot_identity_mismatch".into());
+            }
+            if upgraded != raw {
+                tx.execute(
+                    &format!("UPDATE runtime.{table} SET snapshot_json=$2 WHERE session_id=$1"),
+                    &[&session_id, &upgraded],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            after = Some(session_id);
+        }
+    }
+    let mut after = None::<String>;
+    loop {
+        let Some(row) = tx.query_opt(
+            "SELECT checkpoint_id,wait_handoff_json FROM runtime.checkpoints WHERE wait_handoff_json IS NOT NULL AND ($1::text IS NULL OR checkpoint_id>$1) ORDER BY checkpoint_id LIMIT 1 FOR UPDATE",
+            &[&after],
+        ).map_err(|error| error.to_string())? else { break; };
+        let checkpoint_id: String = row.get(0);
+        let raw: String = row.get(1);
+        let mut handoff: crate::wait_recovery::WaitHandoff =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        if handoff.migrate_prompt_usage_anchor()? {
+            let upgraded = serde_json::to_string(&handoff).map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1",
+                &[&checkpoint_id, &upgraded],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        super::runtime::load_wait_handoff_attachment(&mut tx, &checkpoint_id)?
+            .ok_or("usage anchor migration wait attachment missing")?;
+        after = Some(checkpoint_id);
+    }
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(25,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())
 }
 
 fn create_source_checkpoint_schema(client: &mut impl GenericClient) -> Result<(), String> {
@@ -1093,7 +1168,7 @@ pub(super) fn restore_session_history_fixture(client: &mut Client) {
         .transaction()
         .expect("begin history fixture downgrade");
     if schema_versions(&mut tx).unwrap().contains(&24) {
-        tx.batch_execute("DO $$ BEGIN IF to_regclass('public.app_core_sessionevent') IS NOT NULL THEN DROP TRIGGER IF EXISTS session_event_source_mutation ON public.app_core_sessionevent; END IF; END $$; DROP INDEX IF EXISTS public.session_tool_call_origins; DROP TABLE runtime.session_source_checkpoints; DROP TABLE runtime.session_source_mutations; DROP FUNCTION runtime.record_session_source_mutation() CASCADE; DELETE FROM runtime.schema_migrations WHERE version=24;").unwrap();
+        tx.batch_execute("DO $$ BEGIN IF to_regclass('public.app_core_sessionevent') IS NOT NULL THEN DROP TRIGGER IF EXISTS session_event_source_mutation ON public.app_core_sessionevent; END IF; END $$; DROP INDEX IF EXISTS public.session_tool_call_origins; DROP TRIGGER model_observation_content_source_mutation ON runtime.model_observation_contents; DROP TRIGGER model_observation_manifest_source_mutation ON runtime.model_observation_manifests; DROP TRIGGER model_input_image_source_mutation ON runtime.session_model_input_images; DROP TABLE runtime.session_source_checkpoints; DROP TABLE runtime.session_source_mutations; DROP FUNCTION runtime.record_session_source_mutation(); DELETE FROM runtime.schema_migrations WHERE version>=24;").unwrap();
     }
     let rows = tx.query("SELECT session_id,snapshot_json FROM runtime.session_runtime_snapshots ORDER BY session_id", &[]).unwrap();
     for row in rows {
@@ -1972,7 +2047,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 24);
+        assert_eq!(STORE_SCHEMA_VERSION, 25);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

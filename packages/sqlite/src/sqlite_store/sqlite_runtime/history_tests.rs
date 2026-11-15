@@ -220,7 +220,7 @@ fn session_history_is_immutable_bounded_and_paged_with_stable_latest_revisions()
 fn make_legacy_store(path: &std::path::Path, raw: &str) {
     drop(SqliteRuntimeStore::new(path).unwrap());
     let conn = rusqlite::Connection::open(path).unwrap();
-    conn.execute_batch("DROP TABLE session_message_history_heads; DROP TABLE session_message_history_entries; DELETE FROM schema_migrations WHERE version=7;").unwrap();
+    conn.execute_batch("DROP TABLE session_message_history_heads; DROP TABLE session_message_history_entries; DELETE FROM schema_migrations WHERE version>=7;").unwrap();
     conn.execute("INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES('history-session',?1,1)", [raw]).unwrap();
 }
 
@@ -300,4 +300,190 @@ fn damaged_legacy_history_rolls_back_the_complete_forward_migration() {
         .unwrap(),
         0
     );
+}
+
+fn input_usage_anchor() -> serde_json::Value {
+    serde_json::json!({
+        "schema": "runtime.prompt_usage_anchor.v1",
+        "bindingDigest": format!("sha256:{}", "a".repeat(64)),
+        "messages": [{"digest": format!("sha256:{}", "b".repeat(64)), "estimatedTokens": 0}],
+        "actualInputTokens": 987
+    })
+}
+
+fn history_facts(conn: &rusqlite::Connection) -> Vec<String> {
+    [
+        "SELECT entry_json FROM session_message_history_entries ORDER BY session_id,record_id",
+        "SELECT json_array(session_id,message_id,position,current_record_id,is_original_user_request,retired) FROM session_message_history_heads ORDER BY session_id,position",
+    ]
+    .into_iter()
+    .flat_map(|query| {
+        conn.prepare(query)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    })
+    .collect()
+}
+
+#[test]
+fn input_usage_anchor_upgrade_preserves_history_and_timestamps_on_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("input-usage.sqlite");
+    let store = SqliteRuntimeStore::new(&path).unwrap();
+    let mut original = source();
+    original
+        .metadata
+        .insert("private-state".into(), "preserved".into());
+    store
+        .save_agent_runtime_snapshot(
+            "history-session",
+            &serde_json::to_string(&original).unwrap(),
+            73,
+        )
+        .unwrap();
+    let expected = store
+        .load_agent_runtime_snapshot("history-session")
+        .unwrap()
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let facts = history_facts(&conn);
+    let previous_versions = conn
+        .prepare(
+            "SELECT version,applied_at_ms FROM schema_migrations WHERE version<=7 ORDER BY version",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut previous: serde_json::Value = serde_json::from_str(&expected).unwrap();
+    previous["history"]["promptUsageAnchor"] = input_usage_anchor();
+    conn.execute(
+        "UPDATE session_runtime_snapshots SET snapshot_json=?1",
+        [previous.to_string()],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM schema_migrations WHERE version=8", [])
+        .unwrap();
+    drop(conn);
+    let store = SqliteRuntimeStore::new(&path).unwrap();
+    let upgraded = store
+        .load_agent_runtime_snapshot("history-session")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&upgraded).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&expected).unwrap()
+    );
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(history_facts(&conn), facts);
+    let versions = conn
+        .prepare("SELECT version,applied_at_ms FROM schema_migrations ORDER BY version")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(&versions[..7], previous_versions.as_slice());
+    assert_eq!(versions.last().unwrap().0, 8);
+    assert_eq!(
+        conn.query_row(
+            "SELECT updated_at_ms FROM session_runtime_snapshots",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        73
+    );
+    drop(conn);
+    let store = SqliteRuntimeStore::new(&path).unwrap();
+    assert_eq!(
+        store
+            .load_agent_runtime_snapshot("history-session")
+            .unwrap()
+            .unwrap(),
+        upgraded
+    );
+    store
+        .with_conn(|conn| {
+            assert_eq!(history_facts(conn), facts);
+            let reopened = conn
+                .prepare("SELECT version,applied_at_ms FROM schema_migrations ORDER BY version")
+                .unwrap()
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(reopened, versions);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn damaged_input_usage_anchor_rolls_back_snapshot_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("damaged-input-usage.sqlite");
+    let store = SqliteRuntimeStore::new(&path).unwrap();
+    store
+        .save_agent_runtime_snapshot(
+            "history-session",
+            &serde_json::to_string(&source()).unwrap(),
+            73,
+        )
+        .unwrap();
+    let current = store
+        .load_agent_runtime_snapshot("history-session")
+        .unwrap()
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let facts = history_facts(&conn);
+    let mut previous: serde_json::Value = serde_json::from_str(&current).unwrap();
+    previous["history"]["promptUsageAnchor"] = input_usage_anchor();
+    let raw = previous.to_string();
+    conn.execute(
+        "UPDATE session_runtime_snapshots SET snapshot_json=?1",
+        [&raw],
+    )
+    .unwrap();
+    previous["session_id"] = "z-damaged".into();
+    previous["history"]["promptUsageAnchor"]["unexpected"] = true.into();
+    let damaged = previous.to_string();
+    conn.execute(
+        "INSERT INTO session_runtime_snapshots VALUES('z-damaged',?1,99)",
+        [&damaged],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM schema_migrations WHERE version=8", [])
+        .unwrap();
+    drop(conn);
+    assert!(SqliteRuntimeStore::new(&path)
+        .unwrap_err()
+        .contains("decode input usage anchor"));
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        7
+    );
+    assert_eq!(conn.query_row("SELECT snapshot_json FROM session_runtime_snapshots WHERE session_id='history-session'", [], |row| row.get::<_,String>(0)).unwrap(), raw);
+    assert_eq!(
+        conn.query_row(
+            "SELECT snapshot_json FROM session_runtime_snapshots WHERE session_id='z-damaged'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        damaged
+    );
+    assert_eq!(history_facts(&conn), facts);
 }

@@ -1369,33 +1369,20 @@ pub fn canonical_tool_result_payload(
     }))
 }
 
-fn push_model_assistant_semantics_message(
-    message_handler: &MessageHandler,
-    session: &mut SessionStateSnapshot,
-    generate_result: &GenerateResult,
-) {
-    if generate_result.tool_calls.is_empty()
-        && generate_result.continuation_reasoning_content.is_none()
-    {
-        return;
-    }
-    message_handler.push_model_assistant_message(
-        session,
-        generate_result.content.as_str(),
-        JsonMap::new(),
-        build_model_assistant_semantics(generate_result),
-    );
+struct AssistantMessageChange {
+    message_id: String,
+    inserted: bool,
 }
 
 fn ensure_model_assistant_semantics_message(
     message_handler: &MessageHandler,
     session: &mut SessionStateSnapshot,
     generate_result: &GenerateResult,
-) -> Result<bool, String> {
+) -> Result<Option<AssistantMessageChange>, String> {
     if generate_result.tool_calls.is_empty()
         && generate_result.continuation_reasoning_content.is_none()
     {
-        return Ok(false);
+        return Ok(None);
     }
     let expected_semantics = build_model_assistant_semantics(generate_result);
     let expected_call_ids = generate_result
@@ -1429,10 +1416,21 @@ fn ensure_model_assistant_semantics_message(
         {
             return Err("assistant_tool_call_batch_persistence_conflict".to_string());
         }
-        return Ok(false);
+        return Ok(Some(AssistantMessageChange {
+            message_id: message.message_id.clone(),
+            inserted: false,
+        }));
     }
-    push_model_assistant_semantics_message(message_handler, session, generate_result);
-    Ok(true)
+    let message_id = message_handler.push_model_assistant_message(
+        session,
+        &generate_result.content,
+        JsonMap::new(),
+        build_model_assistant_semantics(generate_result),
+    );
+    Ok(Some(AssistantMessageChange {
+        message_id,
+        inserted: true,
+    }))
 }
 
 fn terminal_tool_transcript_commit_key(tool_call_id: &str) -> String {

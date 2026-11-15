@@ -10,6 +10,9 @@ use super::state::{
 };
 use crate::runtime::contracts::{JsonMap, TimestampMs};
 
+mod usage_anchor;
+pub use usage_anchor::migrate_prompt_usage_anchor_snapshot;
+
 /// The current persisted history-reference contract.
 pub const SESSION_HISTORY_SCHEMA_V1: &str = "runtime.session_history.v1";
 const ENTRY_DOMAIN: &str = "centaeris.session_history_entry.v1";
@@ -31,7 +34,7 @@ pub struct SessionHistoryStateV1 {
     pub context_revision: String,
     pub retained_entries: Vec<SessionHistoryRefV1>,
     #[serde(deserialize_with = "required_prompt_usage_anchor")]
-    pub prompt_usage_anchor: Option<crate::runtime::prompt_usage::PromptUsageAnchorV1>,
+    pub prompt_usage_anchor: Option<crate::runtime::prompt_usage::PromptUsageAnchorV2>,
 }
 
 impl Default for SessionHistoryStateV1 {
@@ -376,7 +379,7 @@ pub fn prepare_recovered_session_snapshot_write(
 
 fn required_prompt_usage_anchor<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Option<crate::runtime::prompt_usage::PromptUsageAnchorV1>, D::Error> {
+) -> Result<Option<crate::runtime::prompt_usage::PromptUsageAnchorV2>, D::Error> {
     Option::deserialize(deserializer)
 }
 

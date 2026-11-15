@@ -9,7 +9,7 @@ use crate::execution::{
 use base64::Engine as _;
 
 #[tokio::test]
-async fn query_loop_preserves_input_usage_anchor_when_later_responses_omit_usage() {
+async fn query_loop_preserves_total_usage_anchor_when_later_responses_omit_usage() {
     struct UsageDriver(AtomicUsize);
     impl AsyncGenerateDriver for UsageDriver {
         fn trusted_session_model_config(
@@ -78,6 +78,10 @@ async fn query_loop_preserves_input_usage_anchor_when_later_responses_omit_usage
             .prompt_usage_anchor
             .expect("last reported input remains covered");
         current.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(&current).unwrap()["actualTotalTokens"],
+            10_100
+        );
         if let Some(previous) = &previous {
             assert_eq!(
                 &current, previous,

@@ -181,7 +181,7 @@ impl<T: JsonHttpTransport> OpenAiCompatibleModelClient<T> {
                     .or_else(|| reasoning_content.clone()),
                 reasoning_content,
                 input_tokens: usage.and_then(openai_compatible_input_tokens),
-                total_tokens: usage.and_then(|usage| usage.total_tokens),
+                total_tokens: usage.and_then(openai_compatible_total_tokens),
                 prompt_cache_hit_tokens: usage.and_then(openai_compatible_cached_tokens),
                 prompt_cache_miss_tokens: usage.and_then(openai_compatible_cache_miss_tokens),
             },
@@ -558,6 +558,7 @@ pub(super) struct OpenAiChatToolChoiceFunction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct OpenAiCompatibleUsage {
     prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
     total_tokens: Option<i64>,
     prompt_tokens_details: Option<OpenAiTokenDetails>,
     prompt_cache_hit_tokens: Option<i64>,
@@ -575,10 +576,16 @@ pub(super) fn openai_compatible_input_tokens(usage: &OpenAiCompatibleUsage) -> O
             usage.prompt_cache_hit_tokens,
             usage.prompt_cache_miss_tokens,
         ) {
-            (Some(hit), Some(miss)) => Some(hit + miss),
+            (Some(hit), Some(miss)) => hit.checked_add(miss),
             _ => None,
         }
     })
+}
+
+fn openai_compatible_total_tokens(usage: &OpenAiCompatibleUsage) -> Option<i64> {
+    usage
+        .total_tokens
+        .or_else(|| openai_compatible_input_tokens(usage)?.checked_add(usage.completion_tokens?))
 }
 
 pub(super) fn openai_compatible_cached_tokens(usage: &OpenAiCompatibleUsage) -> Option<i64> {

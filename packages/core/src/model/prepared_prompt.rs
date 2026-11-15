@@ -13,8 +13,6 @@ use crate::tool::{ModelToolChoice, ModelToolDefinition};
 
 mod token_estimate;
 
-#[cfg(test)]
-pub(crate) use token_estimate::estimate_model_message_tokens;
 pub(crate) use token_estimate::{
     estimate_prepared_prompt_tokens, estimate_prepared_prompt_tokens_with_images,
     PromptTokenEstimate,

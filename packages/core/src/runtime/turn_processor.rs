@@ -18,8 +18,14 @@ impl<
         req: ProcessTurnRequest,
         stream_sink: Option<&mut (dyn FnMut(TurnUpdate) + Send + '_)>,
     ) -> Result<TurnStepResult, String> {
-        self.process_turn_with_stream_sink_and_tool_safe_point_async(req, stream_sink, None, None)
-            .await
+        self.process_turn_with_stream_sink_and_tool_safe_point_async(
+            req,
+            stream_sink,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     pub(super) async fn process_turn_with_stream_sink_and_tool_safe_point_async(
@@ -28,6 +34,7 @@ impl<
         mut stream_sink: Option<&mut (dyn FnMut(TurnUpdate) + Send + '_)>,
         tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
         execution_tools: Option<&ToolLayer>,
+        pending_usage: Option<&super::prompt_usage::PendingOutputUsage>,
     ) -> Result<TurnStepResult, String> {
         let execution_tools = execution_tools.unwrap_or(&self.tools_port);
         let mut session = self
@@ -176,12 +183,20 @@ impl<
         if matches!(
             routed.route,
             ModelRoute::ExecuteTools | ModelRoute::AwaitQuestion
-        ) && ensure_model_assistant_semantics_message(
-            &self.message_handler,
-            &mut session,
-            &effective_generate_result,
-        )? {
-            session = self.session_manager.save_session_owned(session)?;
+        ) {
+            if let Some(change) = ensure_model_assistant_semantics_message(
+                &self.message_handler,
+                &mut session,
+                &effective_generate_result,
+            )? {
+                let usage_changed = pending_usage
+                    .map(|usage| usage.commit_assistant(&mut session, &change.message_id))
+                    .transpose()?
+                    .unwrap_or(false);
+                if change.inserted || usage_changed {
+                    session = self.session_manager.save_session_owned(session)?;
+                }
+            }
         }
         if matches!(routed.route, ModelRoute::AwaitQuestion) {
             let persisted = self
@@ -372,12 +387,15 @@ impl<
             ModelRoute::Finalize => {
                 continuation = QueryContinuation::Finalize;
                 let text = effective_generate_result.content.as_str();
-                self.message_handler.push_model_assistant_message(
+                let assistant_id = self.message_handler.push_model_assistant_message(
                     &mut session,
                     text,
                     JsonMap::new(),
                     build_model_assistant_semantics(&effective_generate_result),
                 );
+                if let Some(usage) = pending_usage {
+                    usage.commit_assistant(&mut session, &assistant_id)?;
+                }
                 runtime_events.push(build_runtime_event_final_event(
                     req.session_id.as_str(),
                     req.turn_id.as_str(),

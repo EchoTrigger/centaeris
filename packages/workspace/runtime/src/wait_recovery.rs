@@ -6,6 +6,8 @@ use centaeris_core::session::state::SessionStateSnapshot;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod usage_anchor;
+
 const SCHEMA: &str = "workspace.runtime_job_wait_handoff.v1";
 const QUESTION_HANDOFF_SCHEMA: &str = "workspace.question_wait_handoff.v1";
 const PREFIX: &str = "waitcp:";
@@ -20,6 +22,8 @@ pub(crate) struct WaitHandoff {
     pub wait_checkpoint: CheckpointRecord,
     // Preserve Core's complete state verbatim; its private metadata is not interpreted here.
     pub snapshot_json: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalized_snapshot_json: Option<String>,
 }
 
 pub(crate) struct WaitHandoffPublisher<'a> {
@@ -173,8 +177,9 @@ impl WaitHandoff {
         ),
         String,
     > {
+        let raw = self.current_snapshot_json()?;
         let wire: serde_json::Value =
-            serde_json::from_str(&self.snapshot_json).map_err(|error| error.to_string())?;
+            serde_json::from_str(raw).map_err(|error| error.to_string())?;
         let legacy = wire.get("history").is_none();
         let write = if legacy {
             // Published attachments retain their original bytes and checkpoint
@@ -251,11 +256,30 @@ impl WaitHandoff {
             )?
             .snapshot_json()
             .to_owned(),
+            normalized_snapshot_json: None,
         })
     }
 
     pub fn checkpoint_id(&self) -> Result<String, String> {
-        Ok(format!("{PREFIX}{}", digest(self)?))
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SealedSource<'a> {
+            schema: &'a str,
+            handoff_key: &'a str,
+            source_session_sequence: u64,
+            model_request_id: &'a str,
+            wait_checkpoint: &'a CheckpointRecord,
+            snapshot_json: &'a str,
+        }
+        let source = SealedSource {
+            schema: &self.schema,
+            handoff_key: &self.handoff_key,
+            source_session_sequence: self.source_session_sequence,
+            model_request_id: &self.model_request_id,
+            wait_checkpoint: &self.wait_checkpoint,
+            snapshot_json: &self.snapshot_json,
+        };
+        Ok(format!("{PREFIX}{}", digest(&source)?))
     }
 
     pub fn is_wait_checkpoint(id: &str) -> bool {

@@ -532,6 +532,113 @@ fn build_anthropic_request() -> ModelClientRequest {
 }
 
 #[tokio::test]
+async fn provider_clients_preserve_unknown_or_overflowed_token_usage() {
+    std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+    for (usage, expected_inputs, expected_total) in [
+        (Value::Null, [None; 3], None),
+        (json!({}), [None; 3], None),
+        (
+            json!({"prompt_tokens": 10, "input_tokens": 10}),
+            [Some(10); 3],
+            None,
+        ),
+        (
+            json!({"completion_tokens": 6, "output_tokens": 6}),
+            [None; 3],
+            None,
+        ),
+        (
+            json!({
+                "prompt_tokens": 0,
+                "input_tokens": 0,
+                "completion_tokens": 0,
+                "output_tokens": 0
+            }),
+            [Some(0); 3],
+            Some(0),
+        ),
+        (
+            json!({
+                "prompt_tokens": i64::MAX,
+                "input_tokens": i64::MAX,
+                "completion_tokens": 1,
+                "output_tokens": 1
+            }),
+            [Some(i64::MAX); 3],
+            None,
+        ),
+        (
+            json!({
+                "prompt_cache_hit_tokens": i64::MAX,
+                "prompt_cache_miss_tokens": 1,
+                "input_tokens": i64::MAX,
+                "cache_read_input_tokens": 1,
+                "completion_tokens": 1,
+                "output_tokens": 1
+            }),
+            [None, Some(i64::MAX), None],
+            None,
+        ),
+    ] {
+        let response = |body: Value| {
+            MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+                timings: None,
+                status_code: 200,
+                headers: HashMap::new(),
+                body_json: body.to_string(),
+            }))
+        };
+        let chat = OpenAiCompatibleModelClient::new(
+            ModelProviderRegistry::new(),
+            response(json!({
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": usage
+            })),
+        );
+        let responses = OpenAiResponsesModelClient::new(
+            ModelProviderRegistry::new(),
+            response(json!({"output_text": "ok", "usage": usage})),
+        );
+        let anthropic = AnthropicMessagesModelClient::new(
+            anthropic_test_registry(),
+            response(json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": usage
+            })),
+        );
+        for ((name, client, request), expected_input) in [
+            (
+                "chat",
+                &chat as &dyn ModelClient,
+                build_model_request("custom.openai_compatible"),
+            ),
+            (
+                "responses",
+                &responses as &dyn ModelClient,
+                build_model_request("openai.default"),
+            ),
+            (
+                "anthropic",
+                &anthropic as &dyn ModelClient,
+                build_anthropic_request(),
+            ),
+        ]
+        .into_iter()
+        .zip(expected_inputs)
+        {
+            let result = client
+                .generate(&request)
+                .await
+                .expect("incomplete usage does not invalidate model content")
+                .generate_result;
+            assert_eq!(result.input_tokens, expected_input, "{name}: {usage}");
+            assert_eq!(result.total_tokens, expected_total, "{name}: {usage}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn anthropic_messages_projects_request_and_parses_tool_result() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
         timings: None,
@@ -552,6 +659,7 @@ async fn anthropic_messages_projects_request_and_parses_tool_result() {
             "usage": {
                 "input_tokens": 12,
                 "output_tokens": 6,
+                "cache_creation_input_tokens": 5,
                 "cache_read_input_tokens": 3
             }
         })
@@ -571,10 +679,10 @@ async fn anthropic_messages_projects_request_and_parses_tool_result() {
         response.generate_result.tool_calls[0].args_json,
         r#"{"path":"README.md"}"#
     );
-    assert_eq!(response.generate_result.input_tokens, Some(12));
-    assert_eq!(response.generate_result.total_tokens, Some(18));
+    assert_eq!(response.generate_result.input_tokens, Some(20));
+    assert_eq!(response.generate_result.total_tokens, Some(26));
     assert_eq!(response.generate_result.prompt_cache_hit_tokens, Some(3));
-    assert_eq!(response.generate_result.prompt_cache_miss_tokens, Some(9));
+    assert_eq!(response.generate_result.prompt_cache_miss_tokens, Some(17));
 
     let requests = transport.take_requests();
     assert_eq!(requests.len(), 1);
@@ -758,12 +866,13 @@ async fn anthropic_messages_stream_accumulates_tool_json_before_completion() {
             body_json: String::new(),
         }),
         vec![
-            r#"{"type":"message_start","message":{"id":"msg-stream","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            r#"{"type":"message_start","message":{"id":"msg-stream","usage":{"input_tokens":10,"output_tokens":1,"cache_creation_input_tokens":5,"cache_read_input_tokens":20}}}"#,
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-stream","name":"read","input":{}}}"#,
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"README"}}"#,
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":".md\"}"}}"#,
             r#"{"type":"content_block_stop","index":0}"#,
-            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":10,"output_tokens":4}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":4}}"#,
             r#"{"type":"message_stop"}"#,
         ],
     );
@@ -776,6 +885,10 @@ async fn anthropic_messages_stream_accumulates_tool_json_before_completion() {
         .expect("anthropic stream response");
 
     assert_eq!(response.provider_request_id.as_deref(), Some("msg-stream"));
+    assert_eq!(response.generate_result.input_tokens, Some(35));
+    assert_eq!(response.generate_result.total_tokens, Some(39));
+    assert_eq!(response.generate_result.prompt_cache_hit_tokens, Some(20));
+    assert_eq!(response.generate_result.prompt_cache_miss_tokens, Some(15));
     assert_eq!(response.generate_result.tool_calls.len(), 1);
     assert_eq!(
         response.generate_result.tool_calls[0].args_json,
@@ -2757,7 +2870,7 @@ async fn openai_compatible_client_derives_input_tokens_from_deepseek_cache_usage
         timings: None,
         status_code: 200,
         headers: HashMap::new(),
-        body_json: "{\"id\":\"resp_cache\",\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"total_tokens\":30,\"prompt_cache_hit_tokens\":21,\"prompt_cache_miss_tokens\":3}}".to_string(),
+        body_json: "{\"id\":\"resp_cache\",\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"completion_tokens\":6,\"prompt_cache_hit_tokens\":21,\"prompt_cache_miss_tokens\":3}}".to_string(),
     }));
     let client = OpenAiCompatibleModelClient::new(ModelProviderRegistry::new(), transport);
     let request = build_model_request("custom.openai_compatible");
@@ -2780,7 +2893,7 @@ async fn openai_compatible_client_parses_standard_cached_tokens() {
         timings: None,
         status_code: 200,
         headers: HashMap::new(),
-        body_json: "{\"id\":\"chatcmpl_cache\",\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":42,\"total_tokens\":50,\"prompt_tokens_details\":{\"cached_tokens\":32}}}".to_string(),
+        body_json: "{\"id\":\"chatcmpl_cache\",\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":8,\"prompt_tokens_details\":{\"cached_tokens\":32}}}".to_string(),
     }));
     let client = OpenAiCompatibleModelClient::new(ModelProviderRegistry::new(), transport);
     let request = build_model_request("custom.openai_compatible");
@@ -2790,6 +2903,8 @@ async fn openai_compatible_client_parses_standard_cached_tokens() {
         .await
         .expect("generate should succeed");
 
+    assert_eq!(response.generate_result.input_tokens, Some(42));
+    assert_eq!(response.generate_result.total_tokens, Some(50));
     assert_eq!(response.generate_result.prompt_cache_hit_tokens, Some(32));
     assert_eq!(response.generate_result.prompt_cache_miss_tokens, Some(10));
 }
@@ -2827,6 +2942,7 @@ async fn openai_compatible_client_projects_completed_tool_call_only() {
     );
     assert_eq!(response.generate_result.tool_calls[0].id, "call_1");
     assert_eq!(response.generate_result.input_tokens, Some(42));
+    assert_eq!(response.generate_result.total_tokens, Some(50));
     assert_eq!(response.generate_result.prompt_cache_hit_tokens, Some(40));
     assert_eq!(response.generate_result.prompt_cache_miss_tokens, Some(2));
     assert!(events.iter().any(|event| matches!(event, ModelClientStreamEvent::Reasoning { text } if text == "inspect the manifest")));
@@ -3946,7 +4062,7 @@ async fn openai_responses_client_streams_text_deltas() {
             "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream_1\"}}",
             "{\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}",
             "{\"type\":\"response.output_text.delta\",\"delta\":\" world\"}",
-            "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream_1\",\"output_text\":\"Hello world\",\"usage\":{\"input_tokens\":9,\"output_tokens\":2,\"total_tokens\":11}}}",
+            "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream_1\",\"output_text\":\"Hello world\",\"usage\":{\"input_tokens\":9,\"output_tokens\":2,\"total_tokens\":11,\"input_tokens_details\":{\"cached_tokens\":6}}}}",
         ],
     );
     let client = OpenAiResponsesModelClient::new(ModelProviderRegistry::new(), transport);
@@ -3960,6 +4076,10 @@ async fn openai_responses_client_streams_text_deltas() {
         .expect("stream generate should succeed");
 
     assert_eq!(response.generate_result.content, "Hello world");
+    assert_eq!(response.generate_result.input_tokens, Some(9));
+    assert_eq!(response.generate_result.total_tokens, Some(11));
+    assert_eq!(response.generate_result.prompt_cache_hit_tokens, Some(6));
+    assert_eq!(response.generate_result.prompt_cache_miss_tokens, Some(3));
     assert_eq!(events.len(), 4);
     assert!(matches!(events[0], ModelClientStreamEvent::Status { .. }));
     assert!(matches!(

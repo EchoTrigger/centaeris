@@ -53,8 +53,49 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<(), String> {
     upgrade_lease_reclaim_budget(conn)?;
     upgrade_model_input_images(conn)?;
     upgrade_session_working_set(conn)?;
+    upgrade_prompt_usage_anchors(conn)?;
     validate_schema_history(conn)?;
     validate_schema_shape(conn)
+}
+
+fn upgrade_prompt_usage_anchors(conn: &Connection) -> Result<(), String> {
+    if object_sql(conn, "table", "schema_migrations")?.is_none()
+        || schema_versions(conn)? != (1..=7).collect::<Vec<_>>()
+    {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    validate_schema_shape(&tx)?;
+    let mut after = None::<String>;
+    loop {
+        let row = tx.query_row(
+            "SELECT session_id,snapshot_json FROM session_runtime_snapshots WHERE (?1 IS NULL OR session_id>?1) ORDER BY session_id LIMIT 1",
+            params![after], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional().map_err(|error| error.to_string())?;
+        let Some((session_id, raw)) = row else { break };
+        let upgraded =
+            centaeris_core::session::history::migrate_prompt_usage_anchor_snapshot(&raw)?;
+        let snapshot: centaeris_core::session::state::SessionStateSnapshot =
+            serde_json::from_str(&upgraded).map_err(|error| error.to_string())?;
+        if snapshot.session_id != session_id {
+            return Err("usage_anchor_snapshot_identity_mismatch".into());
+        }
+        if upgraded != raw {
+            tx.execute(
+                "UPDATE session_runtime_snapshots SET snapshot_json=?2 WHERE session_id=?1",
+                params![session_id, upgraded],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        after = Some(session_id);
+    }
+    tx.execute(
+        "INSERT INTO schema_migrations VALUES(8,CAST(strftime('%s','now') AS INTEGER)*1000)",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())
 }
 
 fn upgrade_session_working_set(conn: &Connection) -> Result<(), String> {
@@ -571,7 +612,10 @@ const TRANSCRIPT_TABLES: &[RequiredObject] = &[
 ];
 
 const REQUIRED_INDEXES: &[RequiredObject] = &[
-    RequiredObject { name: "idx_session_message_history_recent_user", sql: SESSION_HISTORY_RECENT_INDEX_SQL },
+    RequiredObject {
+        name: "idx_session_message_history_recent_user",
+        sql: SESSION_HISTORY_RECENT_INDEX_SQL,
+    },
     RequiredObject {
         name: "idx_runtime_job_waiters_source",
         sql: "CREATE INDEX idx_runtime_job_waiters_source ON runtime_job_waiters(source_job_id,checkpoint_id,tool_call_id)",
@@ -916,7 +960,7 @@ mod tests {
             .unwrap(),
             4
         );
-        assert_eq!(schema_versions(&conn).unwrap(), [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(schema_versions(&conn).unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
         ensure_schema(&conn).unwrap();
         assert!(conn
             .execute("UPDATE runtime_jobs SET lease_reclaim_count=-1", [])

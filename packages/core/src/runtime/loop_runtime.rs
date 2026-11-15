@@ -1146,7 +1146,8 @@ impl<
             &self.message_handler,
             session,
             generate_result,
-        )?;
+        )?
+        .is_some_and(|change| change.inserted);
         let assistant_index = session
             .messages
             .iter()
@@ -1614,6 +1615,7 @@ impl<
         streamed_session_event_ids: &mut HashSet<String>,
         tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
         execution_tools: Option<&ToolLayer>,
+        pending_usage: Option<&super::prompt_usage::PendingOutputUsage>,
     ) -> Result<TurnStepResult, String> {
         let mut tracked_sink = |event: TurnUpdate| {
             track_streamed_runtime_event_id(&event, streamed_session_event_ids);
@@ -1624,6 +1626,7 @@ impl<
             Some(&mut tracked_sink),
             tool_safe_point,
             execution_tools,
+            pending_usage,
         )
         .await
     }
@@ -2534,9 +2537,9 @@ impl<
                 }
                 Err(error) => return Err(error.into()),
             };
-            let prompt_usage_anchor = prompt_usage_basis
-                .as_ref()
-                .and_then(|basis| basis.clone().into_anchor(&turn_req.generate_result));
+            let pending_usage = prompt_usage_basis
+                .map(|basis| basis.pending_output(&turn_req.generate_result))
+                .transpose()?;
             for call in &turn_req.generate_result.tool_calls {
                 if !request_tool_names.contains(&call.name) {
                     return Err(format!(
@@ -2632,6 +2635,7 @@ impl<
                     &mut streamed_session_event_ids,
                     tool_safe_point,
                     Some(&execution_tools),
+                    pending_usage.as_ref(),
                 )
                 .await?
             } else {
@@ -2640,6 +2644,7 @@ impl<
                     None,
                     tool_safe_point,
                     Some(&execution_tools),
+                    pending_usage.as_ref(),
                 )
                 .await?
             };
@@ -2667,18 +2672,6 @@ impl<
             }
             let continuation = response.continuation;
             let stop = continuation_run_stop(continuation);
-            if let Some(anchor) = prompt_usage_anchor {
-                response.session_snapshot.history.prompt_usage_anchor = Some(anchor);
-            } else if let Some(basis) = &prompt_usage_basis {
-                basis.retain_matching_anchor(
-                    &mut response.session_snapshot.history.prompt_usage_anchor,
-                );
-            } else {
-                response.session_snapshot.history.prompt_usage_anchor = None;
-            }
-            response.session_snapshot = self
-                .session_manager
-                .save_session_owned(response.session_snapshot)?;
             if !response.tool_results.is_empty() {
                 if let Some(sink) = tool_safe_point {
                     sink.commit(ToolSafePoint::CompletedTurn(Box::new(response.clone())))?;
