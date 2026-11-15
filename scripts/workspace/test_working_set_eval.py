@@ -49,6 +49,43 @@ class WorkingSetEvidenceTests(unittest.TestCase):
         self.assertIn(str(harness).replace("\\", "/"), manifest)
 
 
+class WorkingSetQualityCampaignTests(unittest.TestCase):
+    def args(self, folder):
+        return SimpleNamespace(output=Path(folder) / "quality.json", cases=["normal-history"],
+            versions=["candidate"], repeats=1, max_cost_usd=7.0, rerun_cases=None,
+            execute=True, real=False, reason=None, input_rate=.3, output_rate=1.2,
+            baseline=Path("baseline"), candidate=Path("candidate"))
+
+    def test_selected_candidate_campaign_keeps_its_actual_scope_and_oracle(self):
+        sample = WorkingSetEvidenceTests().sample()
+        with TemporaryDirectory(prefix="working-set-quality-") as folder:
+            args = self.args(folder)
+            with mock.patch.object(EVAL, "invoke", return_value={"samples": [sample]}) as invoke:
+                EVAL.quality(args)
+            report = json.loads(args.output.read_text(encoding="utf-8"))
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(invoke.call_args.args[0], args.candidate)
+        self.assertEqual(report["successCounts"], {"candidate": 1})
+        self.assertEqual(report["primaryRuns"], 1)
+        self.assertEqual(report["targetPerVersion"], 1)
+        self.assertFalse(report["fullCaseCoverage"])
+        self.assertEqual(report["runs"][0]["validation"], [])
+        self.assertTrue(report["passed"])
+
+    def test_unknown_paid_dispatch_stops_without_retry_and_reserves_campaign_budget(self):
+        with TemporaryDirectory(prefix="working-set-quality-") as folder:
+            args = self.args(folder)
+            args.real = True
+            with mock.patch.dict(EVAL.os.environ, {"COMMAND_CODE_API_KEY": "test-only"}), \
+                    mock.patch.object(EVAL, "invoke", side_effect=ValueError("missing receipt")) as invoke:
+                EVAL.quality(args)
+            report = json.loads(args.output.read_text(encoding="utf-8"))
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(report["stopped"], "unknown_dispatch_receipt")
+        self.assertEqual(report["runs"][0]["status"], "unknown")
+        self.assertEqual(report["costUpperUsd"], 7.0)
+
+
 class WorkingSetSetupTests(unittest.TestCase):
     def test_ready_model_gate_does_not_wait_for_slow_status_subprocess(self):
         clock = SimpleNamespace(now=0.0)

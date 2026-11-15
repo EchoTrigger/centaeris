@@ -255,19 +255,32 @@ impl ModelClient for Client {
                     usage["outputTokens"] =
                         json!(usage["outputTokens"].as_i64().unwrap_or(0) + output);
                     if let Some(requests) = usage["requests"].as_array_mut() {
-                        requests.push(json!({"turnId":request.turn_id,"summary":is_summary,
+                        let mut observation = json!({"turnId":request.turn_id,"summary":is_summary,
                             "estimatedInputTokens":request.context_token_estimate,
                             "actualInputTokens":result.generate_result.input_tokens,
                             "cacheHitTokens":result.generate_result.prompt_cache_hit_tokens,
                             "cacheMissTokens":result.generate_result.prompt_cache_miss_tokens,
-                            "providerRequestId":result.provider_request_id,"providerAttempts":result.provider_attempts}));
+                            "providerRequestId":result.provider_request_id,"providerAttempts":result.provider_attempts});
+                        if self.live.is_some() {
+                            observation["requestBoundary"] = json!("modelClientPreparedPrompt");
+                            observation["preparedPrompt"] = json!(request.prepared_prompt);
+                            observation["responseContent"] = json!(result.generate_result.content);
+                            observation["responseToolCalls"] =
+                                json!(result.generate_result.tool_calls);
+                        }
+                        requests.push(observation);
                     }
                 }
             } else if let Ok(mut usage) = self.usage.lock() {
                 if let Some(requests) = usage["requests"].as_array_mut() {
-                    requests.push(json!({"turnId":request.turn_id,"summary":is_summary,
+                    let mut observation = json!({"turnId":request.turn_id,"summary":is_summary,
                         "estimatedInputTokens":request.context_token_estimate,"outcome":"error",
-                        "reservedCostUsd":reservation}));
+                        "reservedCostUsd":reservation});
+                    if self.live.is_some() {
+                        observation["requestBoundary"] = json!("modelClientPreparedPrompt");
+                        observation["preparedPrompt"] = json!(request.prepared_prompt);
+                    }
+                    requests.push(observation);
                 }
             }
             response

@@ -168,8 +168,17 @@ def performance(args):
 
 
 def quality(args):
-    plan = {"schema": "runtime.working_set.quality.v1", "cases": list(CASES), "repeats": 2,
-            "primaryRuns": 48, "maxRuns": 60, "reserveRuns": 12, "maxCostUsd": 20, "runs": [], "executed": args.execute,
+    cases = tuple(dict.fromkeys(args.cases))
+    versions = tuple(dict.fromkeys(args.versions))
+    if args.repeats < 1 or not math.isfinite(args.max_cost_usd) or args.max_cost_usd <= 0:
+        raise ValueError("positive repeat count and finite cost budget required")
+    target = len(cases) * args.repeats
+    primary_runs = target * len(versions)
+    reserve = 12 if set(cases) == set(CASES) and set(versions) == {"baseline", "candidate"} and args.repeats == 2 else 0
+    plan = {"schema": "runtime.working_set.quality.v1", "cases": list(cases), "repeats": args.repeats,
+            "versions": list(versions), "fullCaseCoverage": set(cases) == set(CASES),
+            "targetPerVersion": target, "primaryRuns": primary_runs,
+            "maxRuns": primary_runs + reserve, "reserveRuns": reserve, "maxCostUsd": args.max_cost_usd, "runs": [], "executed": args.execute,
             "real": args.real, "costUpperUsd": 0.0}
     rerun = tuple(dict.fromkeys(args.rerun_cases or ()))
     if len(rerun) > 6:
@@ -187,6 +196,9 @@ def quality(args):
             raise ValueError("incompatible or unresolved quality receipts")
         if any(run.get("recheck") for run in plan["runs"]) or len(plan["runs"]) != 48:
             raise ValueError("only one affected recheck is allowed after the complete primary comparison")
+        cases = tuple(plan["cases"])
+        versions = tuple(dict.fromkeys(run["version"] for run in plan["runs"]))
+        target = len(cases) * plan["repeats"]
     elif args.output.exists():
         raise ValueError("result already exists; inspect paid and unknown receipts before rerunning")
     if args.real and (not os.environ.get("COMMAND_CODE_API_KEY") or not all(
@@ -195,12 +207,12 @@ def quality(args):
     root = args.output.parent / (args.output.stem + "-data")
     save(args.output, plan)
     jobs = []
-    for repeat in range(2):
-        for number, case in enumerate(rerun or CASES):
-            labels = ("candidate",) if rerun else (("baseline", "candidate") if (repeat + number) % 2 == 0 else ("candidate", "baseline"))
+    for repeat in range(plan["repeats"]):
+        for number, case in enumerate(rerun or cases):
+            labels = ("candidate",) if rerun else (versions if (repeat + number) % 2 == 0 else tuple(reversed(versions)))
             jobs.extend((repeat, case, label) for label in labels)
     for repeat, case, label in jobs:
-        remaining = 20.0 - plan["costUpperUsd"]
+        remaining = plan["maxCostUsd"] - plan["costUpperUsd"]
         if remaining <= 0:
             plan["stopped"] = "cost_limit"
             save(args.output, plan)
@@ -229,15 +241,16 @@ def quality(args):
             run.update(status="unknown", passed=False, errorType=type(error).__name__)
             plan["stopped"] = "unknown_dispatch_receipt"
             if args.real:
-                plan["costUpperUsd"] = 20.0
+                plan["costUpperUsd"] = plan["maxCostUsd"]
             save(args.output, plan)
             print(json.dumps({"stopped": plan["stopped"], "runs": len(plan["runs"])}))
             return
         save(args.output, plan)
     effective = {(run["version"], run["case"], run["repeat"]): run for run in plan["runs"]}
-    counts = {label: sum(run["passed"] for (version, _, _), run in effective.items() if version == label) for label in ("baseline", "candidate")}
+    counts = {label: sum(run["passed"] for (version, _, _), run in effective.items() if version == label) for label in versions}
     plan.update(successCounts=counts, completedRuns=len(plan["runs"]),
-                passed=counts["candidate"] == 24 and counts["candidate"] >= counts["baseline"])
+                passed=all(count == target for count in counts.values()) if len(versions) == 1 else
+                    counts["candidate"] == target and counts["candidate"] >= counts["baseline"])
     save(args.output, plan)
     print(json.dumps({key: value for key, value in plan.items() if key != "runs"}))
 
@@ -260,6 +273,10 @@ def main():
             command.add_argument("--real", action="store_true")
             command.add_argument("--input-rate", type=float, default=0.0)
             command.add_argument("--output-rate", type=float, default=0.0)
+            command.add_argument("--versions", choices=("baseline", "candidate"), nargs="+", default=["baseline", "candidate"])
+            command.add_argument("--cases", choices=CASES, nargs="+", default=list(CASES))
+            command.add_argument("--repeats", type=int, default=2)
+            command.add_argument("--max-cost-usd", type=float, default=20.0)
             command.add_argument("--rerun-cases", choices=CASES, nargs="+")
             command.add_argument("--reason")
     args = parser.parse_args()
