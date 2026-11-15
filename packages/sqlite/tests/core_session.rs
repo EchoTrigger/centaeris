@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use centaeris_core::session::manager::SessionManager;
-use centaeris_core::session::state::{ChatMessage, MessageRole};
+use centaeris_core::session::state::{ChatMessage, MessageRole, ModelMessageSemanticsV1};
 use centaeris_runtime_sqlite::SqliteRuntimeStore;
 
 fn temp_db_path(suffix: &str) -> std::path::PathBuf {
@@ -33,6 +33,9 @@ fn load_or_create_and_save_roundtrip() {
         metadata: HashMap::new(),
     });
 
+    session
+        .model_semantics
+        .insert("message-session-1".into(), ModelMessageSemanticsV1::Plain);
     manager.save_session(&session).expect("save session");
     let loaded = manager
         .load_session("chat-session")
@@ -40,6 +43,10 @@ fn load_or_create_and_save_roundtrip() {
         .expect("session exists");
     assert_eq!(loaded.messages.len(), 1);
     assert_eq!(loaded.messages[0].content, "hello");
+    assert_eq!(
+        loaded.model_semantics_for("message-session-1").unwrap(),
+        &ModelMessageSemanticsV1::Plain
+    );
 
     let _ = std::fs::remove_file(db_path);
 }
