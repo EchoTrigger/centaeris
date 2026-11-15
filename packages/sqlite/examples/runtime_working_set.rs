@@ -16,9 +16,11 @@ use centaeris_core::execution::{
 use centaeris_core::extension::skills::SkillCatalogLoadConfig;
 use centaeris_core::model::prompt::PromptCompactionScopeV1;
 use centaeris_core::model::{
-    GenerateResult, ModelClient, ModelClientError, ModelClientErrorKind, ModelClientFuture,
-    ModelClientRequest, ModelClientResponse, ModelProviderKind, ModelProviderRegistry,
-    ModelSessionConfig, ModelSessionConfigStore, OpenAiCompatibleModelClient, ToolCallEnvelope,
+    built_in_model_profile, AnthropicMessagesModelClient, AuthSpec, GenerateResult, ModelClient,
+    ModelClientError, ModelClientErrorKind, ModelClientFuture, ModelClientRequest,
+    ModelClientResponse, ModelProviderKind, ModelProviderRegistry, ModelSessionConfig,
+    ModelSessionConfigStore, ModelWireApi, OpenAiCompatibleModelClient, OpenAiResponsesModelClient,
+    ToolCallEnvelope, WireApi,
 };
 use centaeris_core::runtime::contracts::{JsonMap, RuntimeAgentRunIdentityV1};
 use centaeris_core::runtime::{
@@ -34,8 +36,6 @@ use centaeris_model_http::{build_model_http_client, ReqwestJsonHttpTransport};
 use centaeris_runtime_sqlite::SqliteRuntimeStore;
 use serde_json::{json, Value};
 
-const PROVIDER: &str = "command-code-goat.default";
-const MODEL: &str = "deepseek/deepseek-v4.1-flash";
 const CASES: [&str; 12] = [
     "normal-answer",
     "normal-history",
@@ -105,7 +105,7 @@ impl ModelSessionConfigStore for Config {
 }
 
 struct Client {
-    live: Option<OpenAiCompatibleModelClient<ReqwestJsonHttpTransport>>,
+    live: Option<Box<dyn ModelClient>>,
     main: AtomicUsize,
     summary: AtomicUsize,
     usage: Mutex<Value>,
@@ -461,53 +461,213 @@ fn runtime(
         }
     })))
 }
-fn live_client(
-    session_id: &str,
-) -> Result<OpenAiCompatibleModelClient<ReqwestJsonHttpTransport>, String> {
-    if std::env::var("COMMAND_CODE_API_KEY")
-        .unwrap_or_default()
-        .trim()
-        .is_empty()
-    {
-        return Err("COMMAND_CODE_API_KEY is required for paid evaluation".into());
+const MODEL_CONFIG_SCHEMA: &str = "runtime.working_set.model_config.v1";
+
+fn validate_model_config(value: &Value) -> Result<(), String> {
+    let object = value.as_object().ok_or("modelConfig must be an object")?;
+    let fields = ["schema", "providerId", "model", "apiBase", "credentialEnv"];
+    if object.len() != fields.len() || fields.iter().any(|key| !object.contains_key(*key)) {
+        return Err("modelConfig requires exactly schema/providerId/model/apiBase/credentialEnv; inline credentials are not accepted".into());
     }
-    let mut registry = ModelProviderRegistry::new();
+    if value["schema"] != MODEL_CONFIG_SCHEMA {
+        return Err("unsupported modelConfig schema".into());
+    }
+    for field in ["providerId", "model"] {
+        let text = value[field]
+            .as_str()
+            .ok_or("model selection must be text")?;
+        if text.is_empty() || text != text.trim() || text.chars().any(char::is_control) {
+            return Err("providerId and model must be nonempty canonical text".into());
+        }
+    }
+    if !value["apiBase"].is_null() {
+        validate_api_base(
+            value["apiBase"]
+                .as_str()
+                .ok_or("apiBase must be text or null")?,
+        )?;
+    }
+    if !value["credentialEnv"].is_null() {
+        let name = value["credentialEnv"]
+            .as_str()
+            .ok_or("credentialEnv must be text or null")?;
+        let mut chars = name.chars();
+        if !chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err("credentialEnv must name a runtime environment variable".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_api_base(base: &str) -> Result<(), String> {
+    let rest = base
+        .strip_prefix("https://")
+        .or_else(|| base.strip_prefix("http://"));
+    if rest.is_none_or(|rest| {
+        rest.split('/').next().unwrap_or_default().is_empty()
+            || rest.split('/').next().unwrap_or_default().contains('@')
+    }) || base.chars().any(char::is_whitespace)
+        || base.contains(['?', '#'])
+    {
+        return Err(
+            "apiBase must be an HTTP(S) endpoint without credentials, query or fragment".into(),
+        );
+    }
+    Ok(())
+}
+
+struct RealModel {
+    registry: ModelProviderRegistry,
+    config: Config,
+    wire: WireApi,
+    provenance: Value,
+    secrets: Vec<String>,
+}
+
+fn resolve_real_model(
+    value: &Value,
+    expected: Option<&Value>,
+    mut registry: ModelProviderRegistry,
+    credential: impl Fn(&str) -> Option<String>,
+) -> Result<RealModel, String> {
+    validate_model_config(value)?;
+    let provider_id = value["providerId"].as_str().expect("validated providerId");
+    let model = value["model"].as_str().expect("validated model");
     let mut provider = registry
-        .get(PROVIDER)
+        .get(provider_id)
         .ok_or("evaluation provider missing")?
         .clone();
+    let profile = built_in_model_profile(provider_id, model);
+    if let Some(api) = profile.as_ref().and_then(|profile| profile.api_override) {
+        provider.wire_api = match api {
+            ModelWireApi::OpenAiCompletions => WireApi::OpenAiChatCompletions,
+            ModelWireApi::OpenAiResponses => WireApi::OpenAiResponses,
+            ModelWireApi::AnthropicMessages => WireApi::AnthropicMessages,
+        };
+    }
+    if !matches!(
+        provider.wire_api,
+        WireApi::OpenAiChatCompletions | WireApi::OpenAiResponses | WireApi::AnthropicMessages
+    ) {
+        return Err("evaluation provider wire API is unsupported".into());
+    }
+    let base = value["apiBase"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| profile.and_then(|profile| profile.api_base_override))
+        .or_else(|| provider.base_url.clone())
+        .ok_or("evaluation API base missing")?;
+    validate_api_base(&base)?;
+    let override_env = value["credentialEnv"].as_str();
+    let env_key = match &mut provider.auth {
+        AuthSpec::ApiKeyEnv { env_key, .. } | AuthSpec::BearerEnv { env_key } => {
+            if let Some(name) = override_env {
+                *env_key = name.into();
+            }
+            Some(env_key.clone())
+        }
+        AuthSpec::None if override_env.is_none() => None,
+        _ => return Err(
+            "evaluation requires runtime environment credentials or unauthenticated provider auth"
+                .into(),
+        ),
+    };
+    let mut secrets = Vec::new();
+    if let Some(name) = &env_key {
+        let secret = credential(name)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("configured runtime credential is unavailable")?;
+        secrets.push(secret.trim().to_owned());
+        secrets.push(secret);
+    }
+    for name in provider.env_http_headers.values() {
+        if let Some(secret) = credential(name).filter(|value| !value.trim().is_empty()) {
+            secrets.push(secret.trim().to_owned());
+            secrets.push(secret);
+        }
+    }
+    let provenance = json!({"providerId":provider_id,"model":model,"apiBase":base,
+        "wireApi":provider.wire_api,"credentialEnv":env_key,
+        "credentialSource":"runtimeConfiguredCredentials"});
+    if expected.is_some_and(|expected| expected != &provenance) {
+        return Err("resolved model configuration differs from campaign".into());
+    }
     // Retries are owned by the bounded evaluation; no hidden transport dispatches.
     provider.default_max_retries = Some(0);
-    registry.insert_user_defined(provider);
-    Ok(OpenAiCompatibleModelClient::new(
-        registry,
-        ReqwestJsonHttpTransport::for_session(session_id, PROVIDER, build_model_http_client)?,
-    ))
-}
-fn model_config(real: bool) -> Config {
-    Config(ModelSessionConfig {
-        provider_kind: if real {
-            ModelProviderKind::CommandCode
-        } else {
-            ModelProviderKind::Local
-        },
-        provider_id: if real {
-            PROVIDER.into()
-        } else {
-            "local.default".into()
-        },
-        model: if real {
-            MODEL.into()
-        } else {
-            "working-set-fixed".into()
-        },
-        api_base: real.then(|| "https://api.commandcode.ai/provider/v1".into()),
+    let config = Config(ModelSessionConfig {
+        provider_kind: provider.provider_kind.clone(),
+        provider_id: provider_id.into(),
+        model: model.into(),
+        api_base: Some(base),
         timeout_ms: 180_000,
         max_retries: 0,
         max_output_tokens: Some(32_768),
-        thinking_mode: real.then(|| "high".into()),
+        thinking_mode: Some("high".into()),
+        ..Default::default()
+    });
+    let wire = provider.wire_api.clone();
+    registry.insert_user_defined(provider);
+    Ok(RealModel {
+        registry,
+        config,
+        wire,
+        provenance,
+        secrets,
+    })
+}
+
+fn live_client(session_id: &str, selection: &RealModel) -> Result<Box<dyn ModelClient>, String> {
+    let transport = ReqwestJsonHttpTransport::for_session(
+        session_id,
+        &selection.config.0.provider_id,
+        build_model_http_client,
+    )?;
+    let registry = selection.registry.clone();
+    match selection.wire {
+        WireApi::OpenAiChatCompletions => Ok(Box::new(OpenAiCompatibleModelClient::new(
+            registry, transport,
+        ))),
+        WireApi::OpenAiResponses => Ok(Box::new(OpenAiResponsesModelClient::new(
+            registry, transport,
+        ))),
+        WireApi::AnthropicMessages => Ok(Box::new(AnthropicMessagesModelClient::new(
+            registry, transport,
+        ))),
+        _ => Err("evaluation provider wire API is unsupported".into()),
+    }
+}
+
+fn model_config() -> Config {
+    Config(ModelSessionConfig {
+        provider_kind: ModelProviderKind::Local,
+        provider_id: "local.default".into(),
+        model: "working-set-fixed".into(),
+        timeout_ms: 180_000,
+        max_retries: 0,
+        max_output_tokens: Some(32_768),
         ..Default::default()
     })
+}
+
+fn redact_output(output: &mut Value, secrets: &[String]) {
+    match output {
+        Value::String(text) => {
+            for secret in secrets.iter().filter(|value| !value.is_empty()) {
+                *text = text.replace(secret, "[REDACTED]");
+            }
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| redact_output(value, secrets)),
+        Value::Object(values) => values
+            .values_mut()
+            .for_each(|value| redact_output(value, secrets)),
+        _ => {}
+    }
 }
 fn integer(request: &Value, field: &str, default: usize) -> usize {
     request[field]
@@ -516,13 +676,38 @@ fn integer(request: &Value, field: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-async fn execute(request: &Value, index: usize) -> Result<Value, String> {
+async fn execute(
+    request: &Value,
+    index: usize,
+    secrets: &mut Vec<String>,
+) -> Result<Value, String> {
     let mode = request["mode"].as_str().ok_or("mode required")?;
     let real = request["real"].as_bool().unwrap_or(false);
     let case = request["case"].as_str().unwrap_or("normal-tool");
     if !["perf", "quality"].contains(&mode) || (mode == "perf" && real) || !CASES.contains(&case) {
         return Err("invalid evaluation mode or case".into());
     }
+    let selection = if real {
+        let selection = resolve_real_model(
+            request
+                .get("modelConfig")
+                .ok_or("real evaluation requires modelConfig")?,
+            request.get("expectedResolvedModelConfig"),
+            ModelProviderRegistry::new(),
+            |name| std::env::var(name).ok(),
+        )?;
+        secrets.extend(selection.secrets.iter().cloned());
+        Some(selection)
+    } else {
+        if request
+            .get("modelConfig")
+            .is_some_and(|value| !value.is_null())
+            || request.get("expectedResolvedModelConfig").is_some()
+        {
+            return Err("fixed evaluation does not accept real model configuration".into());
+        }
+        None
+    };
     let root = PathBuf::from(request["root"].as_str().ok_or("root required")?);
     let workspace = request["workspaceRoot"]
         .as_str()
@@ -532,6 +717,16 @@ async fn execute(request: &Value, index: usize) -> Result<Value, String> {
     std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
     std::fs::write(workspace.join("proof.txt"), "READ_OK\n").map_err(|error| error.to_string())?;
     let id = format!("working-set-{mode}-{case}-{index}");
+    let live = selection
+        .as_ref()
+        .map(|selection| live_client(&id, selection))
+        .transpose()?;
+    let provenance = selection
+        .as_ref()
+        .map(|selection| selection.provenance.clone());
+    let config = selection
+        .map(|selection| selection.config)
+        .unwrap_or_else(model_config);
     let path = root.join(format!("{id}.sqlite"));
     if path.exists() {
         return Err("evaluation database already exists; use a fresh sample root".into());
@@ -572,7 +767,7 @@ async fn execute(request: &Value, index: usize) -> Result<Value, String> {
     let require_read =
         mode == "perf" || ["normal-tool", "tool-chain", "steer-owner"].contains(&case);
     let client = Client {
-        live: if real { Some(live_client(&id)?) } else { None },
+        live,
         main: AtomicUsize::new(0),
         summary: AtomicUsize::new(0),
         usage: Mutex::new(json!({"inputTokens":0,"outputTokens":0,"requests":[]})),
@@ -585,7 +780,6 @@ async fn execute(request: &Value, index: usize) -> Result<Value, String> {
         steer: (case == "steer-owner").then(|| control.clone()),
         steering_observed: AtomicUsize::new(0),
     };
-    let config = model_config(real);
     let rounds = if case.starts_with("repeat-") {
         2
     } else if case.starts_with("compact-") || case == "reopen-context" {
@@ -721,7 +915,8 @@ async fn execute(request: &Value, index: usize) -> Result<Value, String> {
         .sum();
     Ok(
         json!({"schema":"runtime.working_set.sample.v1","mode":mode,"case":case,"index":index,"real":real,
-        "providerId":if real {PROVIDER}else{"local.default"},"model":if real{MODEL}else{"fixed"},"stop":stop,
+        "providerId":config.0.provider_id,"model":if real{config.0.model.as_str()}else{"fixed"},"stop":stop,
+        "modelConfig":request.get("modelConfig"),"resolvedModelConfig":provenance,
         "error":error,"reply":reply,"expected":answer,"passed":matched && proof_unchanged && (!require_read || read_count==1) && compactions.iter().all(|value|*value),
         "elapsedMs":elapsed_ms,"firstRequestPreparedMs":first_request_prepared_ms,
         "preparationStageWorkSumMs":prepare_ms,"stages":stages,"compactions":compactions,
@@ -740,6 +935,7 @@ async fn execute(request: &Value, index: usize) -> Result<Value, String> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut raw = String::new();
+    let mut secrets = Vec::new();
     let result = match std::io::stdin().read_to_string(&mut raw) {
         Ok(_) => match serde_json::from_str::<Value>(&raw) {
             Ok(request) => {
@@ -755,7 +951,7 @@ async fn main() {
                     let mut values = Vec::new();
                     let mut error = None;
                     for index in 0..warmup + samples {
-                        match execute(&request, index).await {
+                        match execute(&request, index, &mut secrets).await {
                             Ok(mut value) => {
                                 value["warmup"] = json!(index < warmup);
                                 values.push(value);
@@ -778,12 +974,142 @@ async fn main() {
     let mut output = match result {
         Ok(value) => value,
         Err(error) => json!({"schema":"runtime.working_set.result.v1","error":error,"samples":[]}),
-    }
-    .to_string();
-    if let Ok(key) = std::env::var("COMMAND_CODE_API_KEY") {
-        if !key.is_empty() {
-            output = output.replace(&key, "[REDACTED]");
-        }
-    }
+    };
+    secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    redact_output(&mut output, &secrets);
     println!("{output}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model() -> Value {
+        json!({"schema":MODEL_CONFIG_SCHEMA,"providerId":"evaluation.synthetic",
+            "model":"evaluation-model","apiBase":null,"credentialEnv":null})
+    }
+
+    fn registry(wire: WireApi) -> ModelProviderRegistry {
+        let mut registry = ModelProviderRegistry::new();
+        let mut provider = registry.get("openai.default").unwrap().clone();
+        provider.provider_key = "evaluation.synthetic".into();
+        provider.base_url = Some("https://example.invalid/v1".into());
+        provider.wire_api = wire;
+        provider.auth = AuthSpec::BearerEnv {
+            env_key: "EVALUATION_TEST_DEFAULT_TOKEN".into(),
+        };
+        registry.insert_user_defined(provider);
+        registry
+    }
+
+    #[test]
+    fn model_selection_rejects_missing_unknown_and_inline_configuration() {
+        let valid = model();
+        validate_model_config(&valid).unwrap();
+        for invalid in [
+            Value::Null,
+            json!({}),
+            json!({"apiKey":"synthetic-only"}),
+            {
+                let mut v = valid.clone();
+                v["unexpected"] = json!(true);
+                v
+            },
+            {
+                let mut v = valid.clone();
+                v["model"] = json!("");
+                v
+            },
+            {
+                let mut v = valid.clone();
+                v["credentialEnv"] = json!("inline-secret-value");
+                v
+            },
+            {
+                let mut v = valid.clone();
+                v["apiBase"] = json!("https://user:secret@example.invalid/v1");
+                v
+            },
+        ] {
+            assert!(validate_model_config(&invalid).is_err());
+        }
+        assert!(
+            resolve_real_model(&valid, None, registry(WireApi::OpenAiResponses), |_| None).is_err()
+        );
+    }
+
+    #[test]
+    fn selected_registry_protocol_and_environment_preserve_fixed_evaluation_limits() {
+        for wire in [
+            WireApi::OpenAiChatCompletions,
+            WireApi::OpenAiResponses,
+            WireApi::AnthropicMessages,
+        ] {
+            let mut value = model();
+            value["credentialEnv"] = json!("EVALUATION_TEST_OVERRIDE_TOKEN");
+            let selected = resolve_real_model(&value, None, registry(wire.clone()), |name| {
+                assert_eq!(name, "EVALUATION_TEST_OVERRIDE_TOKEN");
+                Some("synthetic-secret".into())
+            })
+            .unwrap();
+            assert_eq!(selected.wire, wire);
+            assert_eq!(selected.config.0.timeout_ms, 180_000);
+            assert_eq!(selected.config.0.max_output_tokens, Some(32_768));
+            assert_eq!(selected.config.0.thinking_mode.as_deref(), Some("high"));
+            assert_eq!(
+                selected
+                    .registry
+                    .resolve_session_config(&selected.config.0)
+                    .unwrap()
+                    .effective_max_retries,
+                0
+            );
+            assert!(!selected.provenance.to_string().contains("synthetic-secret"));
+            assert_eq!(
+                selected.provenance["credentialEnv"],
+                "EVALUATION_TEST_OVERRIDE_TOKEN"
+            );
+            assert!(resolve_real_model(
+                &value,
+                Some(&json!({"model":"changed"})),
+                registry(wire),
+                |_| Some("synthetic-secret".into())
+            )
+            .is_err());
+        }
+        let selected =
+            resolve_real_model(&model(), None, registry(WireApi::OpenAiResponses), |name| {
+                assert_eq!(name, "EVALUATION_TEST_DEFAULT_TOKEN");
+                Some("synthetic-default".into())
+            })
+            .unwrap();
+        assert_eq!(
+            selected.provenance["credentialEnv"],
+            "EVALUATION_TEST_DEFAULT_TOKEN"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_selection_is_rejected_before_database_creation_or_network() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("must-not-exist");
+        let mut request = json!({"mode":"quality","real":true,"root":target,"modelConfig":model()});
+        let mut secrets = Vec::new();
+        assert!(execute(&request, 0, &mut secrets).await.is_err());
+        assert!(!target.exists());
+        request["real"] = json!(false);
+        request["mode"] = json!("perf");
+        assert!(execute(&request, 0, &mut secrets).await.is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn selected_runtime_secret_is_redacted_in_nested_json_before_encoding() {
+        let secret = "synthetic-\"credential".to_string();
+        let mut value =
+            json!({"error":format!("upstream echoed {secret}"),"requests":[{"content":secret}]});
+        redact_output(&mut value, &[secret]);
+        assert_eq!(value["error"], "upstream echoed [REDACTED]");
+        assert_eq!(value["requests"][0]["content"], "[REDACTED]");
+    }
 }

@@ -11,10 +11,12 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlsplit
 
 CASES = (
     "normal-answer", "normal-history", "normal-tool", "compact-goal", "compact-path",
@@ -22,6 +24,40 @@ CASES = (
     "tool-chain", "steer-owner", "reopen-context",
 )
 SCHEMA = "runtime.working_set.result.v1"
+MODEL_CONFIG_SCHEMA = "runtime.working_set.model_config.v1"
+
+
+def load_model_config(args):
+    path = getattr(args, "model_config", None)
+    if not args.real:
+        if path is not None:
+            raise ValueError("fixed evaluation does not accept real model configuration")
+        return None
+    if path is None:
+        raise ValueError("real quality requires --model-config")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(value, dict) or set(value) !=
+            {"schema", "providerId", "model", "apiBase", "credentialEnv"}
+            or value["schema"] != MODEL_CONFIG_SCHEMA):
+        raise ValueError("invalid model configuration schema or fields; inline credentials are not accepted")
+    for field in ("providerId", "model"):
+        text = value[field]
+        if not isinstance(text, str) or not text or text != text.strip() or any(ord(c) < 32 or ord(c) == 127 for c in text):
+            raise ValueError("providerId and model must be nonempty canonical text")
+    base = value["apiBase"]
+    if base is not None:
+        if not isinstance(base, str):
+            raise ValueError("apiBase must be text or null")
+        url = urlsplit(base)
+        if (url.scheme not in {"http", "https"} or not url.netloc or "@" in url.netloc
+                or "?" in base or "#" in base or any(c.isspace() for c in base)):
+            raise ValueError("apiBase must be an HTTP(S) endpoint without credentials, query or fragment")
+    name = value["credentialEnv"]
+    if name is not None and (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)):
+        raise ValueError("credentialEnv must name a runtime environment variable")
+    if args.execute and name is not None and not os.environ.get(name, "").strip():
+        raise ValueError("configured runtime credential is unavailable")
+    return value
 
 
 def percentile(values, fraction):
@@ -174,6 +210,7 @@ def performance(args):
 
 
 def quality(args):
+    model_config = load_model_config(args)
     cases = tuple(dict.fromkeys(args.cases))
     versions = tuple(dict.fromkeys(args.versions))
     if args.repeats < 1 or not math.isfinite(args.max_cost_usd) or args.max_cost_usd <= 0:
@@ -185,7 +222,8 @@ def quality(args):
             "versions": list(versions), "fullCaseCoverage": set(cases) == set(CASES),
             "targetPerVersion": target, "primaryRuns": primary_runs,
             "maxRuns": primary_runs + reserve, "reserveRuns": reserve, "maxCostUsd": args.max_cost_usd, "runs": [], "executed": args.execute,
-            "real": args.real, "costUpperUsd": 0.0}
+            "real": args.real, "costUpperUsd": 0.0, "modelConfig": model_config,
+            "resolvedModelConfigs": {}}
     rerun = tuple(dict.fromkeys(args.rerun_cases or ()))
     if len(rerun) > 6:
         raise ValueError("affected recheck is limited to six cases / twelve Runs")
@@ -198,6 +236,9 @@ def quality(args):
         if not args.reason or not args.output.exists():
             raise ValueError("affected recheck requires existing receipts and a concrete change reason")
         plan = json.loads(args.output.read_text(encoding="utf-8"))
+        if args.real and (plan.get("modelConfig") != model_config
+                or not isinstance(plan.get("resolvedModelConfigs", {}).get("candidate"), dict)):
+            raise ValueError("recheck requires the original campaign model configuration and resolved identity")
         if plan.get("schema") != "runtime.working_set.quality.v1" or plan.get("real") != args.real or plan.get("stopped"):
             raise ValueError("incompatible or unresolved quality receipts")
         primary_scope = {(version, case, repeat) for version in ("baseline", "candidate")
@@ -212,9 +253,9 @@ def quality(args):
         target = len(cases) * plan["repeats"]
     elif args.output.exists():
         raise ValueError("result already exists; inspect paid and unknown receipts before rerunning")
-    if args.real and (not os.environ.get("COMMAND_CODE_API_KEY") or not all(
+    if args.real and (not all(
             math.isfinite(value) and value > 0 for value in (args.input_rate, args.output_rate))):
-        raise ValueError("real evaluation requires injected credential and verified positive input/output rates")
+        raise ValueError("real evaluation requires verified positive input/output rates")
     root = args.output.parent / (args.output.stem + "-data")
     save(args.output, plan)
     jobs = []
@@ -236,11 +277,21 @@ def quality(args):
                    "workspaceRoot": str(root / "fixture"), "warmup": 0, "samples": 1,
                    "budgetUsd": remaining, "inputUsdPerMillion": args.input_rate,
                    "outputUsdPerMillion": args.output_rate}
+        if args.real:
+            command["modelConfig"] = model_config
+            if label in plan["resolvedModelConfigs"]:
+                command["expectedResolvedModelConfig"] = plan["resolvedModelConfigs"][label]
         try:
             receipt = invoke(getattr(args, label), command)
             if receipt.get("error") or len(receipt["samples"]) != 1:
                 raise ValueError("no complete cost receipt after dispatch")
             sample = receipt["samples"][0]
+            if args.real:
+                resolved = sample.get("resolvedModelConfig")
+                if (sample.get("modelConfig") != model_config or not isinstance(resolved, dict)
+                        or (label in plan["resolvedModelConfigs"] and resolved != plan["resolvedModelConfigs"][label])):
+                    raise ValueError("evaluation receipt model configuration differs from campaign")
+                plan["resolvedModelConfigs"][label] = resolved
             errors = validate_sample(sample)
             cost = sample["costUpperUsd"] if args.real else 0.0
             if cost > remaining + 1e-8:
@@ -282,6 +333,7 @@ def main():
         command.add_argument("--execute", action="store_true")
         if name == "quality":
             command.add_argument("--real", action="store_true")
+            command.add_argument("--model-config", type=Path)
             command.add_argument("--input-rate", type=float, default=0.0)
             command.add_argument("--output-rate", type=float, default=0.0)
             command.add_argument("--versions", choices=("baseline", "candidate"), nargs="+", default=["baseline", "candidate"])

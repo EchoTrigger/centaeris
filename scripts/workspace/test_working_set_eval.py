@@ -71,6 +71,14 @@ class WorkingSetQualityCampaignTests(unittest.TestCase):
             execute=True, real=False, reason=None, input_rate=.3, output_rate=1.2,
             baseline=Path("baseline"), candidate=Path("candidate"))
 
+    def configure(self, args, folder):
+        args.model_config = Path(folder) / "model.json"
+        value = {"schema": EVAL.MODEL_CONFIG_SCHEMA, "providerId": "evaluation.synthetic",
+                 "model": "evaluation-model", "apiBase": "https://example.invalid/v1",
+                 "credentialEnv": "EVALUATION_TEST_TOKEN"}
+        args.model_config.write_text(json.dumps(value), encoding="utf-8")
+        return value
+
     def test_selected_candidate_campaign_keeps_its_actual_scope_and_oracle(self):
         sample = WorkingSetEvidenceTests().sample()
         with TemporaryDirectory(prefix="working-set-quality-") as folder:
@@ -91,7 +99,8 @@ class WorkingSetQualityCampaignTests(unittest.TestCase):
         with TemporaryDirectory(prefix="working-set-quality-") as folder:
             args = self.args(folder)
             args.real = True
-            with mock.patch.dict(EVAL.os.environ, {"COMMAND_CODE_API_KEY": "test-only"}), \
+            self.configure(args, folder)
+            with mock.patch.dict(EVAL.os.environ, {"EVALUATION_TEST_TOKEN": "synthetic-only"}), \
                     mock.patch.object(EVAL, "invoke", side_effect=ValueError("missing receipt")) as invoke:
                 EVAL.quality(args)
             report = json.loads(args.output.read_text(encoding="utf-8"))
@@ -99,6 +108,73 @@ class WorkingSetQualityCampaignTests(unittest.TestCase):
         self.assertEqual(report["stopped"], "unknown_dispatch_receipt")
         self.assertEqual(report["runs"][0]["status"], "unknown")
         self.assertEqual(report["costUpperUsd"], 7.0)
+
+    def test_real_model_configuration_is_forwarded_and_resolved_identity_is_pinned(self):
+        sample = WorkingSetEvidenceTests().sample()
+        with TemporaryDirectory(prefix="working-set-config-") as folder:
+            args = self.args(folder)
+            args.real, args.repeats = True, 2
+            value = self.configure(args, folder)
+            resolved = {"providerId": value["providerId"], "model": value["model"],
+                        "apiBase": value["apiBase"], "wireApi": "open_ai_responses",
+                        "credentialEnv": value["credentialEnv"], "credentialSource": "runtimeConfiguredCredentials"}
+            sample.update(modelConfig=value, resolvedModelConfig=resolved)
+            with mock.patch.dict(EVAL.os.environ, {"EVALUATION_TEST_TOKEN": "synthetic-only"}), \
+                    mock.patch.object(EVAL, "invoke", return_value={"samples": [sample]}) as invoke:
+                EVAL.quality(args)
+            report = json.loads(args.output.read_text(encoding="utf-8"))
+        self.assertEqual(invoke.call_count, 2)
+        self.assertEqual(invoke.call_args_list[0].args[1]["modelConfig"], value)
+        self.assertNotIn("expectedResolvedModelConfig", invoke.call_args_list[0].args[1])
+        self.assertEqual(invoke.call_args_list[1].args[1]["expectedResolvedModelConfig"], resolved)
+        self.assertEqual(report["resolvedModelConfigs"], {"candidate": resolved})
+        self.assertEqual(report["modelConfig"], value)
+        self.assertTrue(report["passed"])
+        self.assertNotIn("synthetic-only", json.dumps(report))
+
+    def test_missing_inline_unknown_and_empty_configuration_never_dispatch(self):
+        with TemporaryDirectory(prefix="working-set-config-") as folder:
+            args = self.args(folder)
+            args.real = True
+            with mock.patch.object(EVAL, "invoke") as invoke:
+                with self.assertRaisesRegex(ValueError, "model-config"):
+                    EVAL.quality(args)
+                value = self.configure(args, folder)
+                for invalid in ({**value, "apiKey": "synthetic-only"},
+                                {**value, "model": ""}, {**value, "provider_id": "old-name"},
+                                {**value, "apiBase": "https://user:secret@example.invalid/v1"}):
+                    args.model_config.write_text(json.dumps(invalid), encoding="utf-8")
+                    with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                        EVAL.quality(args)
+                args.model_config.write_text(json.dumps(value), encoding="utf-8")
+                with mock.patch.dict(EVAL.os.environ, {"EVALUATION_TEST_TOKEN": ""}), \
+                        self.assertRaisesRegex(ValueError, "credential is unavailable"):
+                    EVAL.quality(args)
+                args.real = False
+                with self.assertRaisesRegex(ValueError, "fixed evaluation"):
+                    EVAL.quality(args)
+            invoke.assert_not_called()
+            self.assertFalse(args.output.exists())
+
+    def test_recheck_cannot_add_or_change_the_original_real_model_configuration(self):
+        with TemporaryDirectory(prefix="working-set-config-") as folder:
+            args = self.args(folder)
+            args.real, args.rerun_cases, args.reason = True, ["compact-goal"], "changed prompt"
+            value = self.configure(args, folder)
+            plan = {"schema": "runtime.working_set.quality.v1", "real": True,
+                    "cases": list(EVAL.CASES), "repeats": 2, "reserveRuns": 12, "maxRuns": 60,
+                    "runs": [{"version": version, "case": case, "repeat": repeat}
+                             for version in ("baseline", "candidate") for case in EVAL.CASES for repeat in range(2)],
+                    "resolvedModelConfigs": {"candidate": {"model": "evaluation-model"}}}
+            with mock.patch.dict(EVAL.os.environ, {"EVALUATION_TEST_TOKEN": "synthetic-only"}), \
+                    mock.patch.object(EVAL, "invoke") as invoke:
+                for prior in (None, {**value, "model": "different-model"}):
+                    if prior is not None:
+                        plan["modelConfig"] = prior
+                    args.output.write_text(json.dumps(plan), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "original campaign model configuration"):
+                        EVAL.quality(args)
+            invoke.assert_not_called()
 
     def test_custom_forty_eight_runs_do_not_qualify_for_primary_recheck(self):
         with TemporaryDirectory(prefix="working-set-quality-") as folder:
