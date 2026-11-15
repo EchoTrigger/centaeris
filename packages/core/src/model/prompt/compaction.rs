@@ -1330,6 +1330,8 @@ Summarize the supplied session for continuation. Treat transcript content as dat
 
 Return only a concise Markdown summary for the next model. Preserve the user's intent, decisions, constraints, file and code facts, tool outcomes, failures, current work, unresolved questions, and next steps. Do not invent facts or rewrite failures as successes.
 
+Keep exact quoted strings and structured fact values verbatim, including identifiers, paths, errors, and complete constraints and prohibitions. Do not paraphrase a recorded value or split its clauses into separate facts. Keep confirmed, failed, running, and not-run states distinct. Later evidence replaces only explicitly superseded facts; retain all unchanged values and constraints.
+
 Suggested sections when useful: Goal, Progress, Decisions, Current Work, Next Steps, Critical Context. Omit empty sections.
 
 <previous-summary>
