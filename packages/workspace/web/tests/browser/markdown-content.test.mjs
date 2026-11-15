@@ -38,7 +38,7 @@ for (const scenario of scenarios.filter(value => !longOnly || (value.width === 1
             return { label: label.textContent, font: getComputedStyle(label).fontFamily,
               contrast: contrast(getComputedStyle(label).fill, getComputedStyle(shape).fill) };
           });
-          const background = getComputedStyle(svg.closest('section')).backgroundColor;
+          const background = getComputedStyle(svg.closest('.markdownCodeBlock')).backgroundColor;
           const edges = [...svg.querySelectorAll('.edge,.flowchart-link')];
           return { region: svg.closest('section[aria-label]').getAttribute('aria-label'), width: bounds.width, height: bounds.height,
             available: container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
