@@ -116,30 +116,35 @@ fn postgres_maintenance_completion_v11_migration_preserves_existing_facts_and_hi
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (url, mut db) = setup();
     downgrade_to_eleven(&mut db);
-    db.batch_execute("INSERT INTO runtime.session_runtime_snapshots VALUES('kept-session','{\"fact\":\"retained\"}',123);").unwrap();
-    let before = db
-        .query_one(
-            "SELECT row_to_json(s)::text FROM runtime.session_runtime_snapshots s",
-            &[],
-        )
-        .unwrap()
-        .get::<_, String>(0);
+    let mut legacy: serde_json::Value =
+        serde_json::from_str(&super::session_snapshot_fixture("kept-session", "retained")).unwrap();
+    legacy.as_object_mut().unwrap().remove("history");
+    db.execute(
+        "INSERT INTO runtime.session_runtime_snapshots VALUES('kept-session',$1,123)",
+        &[&legacy.to_string()],
+    )
+    .unwrap();
     let previous = history(&mut db);
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(
         history(&mut db).iter().map(|row| row.0).collect::<Vec<_>>(),
-        (1..=22).collect::<Vec<_>>()
+        (1..=24).collect::<Vec<_>>()
     );
     assert_eq!(&history(&mut db)[..11], previous.as_slice());
-    assert_eq!(
-        db.query_one(
-            "SELECT row_to_json(s)::text FROM runtime.session_runtime_snapshots s",
-            &[]
+    let migrated = db
+        .query_one(
+            "SELECT session_id,snapshot_json,updated_at_ms FROM runtime.session_runtime_snapshots",
+            &[],
         )
-        .unwrap()
-        .get::<_, String>(0),
-        before
-    );
+        .unwrap();
+    assert_eq!(migrated.get::<_, String>(0), "kept-session");
+    assert_eq!(migrated.get::<_, i64>(2), 123);
+    let snapshot: centaeris_core::session::state::SessionStateSnapshot =
+        serde_json::from_str(&migrated.get::<_, String>(1)).unwrap();
+    assert_eq!(snapshot.history, Default::default());
+    let mut preserved = serde_json::to_value(snapshot).unwrap();
+    preserved.as_object_mut().unwrap().remove("history");
+    assert_eq!(preserved, legacy);
     assert_eq!(
         db.query_one(
             "SELECT count(*) FROM runtime.environment_maintenance_completions",

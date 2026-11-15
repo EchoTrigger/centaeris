@@ -107,7 +107,7 @@ fn postgres_subagent_presentation_migrates_nineteen_forward_and_rejects_trigger_
         .map(|row| (row.get::<_, i64>(0), row.get::<_, i64>(1)))
         .collect::<Vec<_>>();
     assert_eq!(&after[..19], before.as_slice());
-    assert_eq!(after.len(), 22);
+    assert_eq!(after.len(), 24);
     assert_eq!(after[19].0, 20);
     assert_eq!(reopened.get_runtime_job(&job.job_id).unwrap().unwrap(), job);
     db.batch_execute(

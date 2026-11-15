@@ -1467,6 +1467,7 @@ mod tests {
     #[test]
     fn current_store_preserves_history_sources_and_continuation() {
         use centaeris_core::session::external_context::ExternalContextStorePort;
+        use centaeris_core::session::state::SessionStateSnapshot;
         use centaeris_core::session::store::AgentRuntimeSnapshotStorePort;
         let mut fixture = persisted_transcript_fixture();
         let source = include_bytes!("tests/fixtures/transcript/session.jsonl");
@@ -1486,8 +1487,13 @@ mod tests {
                 },
             )
             .unwrap();
+        let mut snapshot = SessionStateSnapshot::new("session-1".into(), 1);
+        snapshot
+            .metadata
+            .insert("fixture".into(), "transcript".into());
+        let snapshot_json = serde_json::to_string(&snapshot).unwrap();
         store
-            .save_agent_runtime_snapshot("session-1", r#"{"fixture":"transcript"}"#, 1)
+            .save_agent_runtime_snapshot("session-1", &snapshot_json, 1)
             .unwrap();
         drop(store);
         let request = || TranscriptPageRpcRequestV1 {
@@ -1527,12 +1533,16 @@ mod tests {
                 .content,
             "notice contents"
         );
-        assert_eq!(
-            store
+        let restored: SessionStateSnapshot = serde_json::from_str(
+            &store
                 .load_agent_runtime_snapshot("session-1")
                 .unwrap()
-                .as_deref(),
-            Some("{\"fixture\":\"transcript\"}")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(snapshot).unwrap()
         );
         assert_eq!(fs::read(&fixture.log_path).unwrap(), source);
         let document = message_log::read_session_document(&fixture.log_path)
