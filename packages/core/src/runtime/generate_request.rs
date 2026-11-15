@@ -728,12 +728,10 @@ impl<
         prepared_prompt.messages = messages;
         prepared_prompt.set_input_images(images)?;
         if resolved_images {
-            prompt_usage_basis = session_config
-                .as_ref()
-                .map(|config| {
-                    super::prompt_usage::PromptUsageBasisV1::from_prompt(&prepared_prompt, config)
-                })
-                .transpose()?;
+            prompt_usage_basis = Some(super::prompt_usage::PromptUsageBasisV1::from_prompt(
+                &prepared_prompt,
+                session_config.as_ref(),
+            )?);
             raw_input_token_estimate = match &prompt_usage_basis {
                 Some(basis) => basis.estimated_input_tokens(),
                 None => estimate_prepared_prompt_input_tokens(&prepared_prompt)?,
@@ -1104,21 +1102,13 @@ impl<
             agent_instructions_hash.as_deref(),
             &self.config,
         )?;
-        let prompt_usage_basis = if image_observations.is_empty() {
-            session_config
-                .as_ref()
-                .map(|config| {
-                    super::prompt_usage::PromptUsageBasisV1::from_prompt(&prepared_prompt, config)
-                })
-                .transpose()?
-        } else {
-            None
-        };
-        let raw_input_token_estimate = match &prompt_usage_basis {
-            Some(basis) => basis.estimated_input_tokens(),
-            None => estimate_prepared_prompt_input_tokens(&prepared_prompt)?
-                .saturating_add((image_observations.len() as u32).saturating_mul(1024)),
-        };
+        let prompt_usage_basis = super::prompt_usage::PromptUsageBasisV1::from_prompt_with_images(
+            &prepared_prompt,
+            session_config.as_ref(),
+            &image_observations,
+        )?;
+        let raw_input_token_estimate = prompt_usage_basis.estimated_input_tokens();
+        let prompt_usage_basis = Some(prompt_usage_basis);
         projection_span.complete();
         Ok(GeneratePromptProjection {
             prepared_prompt,
@@ -2000,35 +1990,8 @@ fn project_model_input_images(
 pub(super) fn estimate_prepared_prompt_input_tokens(
     prepared_prompt: &PreparedPromptV1,
 ) -> Result<u32, String> {
-    let system_tokens = prepared_prompt
-        .system_prompt
-        .as_deref()
-        .map(crate::model::prepared_prompt::estimate_text_tokens)
-        .unwrap_or_default();
-    let context_tokens = prepared_prompt
-        .messages
-        .iter()
-        .try_fold(0u32, |total, message| {
-            let serialized = serde_json::to_string(message).map_err(|error| {
-                format!("serialize model message for context budget failed: {error}")
-            })?;
-            Ok::<u32, String>(total.saturating_add(
-                crate::model::prepared_prompt::estimate_text_tokens(serialized.as_str()),
-            ))
-        })?;
-    let tool_schema_tokens = if prepared_prompt.tool_definitions.is_empty() {
-        0
-    } else {
-        let serialized =
-            serde_json::to_string(&prepared_prompt.tool_definitions).map_err(|error| {
-                format!("serialize model tool definitions for context budget failed: {error}")
-            })?;
-        crate::model::prepared_prompt::estimate_text_tokens(serialized.as_str())
-    };
-    Ok(system_tokens
-        .saturating_add(context_tokens)
-        .saturating_add(tool_schema_tokens)
-        .saturating_add((prepared_prompt.input_images.len() as u32).saturating_mul(1_024)))
+    crate::model::prepared_prompt::estimate_prepared_prompt_tokens(prepared_prompt, None)
+        .map(|estimate| estimate.total_tokens())
 }
 
 fn validate_model_input_budget_config(

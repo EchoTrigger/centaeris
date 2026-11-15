@@ -175,10 +175,12 @@ impl<
                     },
                 );
                 request.prepared_prompt.system_prompt = Some(system);
-                request.context_token_estimate =
-                    super::generate_request::estimate_prepared_prompt_input_tokens(
-                        &request.prepared_prompt,
-                    )?;
+                let usage_basis = super::prompt_usage::PromptUsageBasisV1::from_prompt(
+                    &request.prepared_prompt,
+                    request.session_config.as_ref(),
+                )?;
+                request.context_token_estimate = usage_basis.estimated_input_tokens();
+                request.prompt_usage_basis = Some(usage_basis);
                 if request
                     .context_token_estimate
                     .saturating_add(self.config.model_max_output_tokens)

@@ -85,6 +85,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
         observations: Vec<ModelObservationV1>,
         tool_contracts: &[crate::tool::ToolContract],
         prompt_compaction: Option<super::prompt_compaction_commit::PreparedCompactionCommit>,
+        usage_basis: Option<&super::prompt_usage::PromptUsageBasisV1>,
     ) -> Result<Option<String>, String> {
         let Some(sink) = self.tool_safe_point else {
             return Ok(None);
@@ -105,8 +106,18 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> ModelClientGenerateDriver<'
             .cloned()
             .collect();
         let composition = environment.resolve_request(&request)?;
-        let mut started =
-            ModelRequestStartedV1::from_request(purpose, &request, observations, composition)?;
+        let mut started = match usage_basis {
+            Some(basis) => ModelRequestStartedV1::from_measured_request(
+                purpose,
+                &request,
+                observations,
+                composition,
+                basis.token_estimate(),
+            )?,
+            None => {
+                ModelRequestStartedV1::from_request(purpose, &request, observations, composition)?
+            }
+        };
         if let Some(commit) = prompt_compaction {
             super::prompt_compaction_commit::validate_observed_commit(&started, &commit)?;
             if Some(commit.source.agent_run_id.as_str()) == self.source_agent_run_id {
@@ -210,6 +221,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 req.observations.clone(),
                 &req.tool_contracts,
                 req.prompt_compaction.clone(),
+                req.prompt_usage_basis.as_ref(),
             )?;
             let response = self
                 .model_client
@@ -255,6 +267,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 req.observations.clone(),
                 &req.tool_contracts,
                 req.prompt_compaction.clone(),
+                req.prompt_usage_basis.as_ref(),
             )?;
             sink(TurnUpdate::ModelRequestStart {
                 session_id: req.session_id.clone(),
@@ -308,6 +321,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                                     req.observations.clone(),
                                     &req.tool_contracts,
                                     req.prompt_compaction.clone(),
+                                    req.prompt_usage_basis.as_ref(),
                                 )
                             });
                             match restarted {

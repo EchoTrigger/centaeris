@@ -11,6 +11,21 @@ pub use openai_completions::OpenAiCompatibleModelClient;
 pub use openai_responses::OpenAiResponsesModelClient;
 pub use tool_calls::validate_provider_tool_call_arguments;
 
+pub(crate) fn replayed_reasoning_text_bytes(
+    config: Option<&ModelSessionConfig>,
+    reasoning: &str,
+) -> Result<usize, String> {
+    let Some(config) = config else {
+        return Ok(reasoning.len());
+    };
+    if config.provider_kind == ModelProviderKind::Gemini {
+        return Ok(0);
+    }
+    anthropic_messages::minimax_replayed_thinking_bytes(&config.provider_id, reasoning)
+        .map(|bytes| bytes.unwrap_or(reasoning.len()))
+        .map_err(|error| error.message)
+}
+
 use openai_completions::*;
 use shared::*;
 use tool_calls::*;

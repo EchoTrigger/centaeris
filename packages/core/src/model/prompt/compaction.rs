@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::prepared_prompt::estimate_projected_message_tokens;
+use crate::model::prepared_prompt::{estimate_projected_message_tokens, estimate_text_tokens};
 use crate::model::{
     DEFAULT_MODEL_CONTEXT_TOKENS, DEFAULT_MODEL_OUTPUT_TOKENS, PROMPT_COMPACTION_MAX_OUTPUT_TOKENS,
     PROMPT_COMPACTION_TRIGGER_HEADROOM_TOKENS, PROMPT_COMPACTION_USER_REPLAY_TOKENS,
@@ -1479,11 +1479,6 @@ fn estimate_messages_tokens(
         estimate_projected_message_tokens(message, semantics)
             .map(|tokens| total.saturating_add(tokens))
     })
-}
-
-fn estimate_text_tokens(text: &str) -> u32 {
-    let chars = text.chars().count();
-    u32::try_from(chars / 4).unwrap_or(u32::MAX)
 }
 
 fn now_ms() -> i64 {

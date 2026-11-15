@@ -9,6 +9,86 @@ use crate::execution::{
 use base64::Engine as _;
 
 #[tokio::test]
+async fn query_loop_preserves_input_usage_anchor_when_later_responses_omit_usage() {
+    struct UsageDriver(AtomicUsize);
+    impl AsyncGenerateDriver for UsageDriver {
+        fn trusted_session_model_config(
+            &self,
+            _: &str,
+        ) -> Result<Option<ModelSessionConfig>, String> {
+            Ok(Some(ModelSessionConfig::default()))
+        }
+
+        fn generate_next_async<'a>(
+            &'a self,
+            request: &'a GenerateDriverRequest,
+        ) -> GenerateDriverFuture<'a, GenerateDriverOutcome> {
+            Box::pin(async move {
+                let mut outcome = TestPromptCompactionAsyncDriver
+                    .generate_next_async(request)
+                    .await?;
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    outcome.generate_result.input_tokens = Some(10_000);
+                    outcome.generate_result.total_tokens = Some(10_100);
+                }
+                Ok(outcome)
+            })
+        }
+    }
+
+    let store = AgentRuntimeTestStore::new();
+    let engine = AgentRuntime::new_for_test(
+        store.clone(),
+        AgentRuntimeConfig {
+            enable_prompt_compaction: false,
+            ..Default::default()
+        },
+    );
+    let driver = UsageDriver(AtomicUsize::new(0));
+    let mut previous = None;
+    for turn in 0..3 {
+        engine
+            .process_turn_loop_with_async_driver_and_sink_cancellable(
+                AgentRunRequest {
+                    session_id: "usage-less-responses".into(),
+                    initial_turn_id: format!("usage-turn-{turn}"),
+                    initial_input: AgentRunInitialInput::UserMessage(
+                        "Continue the same task".into(),
+                    ),
+                    agent_run_identity: None,
+                    runtime_scope: PromptCompactionScopeV1::main(),
+                    resume_from_turn_id: None,
+                    auto_continue_after_resume_wait: None,
+                },
+                &driver,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let session = engine
+            .session_manager
+            .load_or_create_session("usage-less-responses")
+            .unwrap();
+        let current = session
+            .history
+            .prompt_usage_anchor
+            .expect("last reported input remains covered");
+        current.validate().unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(
+                &current, previous,
+                "missing usage must not erase or advance the prefix"
+            );
+        }
+        previous = Some(current);
+    }
+}
+
+#[tokio::test]
 async fn compaction_replays_original_user_requests_from_archived_history() {
     let store = AgentRuntimeTestStore::new();
     let session_id = "archived-user-replay";

@@ -410,7 +410,7 @@ async fn query_loop_repeated_chain_compaction_keeps_one_original_anchor() {
     for call in ["second-old-a", "second-old-b"] {
         append_prompt_test_tool_group(&handler, &mut saved, &[call]);
         saved.messages.last_mut().unwrap().content =
-            format!("confirmed result {call} ").repeat(200);
+            format!("confirmed result {call} ").repeat(220);
     }
     append_prompt_test_tool_group(
         &handler,

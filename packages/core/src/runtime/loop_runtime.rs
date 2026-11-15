@@ -2355,7 +2355,7 @@ impl<
                     .iter()
                     .map(|definition| definition.name.clone())
                     .collect::<HashSet<_>>();
-                let prompt_usage_basis = generate_req.prompt_usage_basis.take();
+                let prompt_usage_basis = generate_req.prompt_usage_basis.clone();
                 let prepared_turn = PreparedTurnGeneration::new(
                     session_id.clone(),
                     turn_id.clone(),
@@ -2534,8 +2534,9 @@ impl<
                 }
                 Err(error) => return Err(error.into()),
             };
-            let prompt_usage_anchor =
-                prompt_usage_basis.and_then(|basis| basis.into_anchor(&turn_req.generate_result));
+            let prompt_usage_anchor = prompt_usage_basis
+                .as_ref()
+                .and_then(|basis| basis.clone().into_anchor(&turn_req.generate_result));
             for call in &turn_req.generate_result.tool_calls {
                 if !request_tool_names.contains(&call.name) {
                     return Err(format!(
@@ -2666,7 +2667,15 @@ impl<
             }
             let continuation = response.continuation;
             let stop = continuation_run_stop(continuation);
-            response.session_snapshot.history.prompt_usage_anchor = prompt_usage_anchor;
+            if let Some(anchor) = prompt_usage_anchor {
+                response.session_snapshot.history.prompt_usage_anchor = Some(anchor);
+            } else if let Some(basis) = &prompt_usage_basis {
+                basis.retain_matching_anchor(
+                    &mut response.session_snapshot.history.prompt_usage_anchor,
+                );
+            } else {
+                response.session_snapshot.history.prompt_usage_anchor = None;
+            }
             response.session_snapshot = self
                 .session_manager
                 .save_session_owned(response.session_snapshot)?;

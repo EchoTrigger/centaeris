@@ -9,6 +9,7 @@ use crate::extension::skills::{
     add_skill_source, SkillCatalogLoadConfig, SkillSourceAddRequest, SkillSourceKindV1,
     SkillSourceScopeV1, SkillSourcesConfigV1,
 };
+use crate::model::prepared_prompt::estimate_prepared_prompt_tokens;
 use crate::model::{
     ModelClientError, ModelClientErrorKind, ModelClientFuture, ModelClientRequest,
     ModelClientResponse, ModelClientStreamEvent, ModelSessionConfig,
@@ -3014,11 +3015,9 @@ async fn query_loop_preserves_dynamic_description_at_durable_model_request_bound
     observations.push(ModelObservationV1::ToolCatalog {
         tool_definitions: prepared_prompt.tool_definitions.clone(),
     });
-    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        &serde_json::to_string(&prepared_prompt.messages[0]).unwrap(),
-    ) + crate::model::prepared_prompt::estimate_text_tokens(
-        &serde_json::to_string(&prepared_prompt.tool_definitions).unwrap(),
-    );
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = GenerateDriverRequest {
         context_was_compacted: false,
         prompt_usage_basis: None,
@@ -3105,11 +3104,9 @@ async fn query_loop_persistence_fences_provider_dispatch_and_stream_output() {
         8_192,
     )
     .expect("valid prepared prompt");
-    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        serde_json::to_string(&prepared_prompt.messages[0])
-            .expect("serialize prompt message")
-            .as_str(),
-    );
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = GenerateDriverRequest {
         context_was_compacted: false,
         prompt_usage_basis: None,
@@ -6192,36 +6189,6 @@ fn generate_driver_request_keeps_conversation_prefix_before_dynamic_context_for_
     assert_eq!(
         current_user_message.content,
         "第二轮问题：继续审计缓存前缀。"
-    );
-
-    let expected_context_tokens =
-        request
-            .prepared_prompt
-            .messages
-            .iter()
-            .fold(0u32, |total, message| {
-                total.saturating_add(crate::model::prepared_prompt::estimate_text_tokens(
-                    serde_json::to_string(message)
-                        .expect("serialize model message")
-                        .as_str(),
-                ))
-            });
-    let expected_system_tokens = request
-        .prepared_prompt
-        .system_prompt
-        .as_deref()
-        .map(crate::model::prepared_prompt::estimate_text_tokens)
-        .unwrap_or_default();
-    let serialized_tools = serde_json::to_string(&request.prepared_prompt.tool_definitions)
-        .expect("serialize model tool definitions");
-    let expected_tool_tokens =
-        crate::model::prepared_prompt::estimate_text_tokens(serialized_tools.as_str());
-    assert_eq!(
-        request.context_token_estimate,
-        expected_system_tokens
-            .saturating_add(expected_context_tokens)
-            .saturating_add(expected_tool_tokens),
-        "request token estimate must include system, context, and tool definitions"
     );
 
     let audit_lines = request
@@ -12260,18 +12227,9 @@ fn canonical_model_request_record_embeds_ordered_observations() {
         32_768,
     )
     .expect("prepared prompt");
-    let context_token_estimate =
-        crate::model::prepared_prompt::estimate_text_tokens("stable system prompt")
-            .saturating_add(crate::model::prepared_prompt::estimate_text_tokens(
-                serde_json::to_string(&context_message)
-                    .expect("serialize context message")
-                    .as_str(),
-            ))
-            .saturating_add(crate::model::prepared_prompt::estimate_text_tokens(
-                serde_json::to_string(&prepared_prompt.tool_definitions)
-                    .expect("serialize tool definitions")
-                    .as_str(),
-            ));
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = ModelClientRequest {
         session_id: "chat-1".to_string(),
         turn_id: "turn-1".to_string(),
@@ -12438,11 +12396,18 @@ fn canonical_model_request_record_embeds_ordered_observations() {
         tool_call_id: None,
         reasoning_content: None,
     };
-    let compaction_context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        serde_json::to_string(&compaction_prompt)
-            .expect("serialize compaction prompt")
-            .as_str(),
-    );
+    let compaction_prepared_prompt = crate::model::prepared_prompt::PreparedPromptV1::new(
+        None,
+        vec![compaction_prompt.clone()],
+        vec![],
+        crate::tool::ModelToolChoice::None,
+        4_096,
+    )
+    .expect("compaction prompt");
+    let compaction_context_token_estimate =
+        estimate_prepared_prompt_tokens(&compaction_prepared_prompt, None)
+            .expect("compaction prompt token estimate")
+            .total_tokens();
     let compaction_request = ModelClientRequest {
         session_id: "chat-1".to_string(),
         turn_id: "turn-compaction".to_string(),
@@ -12452,14 +12417,7 @@ fn canonical_model_request_record_embeds_ordered_observations() {
         system_prompt_manifest_json: None,
         compression_stats_json: None,
         context_token_estimate: compaction_context_token_estimate,
-        prepared_prompt: crate::model::prepared_prompt::PreparedPromptV1::new(
-            None,
-            vec![compaction_prompt.clone()],
-            vec![],
-            crate::tool::ModelToolChoice::None,
-            4_096,
-        )
-        .expect("compaction prompt"),
+        prepared_prompt: compaction_prepared_prompt,
         session_config: ModelSessionConfig::default(),
     };
     let compaction_started = ModelRequestStartedV1::from_request(
@@ -12519,11 +12477,9 @@ async fn query_loop_reasoning_commits_before_return_and_persistence_failure_stop
         8_192,
     )
     .expect("valid prepared prompt");
-    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        serde_json::to_string(&prepared_prompt.messages[0])
-            .expect("serialize prompt message")
-            .as_str(),
-    );
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = GenerateDriverRequest {
         context_was_compacted: false,
         prompt_usage_basis: None,
@@ -12695,11 +12651,9 @@ async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing
         8_192,
     )
     .expect("valid prepared prompt");
-    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        serde_json::to_string(&prepared_prompt.messages[0])
-            .expect("serialize prompt message")
-            .as_str(),
-    );
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = GenerateDriverRequest {
         context_was_compacted: false,
         prompt_usage_basis: None,

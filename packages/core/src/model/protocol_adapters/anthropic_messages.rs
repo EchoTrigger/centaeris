@@ -670,6 +670,23 @@ fn is_minimax_provider(provider_id: &str) -> bool {
     matches!(provider_id, "minimax.default" | "minimax-cn.default")
 }
 
+pub(super) fn minimax_replayed_thinking_bytes(
+    provider_id: &str,
+    raw: &str,
+) -> Result<Option<usize>, ModelClientError> {
+    if !is_minimax_provider(provider_id) {
+        return Ok(None);
+    }
+    let blocks = parse_minimax_content_blocks(raw)?;
+    blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("thinking"))
+        .try_fold(0usize, |bytes, block| {
+            anthropic_thinking_text(block).map(|text| bytes.saturating_add(text.len()))
+        })
+        .map(Some)
+}
+
 fn parse_minimax_content_blocks(raw: &str) -> Result<Vec<Value>, ModelClientError> {
     let blocks = serde_json::from_str::<Vec<Value>>(raw).map_err(|_| {
         invalid_openai_compatible_request(
