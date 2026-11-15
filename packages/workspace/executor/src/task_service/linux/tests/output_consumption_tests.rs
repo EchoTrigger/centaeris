@@ -540,3 +540,69 @@ fn closed_run_takeover_reports_large_cold_history_collection() {
     assert_eq!(reopened.fence.as_ref(), Some(&next));
     assert!(reopened.tasks.is_empty());
 }
+
+#[test]
+fn closed_history_partial_file_failure_keeps_batch_metadata_until_retry() {
+    let fixture = OutputFixture::new();
+    let control = fixture.root.join("control");
+    let output = fixture.root.join("output");
+    let mut ids = Vec::new();
+    for name in ["first", "middle", "last"] {
+        let (_, id) = fixture.completed(name, 0);
+        fixture.manager.lock().unwrap().retire_history(1).unwrap();
+        ids.push(id);
+    }
+    ids.sort();
+    let ended = Manager::handle(
+        &fixture.manager,
+        EnvironmentTaskRequest::EndRun {
+            fence: fixture.fence.clone(),
+            run_id: fixture.fence.controller_owner.id().into(),
+            operation_id: fixture.fence.operation_id("close-run"),
+        },
+    )
+    .unwrap();
+    let blocked = output.join(format!("{}.output", ids[1]));
+    fs::remove_file(&blocked).unwrap();
+    fs::create_dir(&blocked).unwrap();
+    let takeover = EnvironmentTaskRequest::Takeover {
+        environment_instance_id: fixture.fence.environment_instance_id.clone(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: "next-run".into(),
+        },
+        controller_epoch: 2,
+        controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+    };
+    assert_eq!(
+        Manager::handle(&fixture.manager, takeover.clone()).unwrap_err(),
+        "task_history_retirement_pending"
+    );
+    assert!(!output.join(format!("{}.output", ids[0])).exists());
+    assert!(blocked.is_dir());
+    assert!(output.join(format!("{}.output", ids[2])).is_file());
+    for id in &ids {
+        assert!(store::task(&control, id).unwrap().is_some());
+    }
+    assert!(fixture.manager.lock().unwrap().journal.tasks.is_empty());
+    assert!(store::closed(&control, &fixture.fence.controller_owner).unwrap());
+    fs::remove_dir(&blocked).unwrap();
+    assert!(matches!(
+        Manager::handle(&fixture.manager, takeover).unwrap(),
+        EnvironmentTaskResult::TakenOver { .. }
+    ));
+    for id in &ids {
+        assert!(store::task(&control, id).unwrap().is_none());
+    }
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+    assert!(store::closed(&control, &fixture.fence.controller_owner).unwrap());
+    assert_eq!(
+        store::receipt(
+            &control,
+            &format!("endRun:{}", fixture.fence.controller_owner.id())
+        )
+        .unwrap()
+        .unwrap()
+        .result,
+        Some(ended)
+    );
+}

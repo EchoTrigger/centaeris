@@ -461,6 +461,7 @@ impl Manager {
             .map(|f| f.controller_owner.clone())
             .ok_or("task_controller_fenced")?;
         let mut after = String::new();
+        let mut retired = Vec::new();
         while let Some((id, _)) = store::next_closed(&self.storage.control_root, &after, &current)?
         {
             after = id.clone();
@@ -487,8 +488,23 @@ impl Manager {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => return Err("task_history_retirement_pending".into()),
             }
-            store::forget_closed(&self.storage.control_root, &id)?;
-            self.journal.tasks.remove(&id);
+            retired.push(id);
+            if retired.len() == ENVIRONMENT_TASK_MAX_RECORDS {
+                self.forget_closed_history(&retired)?;
+                retired.clear();
+            }
+        }
+        if !retired.is_empty() {
+            self.forget_closed_history(&retired)?;
+        }
+        Ok(())
+    }
+    fn forget_closed_history(&mut self, ids: &[String]) -> Result<(), String> {
+        // File removal precedes the durable batch. A failed commit leaves the
+        // original metadata available for an idempotent collection attempt.
+        store::forget_closed(&self.storage.control_root, ids)?;
+        for id in ids {
+            self.journal.tasks.remove(id);
             self.journal.receipts.retain(|key, _| {
                 !key.starts_with(&format!("input:{id}:")) && key != &format!("terminate:{id}")
             });
