@@ -39,7 +39,7 @@ try{
  await call(c,'agent_runtime_config_set',{modelProviderId:'custom.scheduler',model:'mock'});
  const spec={name:'inspection',cwd:root,prompt:'Inspect this local fixture.',cron:'0 9 * * *',at:null,timezone:'Asia/Taipei',model:{providerId:'custom.scheduler',model:'mock',thinkingMode:null}};
  const creation={action:'create',operationId:'create-inspection',spec};
- const cli=path.join(repo,'target/debug',process.platform==='win32'?'centa.exe':'centa');
+ const cli=path.join(repo,'target/debug',process.platform==='win32'?'cet.exe':'cet');
  const cliOptions={cwd:root,encoding:'utf8',env:{...process.env,PATH:bin+path.delimiter+process.env.PATH,CENTAERIS_DESKTOP_DATA_DIR:profile,CENTAERIS_RUNTIME_EXE:path.join(repo,'target/debug',process.platform==='win32'?'centaeris-runtime.exe':'centaeris-runtime')}};
  assert(execFileSync(cli,['ssh','connect','fixture-host'],cliOptions).includes('fixture-host'));
  const [plan,replay]=await Promise.all([manage(c,creation),manage(other,creation)]);assert.equal(plan.id,replay.id);

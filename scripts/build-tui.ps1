@@ -7,7 +7,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $tuiDir = Join-Path $repoRoot "packages/cli"
 $tuiReleaseTarget = Join-Path $repoRoot "target/tui-release"
 $releaseTarget = Join-Path $repoRoot "target/release"
-$tuiBinary = Join-Path $tuiReleaseTarget "centa.exe"
+$tuiBinary = Join-Path $tuiReleaseTarget "cet.exe"
 $runtimeBinary = Join-Path $releaseTarget "centaeris-runtime.exe"
 $distRoot = Join-Path $tuiDir "dist/centaeris"
 
@@ -143,7 +143,7 @@ if (Test-Path -LiteralPath $distRoot) {
 }
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 
-$tuiName = "centa.exe"
+$tuiName = "cet.exe"
 $runtimeName = "centaeris-runtime.exe"
 Copy-Item -LiteralPath $tuiBinary -Destination (Join-Path $distRoot $tuiName)
 Copy-Item -LiteralPath $runtimeBinary -Destination (Join-Path $distRoot $runtimeName)

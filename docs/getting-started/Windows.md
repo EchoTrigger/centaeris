@@ -27,7 +27,7 @@ Theme preferences are in Settings > Appearance.
 For TUI, extract `centaeris-windows-x64.zip` and run:
 
 ```powershell
-.\centa.exe --workspace C:\path\to\project
+.\cet.exe --workspace C:\path\to\project
 ```
 
 The first release is a pre-release: `scripts/install-tui.ps1 -Release v0.1.0`
@@ -94,7 +94,7 @@ Build the standalone TUI archive:
 ```
 
 The archive is written to
-`packages/cli/dist/centaeris-windows-x64.zip`. It contains `centa.exe`, the
+`packages/cli/dist/centaeris-windows-x64.zip`. It contains `cet.exe`, the
 matching native `centaeris-runtime.exe`, license material, and a file manifest
 verified by the installer.
 

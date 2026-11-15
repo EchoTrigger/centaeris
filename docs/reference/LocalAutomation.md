@@ -10,8 +10,8 @@ Use the installed `ssh` executable and the user's OpenSSH configuration,
 credentials agent and known-host policy. No credentials are copied into Centaeris.
 
 ```text
-centa ssh connect dev
-centa ssh exec dev "uname -a"
+cet ssh connect dev
+cet ssh exec dev "uname -a"
 ```
 
 `connect` inherits the native terminal, before TUI raw mode starts. OpenSSH handles
@@ -80,19 +80,19 @@ is stored there. It is a Host-owned store, not an automatically executed project
 file. Unknown schema versions and fields fail loudly.
 
 ```text
-centa schedule create "C:/work/daily-review.json" review-plan-1
-centa schedule list [cursor]
-centa schedule service start
-centa schedule history <scheduleId> [cursor]
-centa schedule run <scheduleId> manual-review-1
-centa schedule pause <scheduleId>
-centa schedule resume <scheduleId>
-centa schedule update <scheduleId> <revision> "C:/work/daily-review.json"
-centa schedule delete <scheduleId>
-centa schedule service stop
+cet schedule create "C:/work/daily-review.json" review-plan-1
+cet schedule list [cursor]
+cet schedule service start
+cet schedule history <scheduleId> [cursor]
+cet schedule run <scheduleId> manual-review-1
+cet schedule pause <scheduleId>
+cet schedule resume <scheduleId>
+cet schedule update <scheduleId> <revision> "C:/work/daily-review.json"
+cet schedule delete <scheduleId>
+cet schedule service stop
 ```
 
-In the TUI, replace `centa schedule` with `/schedule`; quote file paths containing
+In the TUI, replace `cet schedule` with `/schedule`; quote file paths containing
 spaces. Results use a scrollable panel. `operationId` arguments for create and
 manual run are caller-selected stable identities: repeat the same identity only
 to reconcile that same operation. Updates require the revision returned by list
@@ -176,7 +176,7 @@ no separate scheduling form or remote-connection screen.
 Run the normal Rust/Node source gates and:
 
 ```text
-cargo build --locked -p centaeris-desktop-services --bin centaeris-runtime -p centaeris-tui --bin centa
+cargo build --locked -p centaeris-desktop-services --bin centaeris-runtime -p centaeris-tui --bin cet
 node scripts/test-host-automation.mjs
 node scripts/test-agent-schedules.mjs
 node scripts/test-process-agent.mjs

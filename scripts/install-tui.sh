@@ -7,7 +7,7 @@ STANDALONE_ROOT="$TUI_HOME/packages/standalone"
 RELEASES_DIR="$STANDALONE_ROOT/releases"
 CURRENT_LINK="$STANDALONE_ROOT/current"
 BIN_DIR="$STANDALONE_ROOT/bin"
-BIN_PATH="$BIN_DIR/centa"
+BIN_PATH="$BIN_DIR/cet"
 REPO_NAME="EchoTrigger/Centaeris"
 
 step() { printf '==> %s\n' "$1"; }
@@ -168,7 +168,7 @@ if ! grep -q '"schema": "centaeris-package.v1"' "$manifest"; then
   echo "Unsupported package manifest schema." >&2
   exit 1
 fi
-path_list="$(printf '%s\n' centa centaeris-runtime)"
+path_list="$(printf '%s\n' cet centaeris-runtime)"
 ok=1
 while IFS= read -r path; do
   file_size="$(wc -c < "$install_dir/$path" | tr -d ' ')"
@@ -197,7 +197,7 @@ fi
 ln -s "$install_dir" "$CURRENT_LINK"
 
 mkdir -p "$BIN_DIR"
-cp "$CURRENT_LINK/centa" "$BIN_PATH"
+cp "$CURRENT_LINK/cet" "$BIN_PATH"
 if [ -f "$CURRENT_LINK/centaeris-runtime" ]; then
   cp "$CURRENT_LINK/centaeris-runtime" "$BIN_DIR/centaeris-runtime"
 fi

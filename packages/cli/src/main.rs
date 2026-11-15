@@ -1,4 +1,5 @@
 mod app;
+mod arguments;
 mod automation_cli;
 mod clipboard;
 mod headless;
@@ -12,14 +13,18 @@ fn main() {
     {
         automation_cli::run(&args)
     } else {
-        headless::parse(&args).and_then(|invocation| match invocation {
-            headless::Invocation::Interactive => {
-                app::run().map(|()| 0).map_err(|error| error.to_string())
+        arguments::parse(&args).and_then(|invocation| match invocation {
+            arguments::Invocation::Interactive { workspace } => app::run(workspace)
+                .map(|()| 0)
+                .map_err(|error| error.to_string()),
+            arguments::Invocation::Prompt(options) => headless::run(options),
+            arguments::Invocation::Rpc => centaeris_desktop_services::run_rpc_stdio().map(|()| 0),
+            arguments::Invocation::Help => {
+                println!("{}\n\n{}", arguments::HELP, automation_cli::HELP);
+                Ok(0)
             }
-            headless::Invocation::Prompt(options) => headless::run(options),
-            headless::Invocation::Rpc => centaeris_desktop_services::run_rpc_stdio().map(|()| 0),
-            headless::Invocation::Help => {
-                println!("{}\n\n{}", headless::HELP, automation_cli::HELP);
+            arguments::Invocation::Version => {
+                println!("cet {}", env!("CARGO_PKG_VERSION"));
                 Ok(0)
             }
         })
@@ -28,7 +33,7 @@ fn main() {
         Ok(0) => {}
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("centa failed: {error}");
+            eprintln!("cet failed: {error}");
             std::process::exit(1);
         }
     }
