@@ -103,14 +103,20 @@ def build(args):
 
 
 def invoke(binary, command):
-    result = subprocess.run([str(binary.resolve())], input=json.dumps(command), text=True,
+    result = subprocess.run([str(binary.resolve())], input=json.dumps(command).encode("utf-8"),
                             capture_output=True, timeout=2400, check=True)
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) != 1:
-        raise ValueError("executable must emit exactly one JSON receipt")
-    value = json.loads(lines[0])
-    if value.get("schema") != SCHEMA or not isinstance(value.get("samples"), list):
-        raise ValueError("invalid runtime acceptance receipt")
+    try:
+        lines = [line for line in result.stdout.decode("utf-8").splitlines() if line.strip()]
+        if len(lines) != 1:
+            raise ValueError("executable must emit exactly one JSON receipt")
+        value = json.loads(lines[0])
+        if value.get("schema") != SCHEMA or not isinstance(value.get("samples"), list):
+            raise ValueError("invalid runtime acceptance receipt")
+    except (UnicodeDecodeError, ValueError) as error:
+        root = Path(command["root"])
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "rejected-evaluation-receipt.bin").write_bytes(result.stdout)
+        raise ValueError("invalid evaluator UTF-8 JSON receipt; raw bytes retained") from error
     return value
 
 

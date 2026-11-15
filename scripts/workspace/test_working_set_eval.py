@@ -48,6 +48,21 @@ class WorkingSetEvidenceTests(unittest.TestCase):
         self.assertIn(str(root / "packages/core").replace("\\", "/"), manifest)
         self.assertIn(str(harness).replace("\\", "/"), manifest)
 
+    def test_evaluator_receipt_uses_utf8_and_retains_rejected_bytes(self):
+        receipt = {"schema": EVAL.SCHEMA, "samples": [{"reply": "路径 — 原始值"}]}
+        raw = json.dumps(receipt, ensure_ascii=False).encode("utf-8")
+        with TemporaryDirectory(prefix="working-set-receipt-") as folder:
+            command = {"root": folder}
+            with mock.patch.object(EVAL.subprocess, "run", return_value=SimpleNamespace(stdout=raw)) as run:
+                self.assertEqual(EVAL.invoke(Path("candidate"), command), receipt)
+            self.assertIsInstance(run.call_args.kwargs["input"], bytes)
+            self.assertFalse(run.call_args.kwargs.get("text", False))
+            invalid = b"\xffinvalid-receipt"
+            with mock.patch.object(EVAL.subprocess, "run", return_value=SimpleNamespace(stdout=invalid)):
+                with self.assertRaisesRegex(ValueError, "raw bytes retained"):
+                    EVAL.invoke(Path("candidate"), command)
+            self.assertEqual((Path(folder) / "rejected-evaluation-receipt.bin").read_bytes(), invalid)
+
 
 class WorkingSetQualityCampaignTests(unittest.TestCase):
     def args(self, folder):
