@@ -28,7 +28,11 @@ if mode == "supervisor-timeout":
 server = socket.socket(socket.AF_UNIX)
 server.bind(config["socketPath"])
 server.listen()
-pathlib.Path(os.environ["GATE_SUPERVISOR_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "root": str(root), "config": config}))
+executable = pathlib.Path(sys.argv[0])
+pathlib.Path(os.environ["GATE_SUPERVISOR_STARTED"]).write_text(json.dumps({
+    "pid": os.getpid(), "root": str(root), "config": config, "executable": str(executable),
+    "rootMode": root.stat().st_mode & 0o777, "executableRootMode": executable.parent.stat().st_mode & 0o777,
+    "executableMode": executable.stat().st_mode & 0o777}))
 while True:
     connection, _ = server.accept()
     connection.close()
@@ -56,7 +60,8 @@ if args[0] == "sudo":
         host.subprocess.Popen = lambda command, **kwargs: original([sys.executable, *command], **kwargs)
     host.run_host(pathlib.Path(argv[argv.index("--supervisor") + 1]), pathlib.Path(argv[argv.index("--helper") + 1]),
                   {"runtimeRoot": "/run/docker/runtime-runc/moby", "controllerUid": 0},
-                  parent=pathlib.Path(os.environ["GATE_FIXTURE_BASE"]), startup_timeout=.4, stop_timeout=.4)
+                  parent=pathlib.Path(os.environ["GATE_FIXTURE_BASE"]),
+                  executable_parent=pathlib.Path(os.environ["GATE_FIXTURE_BASE"]), startup_timeout=.4, stop_timeout=.4)
     raise SystemExit
 endpoint = "unix:///var/run/docker.sock"
 if args[0] == "--host":
@@ -179,7 +184,13 @@ node() { printf '%s\\n' fixture-revision; }
             started = base / "supervisor.started"
             if started.exists():
                 host = json.loads(started.read_text())
+                executable_root = Path(host["executable"]).parent
+                self.assertNotEqual(executable_root, Path(host["root"]), "state storage need not permit execution")
+                self.assertEqual(host["rootMode"], 0o700)
+                self.assertEqual(host["executableRootMode"], 0o700)
+                self.assertEqual(host["executableMode"], 0o500)
                 self.assertFalse(Path(host["root"]).exists(), "root host fixture must be removed after its child stops")
+                self.assertFalse(executable_root.exists(), "owned executable directory must be removed after its child stops")
                 if sys.platform == "linux":
                     self.assertFalse(Path(f"/proc/{host['pid']}").exists(), "owned supervisor must be reaped")
             self.assertFalse(any(path.is_dir() for path in base.iterdir()), "all owned fixture directories must be removed")
@@ -280,6 +291,21 @@ class HostConfigurationTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("host", ROOT / "scripts/workspace/docker-fresh-start-host.py")
         self.host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.host)
+
+    def test_launch_failure_cleans_owned_state_and_executable_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            supervisor = base / "supervisor"
+            helper = base / "helper"
+            supervisor.write_bytes(b"supervisor")
+            helper.write_bytes(HELPER_BYTES)
+            def deny_launch(command, **kwargs):
+                self.assertNotEqual(Path(command[0]).parent, Path(command[1]).parent)
+                raise PermissionError(13, "controlled executable permission failure", command[0])
+            with patch.object(self.host.subprocess, "Popen", side_effect=deny_launch):
+                with self.assertRaises(PermissionError):
+                    self.host.run_host(supervisor, helper, {}, parent=base, executable_parent=base)
+            self.assertEqual(set(base.iterdir()), {supervisor, helper})
 
     def test_ci_registration_preserves_host_visible_workspace_and_cgroup_v2(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
