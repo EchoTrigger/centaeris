@@ -100,6 +100,20 @@ class WorkingSetQualityCampaignTests(unittest.TestCase):
         self.assertEqual(report["runs"][0]["status"], "unknown")
         self.assertEqual(report["costUpperUsd"], 7.0)
 
+    def test_custom_forty_eight_runs_do_not_qualify_for_primary_recheck(self):
+        with TemporaryDirectory(prefix="working-set-quality-") as folder:
+            args = self.args(folder)
+            args.rerun_cases, args.reason = list(EVAL.CASES[:6]), "changed compaction instruction"
+            plan = {"schema": "runtime.working_set.quality.v1", "real": False,
+                    "cases": list(EVAL.CASES), "repeats": 4, "reserveRuns": 0, "maxRuns": 48,
+                    "runs": [{"version": "candidate", "case": case, "repeat": repeat}
+                             for case in EVAL.CASES for repeat in range(4)]}
+            args.output.write_text(json.dumps(plan), encoding="utf-8")
+            with mock.patch.object(EVAL, "invoke") as invoke:
+                with self.assertRaisesRegex(ValueError, "complete primary comparison"):
+                    EVAL.quality(args)
+            invoke.assert_not_called()
+
 
 class WorkingSetSetupTests(unittest.TestCase):
     def test_ready_model_gate_does_not_wait_for_slow_status_subprocess(self):

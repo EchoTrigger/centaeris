@@ -200,7 +200,12 @@ def quality(args):
         plan = json.loads(args.output.read_text(encoding="utf-8"))
         if plan.get("schema") != "runtime.working_set.quality.v1" or plan.get("real") != args.real or plan.get("stopped"):
             raise ValueError("incompatible or unresolved quality receipts")
-        if any(run.get("recheck") for run in plan["runs"]) or len(plan["runs"]) != 48:
+        primary_scope = {(version, case, repeat) for version in ("baseline", "candidate")
+                         for case in CASES for repeat in range(2)}
+        recorded_scope = {(run["version"], run["case"], run["repeat"]) for run in plan["runs"]}
+        if (any(run.get("recheck") for run in plan["runs"]) or len(plan["runs"]) != 48
+                or recorded_scope != primary_scope or plan["repeats"] != 2
+                or plan["reserveRuns"] != 12 or plan["maxRuns"] != 60):
             raise ValueError("only one affected recheck is allowed after the complete primary comparison")
         cases = tuple(plan["cases"])
         versions = tuple(dict.fromkeys(run["version"] for run in plan["runs"]))
