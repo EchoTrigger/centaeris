@@ -10,7 +10,7 @@ export function renderMermaid(code: string, dark: boolean, cancelled: () => bool
     loading ??= import("mermaid").then(module => module.default);
     const mermaid = await loading;
     if (cancelled()) return null;
-    const style = getComputedStyle(document.documentElement);
+    const style = getComputedStyle(document.body);
     const surface = style.getPropertyValue("--surface-color").trim();
     const raised = style.getPropertyValue("--surface-raised").trim();
     const text = style.getPropertyValue("--on-surface").trim();
@@ -19,6 +19,14 @@ export function renderMermaid(code: string, dark: boolean, cancelled: () => bool
       theme: "base", look: "classic", startOnLoad: false, securityLevel: "strict",
       htmlLabels: false, flowchart: { htmlLabels: false }, suppressErrorRendering: true,
       fontFamily: style.fontFamily,
+      // Mindmaps derive their own palette; pin it to the same readable surfaces.
+      themeCSS: `
+        .mindmap-node.node rect, .mindmap-node.node path,
+        .mindmap-node.node circle, .mindmap-node.node polygon { fill: ${raised}; }
+        .mindmap-node.node text { fill: ${text}; }
+        .mindmap-node.node line { stroke: ${outline}; }
+        .edge[class*="section-edge-"] { stroke: ${outline}; }
+      `,
       themeVariables: {
         darkMode: dark, background: surface, primaryColor: raised, primaryTextColor: text,
         primaryBorderColor: outline, secondaryColor: surface, secondaryTextColor: text,

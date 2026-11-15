@@ -20,6 +20,7 @@ const diagram = "graph TD\n  A[Start] --> B[Done]";
 const extendedDiagram = diagram + "\n  B --> C[Next]";
 const invalidDiagram = extendedDiagram + "\n  C --> D[";
 const replacementDiagram = "mindmap\n  root((Replacement))\n    Ready";
+const wideDiagram = "flowchart LR\n  A[Collect source documents] --> B[Check required information]\n  B --> C[Prepare review findings]\n  C --> D[Resolve outstanding questions]\n  D --> E[Publish reviewed deliverables]";
 const failures: string[] = [];
 const copied: string[] = [];
 let workerReceipts = 0, workerTerminations = 0;
@@ -79,6 +80,9 @@ function Fixture() {
         <button type="button" onClick={() => setStage("replacement")}>Replace diagram</button>
       </div>
       <MarkdownContent text={fence + "mermaid\n" + currentDiagram + "\n" + fence} isStreaming={stage === "extended" || stage === "incomplete"} />
+    </section>
+    <section aria-label="Wide diagram example">
+      <MarkdownContent text={fence + "mermaid\n" + wideDiagram + "\n" + fence} />
     </section>
     <section aria-label="Return control example" style={{ position: "relative", minHeight: 112 }}>
       <button type="button" id="before-return">Before return control</button>

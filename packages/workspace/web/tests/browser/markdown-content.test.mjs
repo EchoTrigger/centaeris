@@ -22,18 +22,43 @@ for (const scenario of scenarios.filter(value => !longOnly || (value.width === 1
         await frame();
       };
       const diagramButton = label => "Array.from(document.querySelectorAll('[aria-label=\"Diagram example\"] button')).find(button => button.textContent === " + JSON.stringify(label) + ")";
-      const assertDiagramSize = async () => {
-        const size = await evaluate(() => {
-          const svg = document.querySelector('[aria-label="Diagram example"] [role=img] > svg');
+      const assertDiagramSize = async (region = "Diagram example", nodeCount = 2, edgeCount = 1) => {
+        const diagrams = await evaluate(() => [...document.querySelectorAll('.markdownMermaid > svg')].map(svg => {
           const container = svg.parentElement;
           const style = getComputedStyle(container);
           const bounds = svg.getBoundingClientRect();
-          return { width: bounds.width, height: bounds.height,
+          const luminance = color => {
+            const channels = color.match(/[\d.]+/g).slice(0, 3).map(value => Number(value) / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
+            return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
+          };
+          const contrast = (a, b) => (Math.max(luminance(a), luminance(b)) + .05) / (Math.min(luminance(a), luminance(b)) + .05);
+          const nodes = [...svg.querySelectorAll('.node')].map(node => {
+            const label = node.querySelector('text');
+            const shape = node.querySelector('.label-container,.node-bkg');
+            return { label: label.textContent, font: getComputedStyle(label).fontFamily,
+              contrast: contrast(getComputedStyle(label).fill, getComputedStyle(shape).fill) };
+          });
+          const background = getComputedStyle(svg.closest('section')).backgroundColor;
+          const edges = [...svg.querySelectorAll('.edge,.flowchart-link')];
+          return { region: svg.closest('section[aria-label]').getAttribute('aria-label'), width: bounds.width, height: bounds.height,
             available: container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
-            ratio: svg.viewBox.baseVal.height / svg.viewBox.baseVal.width };
-        });
-        assert.ok(size.available > 0 && Math.abs(size.width - size.available) <= 1, "the diagram fills its content area instead of inheriting icon dimensions");
+            naturalWidth: svg.viewBox.baseVal.width,
+            ratio: svg.viewBox.baseVal.height / svg.viewBox.baseVal.width,
+            nodes, bodyFont: getComputedStyle(document.body).fontFamily,
+            edgeContrasts: edges.map(edge => contrast(getComputedStyle(edge).stroke, background)) };
+        }));
+        const size = diagrams.find(diagram => diagram.region === region);
+        assert.ok(size, "the requested diagram renders");
+        assert.ok(size.available > 0 && Math.abs(size.width - Math.min(size.available, size.naturalWidth)) <= 1, "the diagram keeps its natural width and shrinks to fit the content area");
         assert.ok(Math.abs(size.height - size.width * size.ratio) <= 1, "the diagram preserves its viewBox aspect ratio");
+        assert.equal(size.nodes.length, nodeCount, "all expected diagram nodes render");
+        for (const node of size.nodes) {
+          assert.equal(node.font, size.bodyFont, "diagram labels use the product font: " + node.label);
+          assert.ok(node.contrast >= 4.5, "diagram labels remain readable against their nodes: " + node.label);
+        }
+        assert.equal(size.edgeContrasts.length, edgeCount, "all expected diagram connectors render");
+        for (const edgeContrast of size.edgeContrasts) assert.ok(edgeContrast >= 3, "diagram connectors remain visible against the surface");
+        return size;
       };
       if (!longOnly) {
       try {
@@ -58,6 +83,9 @@ for (const scenario of scenarios.filter(value => !longOnly || (value.width === 1
       }
       await evaluate("document.fonts.ready");
       await assertDiagramSize();
+      await waitFor(() => evaluate(() => Boolean(document.querySelector('[aria-label="Wide diagram example"] [role=img] > svg'))), "wide Mermaid diagram");
+      const wideDiagram = await assertDiagramSize("Wide diagram example", 5, 4);
+      assert.ok(wideDiagram.naturalWidth > wideDiagram.available, "the wide fixture exercises shrinking rather than natural-size display");
       assert.deepEqual(await evaluate(() => {
         const section = document.querySelector('[aria-label="AST example"]');
         return {
