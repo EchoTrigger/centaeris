@@ -49,6 +49,42 @@ class WorkingSetEvidenceTests(unittest.TestCase):
         self.assertIn(str(harness).replace("\\", "/"), manifest)
 
 
+class WorkingSetSetupTests(unittest.TestCase):
+    def test_ready_model_gate_does_not_wait_for_slow_status_subprocess(self):
+        clock = SimpleNamespace(now=0.0)
+        pending = {"id": "next"}
+        driver = SimpleNamespace(status=mock.Mock())
+
+        def state(*_args):
+            return {"cancelled": False, "pending": pending if clock.now >= 1.5 else None}
+
+        def advance(seconds):
+            clock.now += seconds
+
+        with mock.patch.object(PG, "model_control", side_effect=state), \
+                mock.patch.object(PG.time, "monotonic", side_effect=lambda: clock.now), \
+                mock.patch.object(PG.time, "sleep", side_effect=advance):
+            self.assertIs(PG.wait_gate("unused", None, 20, driver, "run", {}), pending)
+        driver.status.assert_not_called()
+
+    def test_terminal_run_is_still_detected_during_gate_wait(self):
+        clock, receipt = SimpleNamespace(now=0.0), {}
+        terminal = {"runStatus": "failed"}
+        driver = SimpleNamespace(status=mock.Mock(return_value=terminal))
+
+        def advance(seconds):
+            clock.now += seconds
+
+        with mock.patch.object(PG, "model_control", return_value={"cancelled": False, "pending": None}), \
+                mock.patch.object(PG.time, "monotonic", side_effect=lambda: clock.now), \
+                mock.patch.object(PG.time, "sleep", side_effect=advance):
+            with self.assertRaisesRegex(RuntimeError, "Run terminated"):
+                PG.wait_gate("unused", None, 20, driver, "run", receipt)
+        driver.status.assert_called_once_with({"agentRunId": "run"})
+        self.assertIs(receipt["terminalDuringSetup"], terminal)
+        self.assertLess(clock.now, 20)
+
+
 class WorkingSetComparisonTests(unittest.TestCase):
     def test_failed_history_setup_keeps_missing_pair_unknown(self):
         arms = []

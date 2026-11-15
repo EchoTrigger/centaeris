@@ -24,6 +24,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 HISTORIES = (1000, 10000)
+SETUP_STATUS_POLL_SECONDS = 5
 PREPARATION = frozenset({"modelInputEstimate", "promptCompaction", "modelInputIntake",
                          "modelInputProjection", "agentsInstructionsRead", "agentsInstructionsReuse",
                          "model_request_safe_point"})
@@ -38,6 +39,7 @@ def plan():
             "saturationVus": [1, 2, 4, 8], "saturationIterations": 6, "saturationRunsUpper": 90,
             "setupContextTokens": 131072, "measurementContextTokens": 200000,
             "outputTokens": 32768, "barrierSeconds": 20, "setupDeadlineSeconds": 3600,
+            "setupStatusPollSeconds": SETUP_STATUS_POLL_SECONDS,
             "usageMode": "syntheticNoLlmTokens",
             "tokenEstimationAccuracy": "notMeasuredByThisFixture",
             "historyMeaning": "actual admitted historical supplement inputs; canonical event count reported separately",
@@ -91,7 +93,7 @@ print(json.dumps({'configured':True}))
 
 
 def wait_gate(base, previous, deadline, driver, run_id, receipt):
-    next_status = time.monotonic() + 1
+    next_status = time.monotonic() + SETUP_STATUS_POLL_SECONDS
     while time.monotonic() < deadline:
         state = model_control(base, "/state")
         if state["cancelled"]:
@@ -104,7 +106,7 @@ def wait_gate(base, previous, deadline, driver, run_id, receipt):
             if status["runStatus"] in {"completed", "failed", "cancelled"}:
                 receipt["terminalDuringSetup"] = status
                 raise RuntimeError("actual Run terminated before the next setup gate")
-            next_status = time.monotonic() + 1
+            next_status = time.monotonic() + SETUP_STATUS_POLL_SECONDS
         time.sleep(0.05)
     raise RuntimeError("setup deadline")
 
