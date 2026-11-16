@@ -714,6 +714,20 @@ async fn query_loop_async_compaction_and_main_share_one_durable_boundary_before_
             )
             .unwrap()
         );
+        let original_context = std::mem::replace(
+            &mut reconstructed.context_window[0].content,
+            "changed model-visible context".into(),
+        );
+        assert!(
+            !super::super::prompt_compaction_commit::matches_reconstructed_main_proof(
+                &mut reconstructed,
+                started.request_id(),
+                receipt,
+            )
+            .unwrap(),
+            "persistence normalization must not hide a changed model-visible context"
+        );
+        reconstructed.context_window[0].content = original_context;
         reconstructed.metadata.insert(
             "future_controller_fact".into(),
             "same-body-new-state".into(),
@@ -960,6 +974,10 @@ async fn query_loop_manual_compaction_preserves_its_bool_contract_without_automa
         ModelMessageSemanticsV1::Plain,
     );
     refresh_session_context_window(&mut newer);
+    let canonical_newer = crate::session::history::prepare_session_snapshot_write(
+        &serde_json::to_string(&newer).unwrap(),
+    )
+    .unwrap();
     let conflict = engine
         .compact_session_online_with_model_client_and_event_sink_async(
             session_id,
@@ -977,7 +995,7 @@ async fn query_loop_manual_compaction_preserves_its_bool_contract_without_automa
     );
     assert_eq!(
         serde_json::to_value(manager.load_or_create_session(session_id).unwrap()).unwrap(),
-        serde_json::to_value(newer).unwrap(),
+        serde_json::from_str::<Value>(canonical_newer.snapshot_json()).unwrap(),
         "manual compaction must preserve a newer snapshot written after its fact commit",
     );
 }

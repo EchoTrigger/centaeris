@@ -64,17 +64,23 @@ def daemon_configuration(expected_id):
             "dockerPath": docker, "dockerSocket": "/var/run/docker.sock", "controllerUid": 0}
 
 
-def run_host(supervisor, helper, configuration, *, parent=Path("/run"),
+def run_host(supervisor, helper, configuration, *, parent=Path("/run"), executable_parent=Path("/tmp"),
              control=sys.stdin, ready=sys.stdout, startup_timeout=15, stop_timeout=10):
     # The production entry point requires root. Only this freshly created tree
     # and this Popen child belong to the launcher; it never searches for processes.
-    with tempfile.TemporaryDirectory(prefix="centaeris-fresh-start-", dir=parent) as temporary:
+    # /run need not permit execution. Keep its short socket path while executing
+    # the supervisor from a separate private temporary directory.
+    with tempfile.TemporaryDirectory(prefix="centaeris-fresh-start-", dir=parent) as temporary, \
+         tempfile.TemporaryDirectory(prefix="centaeris-fresh-start-bin-", dir=executable_parent) as executable_temporary:
         root = Path(temporary)
         root.chmod(0o700)
-        for name, source in (("environment_host_supervisor", supervisor), ("execution_agent", helper)):
-            shutil.copyfile(source, root / name)
+        executable_root = Path(executable_temporary)
+        executable_root.chmod(0o700)
+        executable = executable_root / "environment_host_supervisor"
+        for target, source, mode in ((executable, supervisor, 0o500), (root / "execution_agent", helper, 0o555)):
+            shutil.copyfile(source, target)
             # The helper is also mounted into guests running their signed user.
-            (root / name).chmod(0o555 if name == "execution_agent" else 0o500)
+            target.chmod(mode)
         socket_directory = root / "host"
         socket_directory.mkdir(mode=0o700)
         config = {**configuration, "schema": "environment.host.v1",
@@ -85,7 +91,7 @@ def run_host(supervisor, helper, configuration, *, parent=Path("/run"),
         config_path.write_text(json.dumps(config), encoding="utf-8")
         config_path.chmod(0o600)
         with (root / "supervisor.log").open("wb") as log:
-            process = subprocess.Popen([str(root / "environment_host_supervisor"), str(config_path)],
+            process = subprocess.Popen([str(executable), str(config_path)],
                                        stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             try:
                 deadline = time.monotonic() + startup_timeout

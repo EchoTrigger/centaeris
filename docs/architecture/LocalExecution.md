@@ -44,14 +44,14 @@ dependency.
 Start the packaged TUI:
 
 ```powershell
-.\packages\cli\dist\centaeris\centa.exe --workspace C:\path\to\project
+.\packages\cli\dist\centaeris\cet.exe --workspace C:\path\to\project
 ```
 
 Without `--workspace`, the current directory is used. Client disconnection
 releases only that connection; active runs keep the Runtime alive even without
 a Desktop or TUI observer. Reconnecting clients read the existing Session and
 AgentRun rather than resubmitting work. The TUI
-package contains native `centa.exe`, native `centaeris-runtime.exe`, and combined
+package contains native `cet.exe`, native `centaeris-runtime.exe`, and combined
 third-party licenses.
 
 ## Linux and macOS

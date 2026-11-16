@@ -1,6 +1,41 @@
 use super::*;
 use crate::runtime::context_window::validate_context_window_materialization;
 
+fn assert_archived_source_messages(
+    store: &AgentRuntimeTestStore,
+    session_id: &str,
+    messages: &[ChatMessage],
+    semantics: &std::collections::BTreeMap<String, ModelMessageSemanticsV1>,
+) {
+    let history = store
+        .load_session_history_page(
+            session_id,
+            None,
+            256,
+            crate::session::history::SessionHistorySelectionV1::All,
+        )
+        .unwrap();
+    for message in messages {
+        let archived = history
+            .iter()
+            .find(|record| record.entry.message.message_id == message.message_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "original message missing from history: {}",
+                    message.message_id
+                )
+            });
+        assert_eq!(
+            serde_json::to_value(&archived.entry.message).unwrap(),
+            serde_json::to_value(message).unwrap()
+        );
+        assert_eq!(
+            &archived.entry.model_semantics,
+            semantics.get(&message.message_id).unwrap()
+        );
+    }
+}
+
 fn chain_config() -> AgentRuntimeConfig {
     AgentRuntimeConfig {
         model_context_tokens: 8000,
@@ -320,14 +355,12 @@ async fn query_loop_compacts_closed_batches_inside_one_user_chain_and_reopens_ex
                 .collect::<Vec<_>>(),
             vec!["latest-a", "latest-b"]
         );
-        assert_eq!(
-            serde_json::to_value(&saved.messages[..original.messages.len()]).unwrap(),
-            serde_json::to_value(&original.messages).unwrap()
+        assert_archived_source_messages(
+            &store,
+            &session_id,
+            &original.messages,
+            &original.model_semantics,
         );
-        assert!(original
-            .model_semantics
-            .iter()
-            .all(|(id, value)| saved.model_semantics.get(id) == Some(value)));
         let mut restored: SessionStateSnapshot =
             serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
         refresh_session_context_window(&mut restored);
@@ -370,13 +403,14 @@ async fn query_loop_repeated_chain_compaction_keeps_one_original_anchor() {
     let mut saved = compacted_chain().await;
     let original_anchor = saved.messages[0].clone();
     let original_history = saved.messages.clone();
+    let original_semantics = saved.model_semantics.clone();
     let session_id = saved.session_id.clone();
     let handler = MessageHandler::new(MessageHandlerConfig::default());
     // Two newly closed batches provide real pressure after the first compaction.
     for call in ["second-old-a", "second-old-b"] {
         append_prompt_test_tool_group(&handler, &mut saved, &[call]);
         saved.messages.last_mut().unwrap().content =
-            format!("confirmed result {call} ").repeat(200);
+            format!("confirmed result {call} ").repeat(220);
     }
     append_prompt_test_tool_group(
         &handler,
@@ -386,8 +420,11 @@ async fn query_loop_repeated_chain_compaction_keeps_one_original_anchor() {
     handler.refresh_context_window(&mut saved);
     let store = AgentRuntimeTestStore::new();
     let manager = SessionManager::new(store.clone());
+    // This fixture reconstructs its bounded state in a different store, which
+    // must ingest the bodies before it can reuse their immutable references.
+    saved.history = Default::default();
     manager.save_session(&saved).unwrap();
-    let engine = AgentRuntime::new_for_test(store, chain_config());
+    let engine = AgentRuntime::new_for_test(store.clone(), chain_config());
     let request = engine
         .build_generate_driver_request_with_async_driver_and_runtime_scope(
             &session_id,
@@ -433,10 +470,7 @@ async fn query_loop_repeated_chain_compaction_keeps_one_original_anchor() {
         .unwrap(),
         serde_json::to_value(&original_anchor).unwrap()
     );
-    assert_eq!(
-        serde_json::to_value(&saved.messages[..original_history.len()]).unwrap(),
-        serde_json::to_value(&original_history).unwrap()
-    );
+    assert_archived_source_messages(&store, &session_id, &original_history, &original_semantics);
     assert_eq!(
         request
             .prepared_prompt

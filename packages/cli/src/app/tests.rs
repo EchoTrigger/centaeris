@@ -344,8 +344,8 @@ fn transcript_patch_polling_applies_revisions_without_exposing_new_tail_during_l
 fn tui_uses_current_directory_as_default_workspace() {
     let cwd = unique_test_dir("default-cwd-workspace");
 
-    let config = parse_args_with_default(Vec::<String>::new(), cwd.clone())
-        .expect("default workspace from cwd");
+    let config =
+        resolve_config_with_default(None, cwd.clone()).expect("default workspace from cwd");
 
     let canonical = cwd.canonicalize().expect("canonical cwd");
     assert_eq!(config.session_cwd, display_path(canonical.as_path()));
@@ -356,20 +356,13 @@ fn tui_uses_current_directory_as_default_workspace() {
 #[test]
 fn bare_home_workspace_sets_first_prompt_warning_only_for_implicit_launch() {
     let home = unique_test_dir("implicit-home-workspace");
-    let implicit =
-        parse_args_with_default_and_home(Vec::<String>::new(), home.clone(), Some(home.clone()))
-            .expect("implicit home workspace");
+    let implicit = resolve_config_with_default_and_home(None, home.clone(), Some(home.clone()))
+        .expect("implicit home workspace");
     assert!(implicit.warn_home_on_first_prompt);
 
-    let explicit = parse_args_with_default_and_home(
-        vec![
-            "--workspace".to_string(),
-            home.to_string_lossy().to_string(),
-        ],
-        home.clone(),
-        Some(home.clone()),
-    )
-    .expect("explicit home workspace");
+    let explicit =
+        resolve_config_with_default_and_home(Some(home.clone()), home.clone(), Some(home.clone()))
+            .expect("explicit home workspace");
     assert!(!explicit.warn_home_on_first_prompt);
     std::fs::remove_dir_all(home).expect("cleanup home");
 }
@@ -386,19 +379,6 @@ fn home_risk_waits_until_the_user_has_entered_a_prompt() {
 }
 
 #[test]
-fn help_and_version_are_local_cli_fast_paths() {
-    assert_eq!(
-        local_cli_output(&["--help".to_string()]).as_deref(),
-        Some(CLI_USAGE)
-    );
-    assert_eq!(
-        local_cli_output(&["-V".to_string()]).as_deref(),
-        Some(concat!("centa ", env!("CARGO_PKG_VERSION")))
-    );
-    assert!(local_cli_output(&["--workspace".to_string()]).is_none());
-}
-
-#[test]
 fn tui_requires_an_existing_explicit_workspace() {
     let cwd = unique_test_dir("explicit-workspace-cwd");
 
@@ -410,26 +390,14 @@ fn tui_requires_an_existing_explicit_workspace() {
             .expect("time")
             .as_nanos()
     ));
-    let error = parse_args_with_default(
-        vec![
-            "--workspace".to_string(),
-            nonexistent.to_string_lossy().to_string(),
-        ],
-        cwd.clone(),
-    )
-    .expect_err("TUI must not create a workspace");
+    let error = resolve_config_with_default(Some(nonexistent.clone()), cwd.clone())
+        .expect_err("TUI must not create a workspace");
     assert!(error.contains("workspace path is not readable"));
     assert!(!nonexistent.exists());
 
     let workspace = unique_test_dir("explicit-workspace");
-    let config = parse_args_with_default(
-        vec![
-            "--workspace".to_string(),
-            workspace.to_string_lossy().to_string(),
-        ],
-        cwd.clone(),
-    )
-    .expect("existing workspace");
+    let config = resolve_config_with_default(Some(workspace.clone()), cwd.clone())
+        .expect("existing workspace");
     assert_eq!(
         config.session_cwd,
         display_path(

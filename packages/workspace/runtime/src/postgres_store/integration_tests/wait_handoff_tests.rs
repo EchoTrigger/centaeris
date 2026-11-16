@@ -22,6 +22,282 @@ const SESSION: &str = "session_wait_handoff";
 const TURN: &str = "turn_pg_fenced_terminal";
 
 #[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_source_checkpoint_reuses_bounded_state_and_rejects_changed_sources_or_gaps() {
+    use centaeris_core::session::manager::SessionManager;
+    use centaeris_core::session::state::{ChatMessage, MessageRole, ModelMessageSemanticsV1};
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    for mode in [
+        "unchanged",
+        "source_mutation",
+        "cas_mutation",
+        "external_append",
+    ] {
+        let mut f = fixture();
+        f.store
+            .with_client(|db| {
+                db.batch_execute(super::super::runtime::session_source::CANONICAL_TRIGGER_DDL)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        let log = f.store.session_log(
+            "workspace_wait_handoff".into(),
+            SESSION.into(),
+            "wait once".into(),
+        );
+        let revision = f.store.session_source_revision(SESSION).unwrap();
+        let (recovery, observations) =
+            crate::load_recovery_session_state_with_observations(&f.store, SESSION, 8).unwrap();
+        let mut snapshot = recovery.snapshot;
+        log.bind_verified_session_source(
+            super::super::SessionSourceWitness {
+                sequence: 8,
+                mutation_revision: revision,
+            },
+            observations,
+        )
+        .unwrap();
+        let progress = f
+            .state
+            .event_for_turn(
+                TURN,
+                SessionRecordType::PhaseEvent,
+                serde_json::json!({"stage":"model_process_summary","message":"verified progress"}),
+                crate::now_ms().unwrap(),
+            )
+            .unwrap();
+        log.append_session_records_with_runtime_job_lease_blocking(RUN, &[progress], &f.fence)
+            .unwrap();
+        if mode == "unchanged" {
+            let mut event = f.store.with_client(|db| {
+                let row = db.query_one("SELECT payload::text FROM public.app_core_sessionevent WHERE session_id=$1 AND sequence=4",&[&SESSION]).map_err(|error| error.to_string())?;
+                let wire = serde_json::from_str(&row.get::<_,String>(0)).map_err(|error| error.to_string())?;
+                let mut hydrator = super::super::SessionWireHydrator::default();
+                crate::recovery_read::validate_for_replay(wire,|wire|hydrator.hydrate_record(db,wire))
+            }).unwrap();
+            event.event_id.push_str(":warm");
+            event.payload["requestId"] = "warm-source-request".into();
+            let event = f.state.record(event).unwrap();
+            log.append_session_records_with_runtime_job_lease_blocking(RUN, &[event], &f.fence)
+                .unwrap();
+            assert_eq!(
+                log.cold_append_observation().latest_model_ancestor_loads,
+                0,
+                "unchanged verified source carries expanded refs without reloading ancestors"
+            );
+            snapshot = SessionStateSnapshot::new(SESSION.into(), crate::now_ms().unwrap());
+        } else if mode == "source_mutation" {
+            f.store.with_client(|db| db.execute("UPDATE public.app_core_sessionevent SET payload=jsonb_set(payload,'{payload,text}',to_jsonb('changed'::text)) WHERE session_id=$1 AND sequence=2",&[&SESSION])
+                .map(|_| ()).map_err(|error| error.to_string())).unwrap();
+        } else if mode == "cas_mutation" {
+            f.store.with_client(|db| db.execute("UPDATE runtime.model_observation_manifests SET manifest_bytes=manifest_bytes+1 WHERE session_id=$1",&[&SESSION])
+                .map(|count| assert!(count>0)).map_err(|error| error.to_string())).unwrap();
+        } else if mode == "external_append" {
+            let event = f.state.event_for_turn("other-source-turn",SessionRecordType::PhaseEvent,serde_json::json!({"stage":"model_process_summary","message":"external progress"}),crate::now_ms().unwrap()).unwrap();
+            f.store
+                .session_log(
+                    "workspace_wait_handoff".into(),
+                    SESSION.into(),
+                    "wait once".into(),
+                )
+                .append_session_records_with_runtime_job_lease_blocking(RUN, &[event], &f.fence)
+                .unwrap();
+        }
+        let now = crate::now_ms().unwrap();
+        let assistant = f
+            .state
+            .assistant(TURN, "Finished", Vec::new(), "done", now)
+            .unwrap()
+            .unwrap();
+        let message = ChatMessage {
+            message_id: format!("message:{TURN}:assistant"),
+            role: MessageRole::Assistant,
+            content: "Finished".into(),
+            created_at_ms: now,
+            metadata: Default::default(),
+        };
+        snapshot
+            .model_semantics
+            .insert(message.message_id.clone(), ModelMessageSemanticsV1::Plain);
+        snapshot.messages.push(message.clone());
+        snapshot.context_window.push(message);
+        snapshot.updated_at_ms = now;
+        let snapshot = SessionManager::new(f.store.clone())
+            .save_session_owned(snapshot)
+            .unwrap();
+        let ended = f
+            .state
+            .end_execution(
+                TURN,
+                "execution_wait_handoff",
+                "completed",
+                "agent_run_completed",
+                false,
+                None,
+                Vec::new(),
+                now,
+            )
+            .unwrap();
+        let completed = f
+            .state
+            .record(
+                centaeris_core::session::completed_agent_run_record(
+                    SESSION,
+                    TURN,
+                    RUN,
+                    "finalized",
+                    now,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let terminal = log.append_terminal_with_source_snapshot(
+            RUN,
+            &[assistant, ended, completed],
+            &f.fence,
+            snapshot,
+        );
+        if mode == "external_append" {
+            assert!(terminal
+                .expect_err("a foreign append invalidates the existing Run ledger")
+                .contains("sequence gap"));
+            assert!(f
+                .store
+                .load_session_source_checkpoint(SESSION, 10)
+                .unwrap()
+                .is_none());
+            continue;
+        }
+        let receipt = terminal.unwrap();
+        let head = receipt.last_sequence().unwrap();
+        let checkpoint = f
+            .store
+            .load_session_source_checkpoint(SESSION, head)
+            .unwrap();
+        if mode == "unchanged" {
+            let (warm, witness, _) =
+                checkpoint.expect("verified contiguous append seeds warm state");
+            assert_eq!(witness.sequence, head);
+            let cold = crate::load_recovery_session_state(&f.store, SESSION, head as i32)
+                .unwrap()
+                .snapshot;
+            assert_eq!(
+                serde_json::to_value(&warm.context_window).unwrap(),
+                serde_json::to_value(&cold.context_window).unwrap()
+            );
+            assert_eq!(warm.model_semantics, cold.model_semantics);
+            f.store.with_client(|db| db.execute("UPDATE public.app_core_sessionevent SET payload=jsonb_set(payload,'{payload,text}',to_jsonb('late mutation'::text)) WHERE session_id=$1 AND sequence=2",&[&SESSION])
+                .map(|_| ()).map_err(|error| error.to_string())).unwrap();
+            assert!(f
+                .store
+                .load_session_source_checkpoint(SESSION, head)
+                .unwrap()
+                .is_none());
+        } else {
+            assert!(
+                checkpoint.is_none(),
+                "{mode} must not publish a source proof"
+            );
+            if mode == "cas_mutation" {
+                assert!(
+                    crate::load_recovery_session_state(&f.store, SESSION, head as i32)
+                        .err()
+                        .expect("cold replay must reject altered CAS bytes")
+                        .contains("manifest digest mismatch")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_legacy_wait_handoff_upgrade_restores_full_history_and_sole_source_order() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    for missing_current in [false, true] {
+        let mut f = fixture();
+        let source = super::session_history_tests::compacted_snapshot(SESSION);
+        f.store
+            .save_agent_runtime_snapshot(SESSION, &serde_json::to_string(&source).unwrap(), 1)
+            .unwrap();
+        let mut legacy = serde_json::to_value(&source).unwrap();
+        legacy.as_object_mut().unwrap().remove("history");
+        f.handoff.snapshot_json = legacy.to_string();
+        let original_attachment = f.handoff.snapshot_json.clone();
+        let mut payload: RuntimeRecoveryCheckpointV1 =
+            serde_json::from_str(&f.checkpoint.payload_json).unwrap();
+        payload.checkpoint_id = f.handoff.checkpoint_id().unwrap();
+        f.checkpoint.checkpoint_id = payload.checkpoint_id.clone();
+        f.checkpoint.payload_json = serde_json::to_string(&payload).unwrap();
+        append(&mut f).unwrap();
+        let original_payload = f.checkpoint.payload_json.clone();
+        f.store
+            .with_client(|db| {
+                super::super::schema::restore_session_history_fixture(db);
+                if missing_current {
+                    db.execute(
+                        "DELETE FROM runtime.session_runtime_snapshots WHERE session_id=$1",
+                        &[&SESSION],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
+        let sealed = upgraded
+            .load_wait_handoff(&payload.checkpoint_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sealed.snapshot_json, original_attachment);
+        let recovery = upgraded
+            .load_recovery_checkpoint_by_id(&payload.checkpoint_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovery.payload_json, original_payload);
+        let source = sealed.validate(&payload).unwrap();
+        assert_eq!(
+            source.messages.len(),
+            302,
+            "legacy attachment must carry all original bodies into restore"
+        );
+        if let Some(raw) = upgraded.load_agent_runtime_snapshot(SESSION).unwrap() {
+            let current = serde_json::from_str(&raw).unwrap();
+            sealed
+                .validate_replay(&upgraded, &sealed.wait_checkpoint, &current)
+                .unwrap();
+        }
+        centaeris_core::runtime::restore_wait_recovery_snapshot(&upgraded, &source).unwrap();
+        let bounded: SessionStateSnapshot = serde_json::from_str(
+            &upgraded
+                .load_agent_runtime_snapshot(SESSION)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bounded.messages.len(), 2);
+        let recent = upgraded
+            .load_session_history_page(
+                SESSION,
+                None,
+                2,
+                centaeris_core::session::history::SessionHistorySelectionV1::OriginalUserRequests,
+            )
+            .unwrap();
+        assert_eq!(
+            recent
+                .iter()
+                .map(|record| record.entry.message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            ["tail", "cold-0299"]
+        );
+        let rows = upgraded.with_client(|db| db.query_one("SELECT count(*) FROM runtime.session_message_history_entries WHERE session_id=$1", &[&SESSION])
+            .map(|row| row.get::<_, i64>(0)).map_err(|error| error.to_string())).unwrap();
+        assert_eq!(rows, 302);
+    }
+}
+
+#[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_question_wait_handoff_preserves_bound_snapshot_and_rejects_schema_relabeling() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -327,6 +603,184 @@ fn append(f: &mut Fixture) -> Result<centaeris_core::session::SessionCommitRecei
         .append_wait_handoff(RUN, &[event], &f.checkpoint, &f.fence, &f.handoff)
 }
 
+fn previous_input_usage_fixture() -> (Fixture, String) {
+    let mut f = fixture();
+    let mut source = super::session_history_tests::compacted_snapshot(SESSION);
+    source
+        .metadata
+        .insert("opaque-core-state".into(), "retained".into());
+    f.store
+        .save_agent_runtime_snapshot(SESSION, &serde_json::to_string(&source).unwrap(), 73)
+        .unwrap();
+    let expected = f
+        .store
+        .load_agent_runtime_snapshot(SESSION)
+        .unwrap()
+        .unwrap();
+    let mut previous: serde_json::Value = serde_json::from_str(&expected).unwrap();
+    previous["history"]["promptUsageAnchor"] = serde_json::json!({
+        "schema": "runtime.prompt_usage_anchor.v1",
+        "bindingDigest": format!("sha256:{}", "a".repeat(64)),
+        "messages": [{"digest": format!("sha256:{}", "b".repeat(64)), "estimatedTokens": 0}],
+        "actualInputTokens": 987
+    });
+    f.handoff.snapshot_json = previous.to_string();
+    f.handoff.migrate_prompt_usage_anchor().unwrap();
+    let mut payload: RuntimeRecoveryCheckpointV1 =
+        serde_json::from_str(&f.checkpoint.payload_json).unwrap();
+    payload.checkpoint_id = f.handoff.checkpoint_id().unwrap();
+    f.checkpoint.checkpoint_id = payload.checkpoint_id.clone();
+    f.checkpoint.payload_json = serde_json::to_string(&payload).unwrap();
+    append(&mut f).unwrap();
+    let (_, observations) =
+        crate::load_recovery_session_state_with_observations(&f.store, SESSION, 9).unwrap();
+    let observations = serde_json::to_string(&observations).unwrap();
+    f.handoff.normalized_snapshot_json = None;
+    f.store.with_client(|db| {
+        let mut tx = db.transaction().map_err(|error| error.to_string())?;
+        tx.execute("UPDATE runtime.session_runtime_snapshots SET snapshot_json=$1 WHERE session_id=$2", &[&f.handoff.snapshot_json, &SESSION]).map_err(|error| error.to_string())?;
+        tx.execute("INSERT INTO runtime.session_source_checkpoints(session_id,source_sequence,mutation_revision,snapshot_json,observations_json) VALUES($1,9,COALESCE((SELECT revision FROM runtime.session_source_mutations WHERE session_id=$1),0),$2,$3)", &[&SESSION, &f.handoff.snapshot_json, &observations]).map_err(|error| error.to_string())?;
+        tx.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&f.checkpoint.checkpoint_id,&serde_json::to_string(&f.handoff).unwrap()]).map_err(|error| error.to_string())?;
+        tx.execute("DELETE FROM runtime.schema_migrations WHERE version=25", &[]).map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())
+    }).unwrap();
+    (f, expected)
+}
+
+fn usage_migration_facts(f: &Fixture) -> Vec<String> {
+    f.store.with_client(|db| {
+        let mut facts = Vec::new();
+        for query in [
+            "SELECT row_to_json(s)::text FROM runtime.schema_migrations s ORDER BY version",
+            "SELECT row_to_json(s)::text FROM runtime.session_runtime_snapshots s ORDER BY session_id",
+            "SELECT row_to_json(s)::text FROM runtime.session_source_checkpoints s ORDER BY session_id",
+            "SELECT row_to_json(s)::text FROM runtime.checkpoints s ORDER BY checkpoint_id",
+            "SELECT row_to_json(s)::text FROM public.app_core_sessionevent s ORDER BY session_id,sequence",
+            "SELECT row_to_json(s)::text FROM runtime.session_message_history_entries s ORDER BY session_id,record_id",
+            "SELECT row_to_json(s)::text FROM runtime.session_message_history_heads s ORDER BY session_id,position",
+        ] {
+            facts.extend(db.query(query, &[]).map_err(|error| error.to_string())?.into_iter().map(|row| row.get::<_,String>(0)));
+        }
+        Ok(facts)
+    }).unwrap()
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_input_usage_anchor_upgrade_preserves_sealed_receipts_and_all_snapshot_carriers() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (f, expected) = previous_input_usage_fixture();
+    let before = usage_migration_facts(&f);
+    let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
+    let sealed = upgraded
+        .load_wait_handoff(&f.checkpoint.checkpoint_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sealed.snapshot_json, f.handoff.snapshot_json);
+    assert_eq!(sealed.checkpoint_id().unwrap(), f.checkpoint.checkpoint_id);
+    let (write, legacy) = sealed.normalized_snapshot().unwrap();
+    assert!(!legacy);
+    let expected_value = serde_json::from_str::<serde_json::Value>(&expected).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(write.snapshot_json()).unwrap(),
+        expected_value
+    );
+    assert_eq!(
+        upgraded
+            .load_recovery_checkpoint_by_id(&f.checkpoint.checkpoint_id)
+            .unwrap()
+            .unwrap(),
+        f.checkpoint
+    );
+    upgraded
+        .with_client(|db| {
+            for table in ["session_runtime_snapshots", "session_source_checkpoints"] {
+                let raw: String = db
+                    .query_one(
+                        &format!("SELECT snapshot_json FROM runtime.{table} WHERE session_id=$1"),
+                        &[&SESSION],
+                    )
+                    .map_err(|error| error.to_string())?
+                    .get(0);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
+                    expected_value
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    let after = usage_migration_facts(&f);
+    let preserved = |facts: &[String]| {
+        facts
+            .iter()
+            .filter(|raw| {
+                let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+                value.get("snapshot_json").is_none()
+                    && value.get("wait_handoff_json").is_none()
+                    && value.get("version").and_then(serde_json::Value::as_i64) != Some(25)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        preserved(&after),
+        preserved(&before),
+        "history, canonical events, and prior migration timestamps must remain exact"
+    );
+    upgraded.with_client(|db| {
+        let row = db.query_one("SELECT updated_at_ms FROM runtime.session_runtime_snapshots WHERE session_id=$1", &[&SESSION]).map_err(|error| error.to_string())?;
+        assert_eq!(row.get::<_,i64>(0), 73);
+        let source_before: serde_json::Value = before.iter().map(|raw| serde_json::from_str::<serde_json::Value>(raw).unwrap()).find(|value| value.get("source_sequence").is_some()).unwrap();
+        let source_after: String = db.query_one("SELECT row_to_json(s)::text FROM runtime.session_source_checkpoints s WHERE session_id=$1", &[&SESSION]).map_err(|error| error.to_string())?.get(0);
+        let mut source_after: serde_json::Value = serde_json::from_str(&source_after).unwrap();
+        source_after["snapshot_json"] = source_before["snapshot_json"].clone();
+        assert_eq!(source_after, source_before);
+        Ok(())
+    }).unwrap();
+    drop(upgraded);
+    drop(PostgresRuntimeStore::new(&test_url()).unwrap());
+    assert_eq!(
+        usage_migration_facts(&f),
+        after,
+        "reopening a current store must be idempotent"
+    );
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_input_usage_anchor_upgrade_rolls_back_on_damaged_anchor_or_receipt() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    for damage in ["anchor", "receipt"] {
+        let (mut f, _) = previous_input_usage_fixture();
+        if damage == "anchor" {
+            let mut previous: serde_json::Value =
+                serde_json::from_str(&f.handoff.snapshot_json).unwrap();
+            previous["history"]["promptUsageAnchor"]["unexpected"] = true.into();
+            f.handoff.snapshot_json = previous.to_string();
+            f.store.with_client(|db| db.execute("UPDATE runtime.checkpoints SET wait_handoff_json=$2 WHERE checkpoint_id=$1", &[&f.checkpoint.checkpoint_id,&serde_json::to_string(&f.handoff).unwrap()]).map(|_| ()).map_err(|error| error.to_string())).unwrap();
+        } else {
+            f.store.with_client(|db| db.execute("UPDATE public.app_core_sessionevent SET payload=jsonb_set(payload,'{payload,payloadSha256}',to_jsonb('sha256:' || repeat('0',64))) WHERE session_id=$1 AND sequence=9", &[&SESSION]).map(|_| ()).map_err(|error| error.to_string())).unwrap();
+        }
+        let before = usage_migration_facts(&f);
+        let error = PostgresRuntimeStore::new(&test_url()).unwrap_err();
+        assert!(
+            error.contains(if damage == "anchor" {
+                "decode input usage anchor"
+            } else {
+                "reference binding mismatch"
+            }),
+            "{error}"
+        );
+        assert_eq!(
+            usage_migration_facts(&f),
+            before,
+            "{damage} must roll back every carrier and migration receipt"
+        );
+        assert_eq!(observation_versions(&f), (1..=24).collect::<Vec<_>>());
+    }
+}
+
 fn count(f: &Fixture, query: &str) -> i64 {
     f.store
         .with_client(|db| {
@@ -378,7 +832,7 @@ fn postgres_wait_handoff_lost_ack_reopens_immutable_snapshot() {
     f.store
         .save_agent_runtime_snapshot(
             SESSION,
-            "{\"unrelatedMutableState\":true}",
+            &session_snapshot_fixture(SESSION, "unrelatedMutableState"),
             crate::now_ms().unwrap(),
         )
         .unwrap();
@@ -394,7 +848,13 @@ fn postgres_wait_handoff_lost_ack_reopens_immutable_snapshot() {
         count(&f, "SELECT COUNT(*) FROM runtime.runtime_job_waiters"),
         1
     );
-    assert_eq!(count(&f,"SELECT COUNT(*) FROM app_core_sessionevent WHERE payload->>'type'='model_request_started'"),1);
+    assert_eq!(
+        count(
+            &f,
+            "SELECT COUNT(*) FROM app_core_sessionevent WHERE payload->>'type'='model_request_started'"
+        ),
+        1
+    );
 }
 
 #[test]
@@ -627,11 +1087,12 @@ fn postgres_wait_handoff_model_anchor_is_reobserved_before_publication() {
             })
             .unwrap();
         assert_eq!(append(&mut f).unwrap_err(), error);
-        assert!(f
-            .store
-            .load_recovery_checkpoint_by_id(&f.checkpoint.checkpoint_id)
-            .unwrap()
-            .is_none());
+        assert!(
+            f.store
+                .load_recovery_checkpoint_by_id(&f.checkpoint.checkpoint_id)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(count(&f, "SELECT COUNT(*) FROM app_core_sessionevent"), 8);
         assert_eq!(
             count(&f, "SELECT COUNT(*) FROM runtime.runtime_job_waiters"),
@@ -719,7 +1180,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     ).map_err(|error| error.to_string())).unwrap();
     let before = legacy_retained_rows(&f);
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), (1..=22).collect::<Vec<_>>());
+    assert_eq!(observation_versions(&f), (1..=25).collect::<Vec<_>>());
     assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
         "INSERT INTO runtime.model_observation_contents VALUES($1,$2,'required_completion_delivery','{}',2,1)",
@@ -763,7 +1224,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     append(&mut f).unwrap();
     let before = retained_rows(&f);
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), (1..=22).collect::<Vec<_>>());
+    assert_eq!(observation_versions(&f), (1..=25).collect::<Vec<_>>());
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
         reopened
@@ -789,6 +1250,40 @@ fn retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
 
 fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, String> {
     let mut rows = retained_rows(f);
+    rows.remove("runtime.session_message_history_entries");
+    rows.remove("runtime.session_message_history_heads");
+    for table in [
+        "runtime.session_source_mutations",
+        "runtime.session_source_checkpoints",
+    ] {
+        if let Some(rows) = rows.remove(table) {
+            assert_eq!(
+                rows, "[]",
+                "migration must not invent verified source checkpoints"
+            );
+        }
+    }
+    let snapshots = f.store.with_client(|db| {
+        let has_history: bool = db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=23)", &[])
+            .map_err(|error| error.to_string())?.get(0);
+        let stored = db.query("SELECT session_id,snapshot_json,updated_at_ms FROM runtime.session_runtime_snapshots ORDER BY session_id", &[])
+            .map_err(|error| error.to_string())?;
+        let mut snapshots = Vec::new();
+        for row in stored {
+            let session_id: String = row.get(0);
+            let mut snapshot: serde_json::Value = if has_history {
+                let snapshot = serde_json::from_str(&row.get::<_, String>(1)).map_err(|error| error.to_string())?;
+                serde_json::to_value(super::super::runtime::session_history::hydrate_session_history(db, &session_id, snapshot)?)
+                    .map_err(|error| error.to_string())?
+            } else {
+                serde_json::from_str(&row.get::<_, String>(1)).map_err(|error| error.to_string())?
+            };
+            snapshot.as_object_mut().ok_or("snapshot fixture must be an object")?.remove("history");
+            snapshots.push(serde_json::json!({"session_id":session_id,"snapshot_json":snapshot,"updated_at_ms":row.get::<_,i64>(2)}));
+        }
+        Ok(serde_json::Value::Array(snapshots).to_string())
+    }).unwrap();
+    rows.insert("runtime.session_runtime_snapshots".into(), snapshots);
     if let Some(images) = rows.remove("runtime.session_model_input_images") {
         assert_eq!(
             images, "[]",
@@ -960,7 +1455,12 @@ fn seed_retained_observations(f: &Fixture) {
         ),
         5
     );
-    assert!(count(f, "SELECT COUNT(*) FROM runtime.model_observation_manifests WHERE parent_digest IS NOT NULL") > 0);
+    assert!(
+        count(
+            f,
+            "SELECT COUNT(*) FROM runtime.model_observation_manifests WHERE parent_digest IS NOT NULL"
+        ) > 0
+    );
 }
 
 #[test]
@@ -1017,29 +1517,63 @@ fn postgres_current_schema_reopens_observations_and_checkpoint_owners() {
 fn postgres_current_schema_rejects_unsupported_versions_and_drift_without_writes() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     for (ddl, expected_error) in [
-        ("DELETE FROM runtime.schema_migrations WHERE version>1", "schema version mismatch"),
-        ("DELETE FROM runtime.schema_migrations WHERE version>2", "schema version mismatch"),
-        ("DELETE FROM runtime.schema_migrations WHERE version>3", "schema version mismatch"),
+        (
+            "DELETE FROM runtime.schema_migrations WHERE version>1",
+            "schema version mismatch",
+        ),
+        (
+            "DELETE FROM runtime.schema_migrations WHERE version>2",
+            "schema version mismatch",
+        ),
+        (
+            "DELETE FROM runtime.schema_migrations WHERE version>3",
+            "schema version mismatch",
+        ),
         ("unsupported_next_version", "schema version mismatch"),
-        ("DELETE FROM runtime.schema_migrations WHERE version=2", "schema version mismatch"),
-        ("ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check; ALTER TABLE runtime.model_observation_contents ADD CONSTRAINT model_observation_contents_kind_check CHECK(kind<>'unknown')", "model observation kind constraint mismatch"),
-        ("ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check", "model observation kind constraint mismatch"),
-        ("CREATE TABLE runtime.unknown_observation_shape(id text)", "table set mismatch"),
-        ("DROP INDEX runtime.idx_checkpoints_wait_handoff", "index set mismatch"),
-        ("ALTER TABLE runtime.checkpoints DROP COLUMN wait_handoff_json", "table definition mismatch"),
+        (
+            "DELETE FROM runtime.schema_migrations WHERE version=2",
+            "schema version mismatch",
+        ),
+        (
+            "ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check; ALTER TABLE runtime.model_observation_contents ADD CONSTRAINT model_observation_contents_kind_check CHECK(kind<>'unknown')",
+            "model observation kind constraint mismatch",
+        ),
+        (
+            "ALTER TABLE runtime.model_observation_contents DROP CONSTRAINT model_observation_contents_kind_check",
+            "model observation kind constraint mismatch",
+        ),
+        (
+            "CREATE TABLE runtime.unknown_observation_shape(id text)",
+            "table set mismatch",
+        ),
+        (
+            "DROP INDEX runtime.idx_checkpoints_wait_handoff",
+            "index set mismatch",
+        ),
+        (
+            "ALTER TABLE runtime.checkpoints DROP COLUMN wait_handoff_json",
+            "table definition mismatch",
+        ),
     ] {
         let mut f = fixture();
         append(&mut f).unwrap();
         let ddl = if ddl == "unsupported_next_version" {
-            format!("INSERT INTO runtime.schema_migrations VALUES({},0)",
-                observation_versions(&f).last().copied().unwrap() + 1)
-        } else { ddl.to_string() };
-        f.store.with_client(|db| db.batch_execute(&ddl).map_err(|error| error.to_string())).unwrap();
+            format!(
+                "INSERT INTO runtime.schema_migrations VALUES({},0)",
+                observation_versions(&f).last().copied().unwrap() + 1
+            )
+        } else {
+            ddl.to_string()
+        };
+        f.store
+            .with_client(|db| db.batch_execute(&ddl).map_err(|error| error.to_string()))
+            .unwrap();
         let versions = observation_versions(&f);
         let before = retained_rows(&f);
         let shape = f.store.with_client(|db| db.query("SELECT table_name,column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='runtime' ORDER BY table_name,ordinal_position", &[])
             .map(|rows| rows.iter().map(|row| (row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3))).collect::<Vec<_>>()).map_err(|error| error.to_string())).unwrap();
-        let error = PostgresRuntimeStore::new(&test_url()).expect_err("unsupported schema must reject");
+        let error =
+            PostgresRuntimeStore::new(&test_url()).expect_err("unsupported schema must reject");
         assert!(error.contains(expected_error), "{ddl}: {error}");
         assert_eq!(observation_versions(&f), versions);
         assert_eq!(retained_rows(&f), before);

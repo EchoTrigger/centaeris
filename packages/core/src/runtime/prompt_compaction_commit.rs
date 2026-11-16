@@ -226,6 +226,45 @@ struct ReconstructedMainProof {
     snapshot_sha256: String,
 }
 
+#[derive(serde::Serialize)]
+struct ReconstructedSnapshotV1<'a> {
+    session_id: &'a str,
+    messages: &'a [ChatMessage],
+    context_window: &'a [ChatMessage],
+    model_semantics: &'a std::collections::BTreeMap<String, ModelMessageSemanticsV1>,
+    #[serde(rename = "completedTurn")]
+    completed_turn: &'a Option<crate::session::state::CompletedTurnProjectionV1>,
+    updated_at_ms: i64,
+    metadata: &'a JsonMap,
+}
+
+fn reconstructed_snapshot_sha256(snapshot: &SessionStateSnapshot) -> Result<String, String> {
+    // Keep the original v1 semantic binding. The later history field describes
+    // persistence references, which normalization assigns without changing these facts.
+    let SessionStateSnapshot {
+        history: _,
+        session_id,
+        messages,
+        context_window,
+        model_semantics,
+        completed_turn,
+        updated_at_ms,
+        metadata,
+    } = snapshot;
+    canonical_json::sha256(
+        "centaeris.compaction_reconstructed_snapshot.v1",
+        &ReconstructedSnapshotV1 {
+            session_id,
+            messages,
+            context_window,
+            model_semantics,
+            completed_turn,
+            updated_at_ms: *updated_at_ms,
+            metadata,
+        },
+    )
+}
+
 pub(crate) fn reconstructed_source_request(
     source: &SessionLogRecord,
 ) -> Result<CompactionSourceRequest, String> {
@@ -275,10 +314,7 @@ pub(crate) fn record_reconstructed_main_proof_from_source(
             .into(),
         compaction_event_id: compaction.event_id.clone(),
         source,
-        snapshot_sha256: canonical_json::sha256(
-            "centaeris.compaction_reconstructed_snapshot.v1",
-            snapshot,
-        )?,
+        snapshot_sha256: reconstructed_snapshot_sha256(snapshot)?,
     };
     snapshot.metadata.insert(
         RECONSTRUCTED_MAIN_PROOF.into(),
@@ -297,8 +333,7 @@ pub(super) fn matches_reconstructed_main_proof(
     };
     let proof: ReconstructedMainProof = serde_json::from_str(&raw)
         .map_err(|error| format!("invalid reconstructed main proof: {error}"))?;
-    let actual =
-        canonical_json::sha256("centaeris.compaction_reconstructed_snapshot.v1", snapshot)?;
+    let actual = reconstructed_snapshot_sha256(snapshot)?;
     snapshot
         .metadata
         .insert(RECONSTRUCTED_MAIN_PROOF.into(), raw);

@@ -176,7 +176,8 @@ fn postgres_new_turn_recovers_control_byte_output_from_core_receipt_without_reex
         )
         .unwrap()
         .get(0);
-    crate::refresh_runtime_state_after_admission(&store, &actor, session, head as u64).unwrap();
+    crate::refresh_runtime_state_after_admission(&store, &actor, session, head as u64, None)
+        .unwrap();
     let restored = manager.load_session(session).unwrap().unwrap();
     assert!(restored.model_semantics.values().any(|semantic| matches!(semantic,
         centaeris_core::session::state::ModelMessageSemanticsV1::ToolResult { tool_call_id, .. } if tool_call_id == &call.id)),

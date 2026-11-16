@@ -31,7 +31,7 @@ mod sqlite_turn_supplement;
 pub mod job_store;
 mod sqlite_job_connection;
 
-pub const STORE_SCHEMA_VERSION: i64 = 6;
+pub const STORE_SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone)]
 pub struct SqliteRuntimeStore {
@@ -1541,16 +1541,26 @@ mod tests {
         let db_path = temp_db_path("session_snapshot_ownership");
         let store = SqliteRuntimeStore::new(&db_path).expect("create sqlite runtime store");
 
+        let snapshot =
+            serde_json::to_string(&centaeris_core::session::state::SessionStateSnapshot::new(
+                "chat-session-1".into(),
+                700,
+            ))
+            .unwrap();
         store
-            .save_agent_runtime_snapshot("chat-session-1", "{\"messages\":[]}", 700)
+            .save_agent_runtime_snapshot("chat-session-1", &snapshot, 700)
             .expect("save session runtime snapshot");
+        let expected = centaeris_core::session::history::prepare_session_snapshot_write(&snapshot)
+            .unwrap()
+            .snapshot_json()
+            .to_owned();
 
         assert_eq!(
             store
                 .load_agent_runtime_snapshot("chat-session-1")
                 .expect("load session runtime snapshot")
                 .as_deref(),
-            Some("{\"messages\":[]}")
+            Some(expected.as_str())
         );
         let _ = std::fs::remove_file(db_path);
     }
@@ -1626,23 +1636,44 @@ mod tests {
         use sha2::{Digest, Sha256};
         let path = temp_db_path("image_history_upgrade");
         let store = SqliteRuntimeStore::new(&path).unwrap();
+        let mut snapshot =
+            centaeris_core::session::state::SessionStateSnapshot::new("image-session".into(), 7);
+        snapshot
+            .metadata
+            .insert("retained".into(), "snapshot".into());
         store
-            .save_agent_runtime_snapshot("image-session", "retained snapshot", 7)
+            .save_agent_runtime_snapshot(
+                "image-session",
+                &serde_json::to_string(&snapshot).unwrap(),
+                7,
+            )
             .unwrap();
         drop(store);
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "DROP TABLE session_model_input_images; DELETE FROM schema_migrations WHERE version=6;",
+            "DROP TABLE session_message_history_heads; DROP TABLE session_message_history_entries;
+             DROP TABLE session_model_input_images; DELETE FROM schema_migrations WHERE version>=6;",
+        )
+        .unwrap();
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        legacy.as_object_mut().unwrap().remove("history");
+        conn.execute(
+            "UPDATE session_runtime_snapshots SET snapshot_json=?1",
+            [serde_json::to_string(&legacy).unwrap()],
         )
         .unwrap();
         drop(conn);
         let store = SqliteRuntimeStore::new(&path).unwrap();
-        assert_eq!(
-            store
+        let retained: centaeris_core::session::state::SessionStateSnapshot = serde_json::from_str(
+            &store
                 .load_agent_runtime_snapshot("image-session")
                 .unwrap()
-                .as_deref(),
-            Some("retained snapshot")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            retained.metadata.get("retained").map(String::as_str),
+            Some("snapshot")
         );
         let bytes = b"verified observation bytes";
         let digest = format!("sha256:{:x}", Sha256::digest(bytes));
@@ -1806,7 +1837,15 @@ mod tests {
             })
             .expect("checkpoint");
         store
-            .save_agent_runtime_snapshot("chat-delete", "{}", 1)
+            .save_agent_runtime_snapshot(
+                "chat-delete",
+                &serde_json::to_string(&centaeris_core::session::state::SessionStateSnapshot::new(
+                    "chat-delete".into(),
+                    1,
+                ))
+                .unwrap(),
+                1,
+            )
             .expect("snapshot");
         store
             .append_event(RuntimeEvent {

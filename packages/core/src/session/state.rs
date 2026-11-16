@@ -120,6 +120,7 @@ pub enum ModelMessageSemanticsV1 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionStateSnapshot {
+    pub history: super::history::SessionHistoryStateV1,
     pub session_id: String,
     pub messages: Vec<ChatMessage>,
     pub context_window: Vec<ChatMessage>,
@@ -143,8 +144,14 @@ where
 }
 
 impl SessionStateSnapshot {
+    /// The identity of the current active messages and their model semantics.
+    pub fn context_revision(&self) -> Result<String, String> {
+        super::history::session_context_revision(self)
+    }
+
     pub fn new(session_id: String, now_ms: TimestampMs) -> Self {
         Self {
+            history: super::history::SessionHistoryStateV1::default(),
             session_id,
             messages: vec![],
             context_window: vec![],

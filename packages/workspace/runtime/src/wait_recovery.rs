@@ -6,6 +6,8 @@ use centaeris_core::session::state::SessionStateSnapshot;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod usage_anchor;
+
 const SCHEMA: &str = "workspace.runtime_job_wait_handoff.v1";
 const QUESTION_HANDOFF_SCHEMA: &str = "workspace.question_wait_handoff.v1";
 const PREFIX: &str = "waitcp:";
@@ -20,6 +22,8 @@ pub(crate) struct WaitHandoff {
     pub wait_checkpoint: CheckpointRecord,
     // Preserve Core's complete state verbatim; its private metadata is not interpreted here.
     pub snapshot_json: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalized_snapshot_json: Option<String>,
 }
 
 pub(crate) struct WaitHandoffPublisher<'a> {
@@ -164,6 +168,32 @@ fn digest(value: &impl Serialize) -> Result<String, String> {
 }
 
 impl WaitHandoff {
+    pub(crate) fn normalized_snapshot(
+        &self,
+    ) -> Result<
+        (
+            centaeris_core::session::history::SessionSnapshotWriteV1,
+            bool,
+        ),
+        String,
+    > {
+        let raw = self.current_snapshot_json()?;
+        let wire: serde_json::Value =
+            serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        let legacy = wire.get("history").is_none();
+        let write = if legacy {
+            // Published attachments retain their original bytes and checkpoint
+            // identities. Only this cold recovery boundary reads the old schema.
+            centaeris_core::session::history::migrate_legacy_session_snapshot(&self.snapshot_json)?
+        } else {
+            let snapshot: SessionStateSnapshot =
+                serde_json::from_value(wire).map_err(|error| error.to_string())?;
+            centaeris_core::session::history::validate_session_snapshot_history(&snapshot)?;
+            centaeris_core::session::history::prepare_session_snapshot_state_write(snapshot)?
+        };
+        Ok((write, legacy))
+    }
+
     pub(crate) fn validate_replay<S: centaeris_core::session::reliability::RuntimeJobStorePort>(
         &self,
         store: &S,
@@ -173,9 +203,15 @@ impl WaitHandoff {
         if self.wait_checkpoint != *wait {
             return Err("wait handoff replay changed wait checkpoint".into());
         }
+        let (write, _) = self.normalized_snapshot()?;
         let sealed =
-            serde_json::from_str(&self.snapshot_json).map_err(|error| error.to_string())?;
-        centaeris_core::runtime::validate_wait_recovery_replay(store, &sealed, snapshot)
+            serde_json::from_str(write.snapshot_json()).map_err(|error| error.to_string())?;
+        let current = centaeris_core::session::history::prepare_session_snapshot_write(
+            &serde_json::to_string(snapshot).map_err(|error| error.to_string())?,
+        )?;
+        let current =
+            serde_json::from_str(current.snapshot_json()).map_err(|error| error.to_string())?;
+        centaeris_core::runtime::validate_wait_recovery_replay(store, &sealed, &current)
     }
 
     pub fn key(
@@ -215,15 +251,35 @@ impl WaitHandoff {
                 .ok_or("wait recovery position invalid")?,
             model_request_id: payload.model_request_id.clone(),
             wait_checkpoint: wait,
-            snapshot_json: serde_json::to_string(
-                &serde_json::to_value(snapshot).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?,
+            snapshot_json: centaeris_core::session::history::prepare_session_snapshot_write(
+                &serde_json::to_string(snapshot).map_err(|error| error.to_string())?,
+            )?
+            .snapshot_json()
+            .to_owned(),
+            normalized_snapshot_json: None,
         })
     }
 
     pub fn checkpoint_id(&self) -> Result<String, String> {
-        Ok(format!("{PREFIX}{}", digest(self)?))
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SealedSource<'a> {
+            schema: &'a str,
+            handoff_key: &'a str,
+            source_session_sequence: u64,
+            model_request_id: &'a str,
+            wait_checkpoint: &'a CheckpointRecord,
+            snapshot_json: &'a str,
+        }
+        let source = SealedSource {
+            schema: &self.schema,
+            handoff_key: &self.handoff_key,
+            source_session_sequence: self.source_session_sequence,
+            model_request_id: &self.model_request_id,
+            wait_checkpoint: &self.wait_checkpoint,
+            snapshot_json: &self.snapshot_json,
+        };
+        Ok(format!("{PREFIX}{}", digest(&source)?))
     }
 
     pub fn is_wait_checkpoint(id: &str) -> bool {
@@ -291,8 +347,9 @@ impl WaitHandoff {
                 }
                 _ => return Err("unsupported wait handoff kind".into()),
             };
-        let snapshot: SessionStateSnapshot =
-            serde_json::from_str(&self.snapshot_json).map_err(|e| e.to_string())?;
+        let (write, legacy) = self.normalized_snapshot()?;
+        let mut snapshot: SessionStateSnapshot =
+            serde_json::from_str(write.snapshot_json()).map_err(|e| e.to_string())?;
         if self.schema != schema
             || self.handoff_key != Self::key(payload, &self.wait_checkpoint)?
             || payload.checkpoint_id != self.checkpoint_id()?
@@ -308,6 +365,27 @@ impl WaitHandoff {
             || payload.workspace_generation.token().is_none()
         {
             return Err("wait recovery attachment binding mismatch".into());
+        }
+        if legacy {
+            // An old attachment may be the only remaining copy of cold source
+            // bodies. Feed them to the existing atomic restore write, which
+            // archives them before persisting its bounded working state.
+            snapshot.messages = write
+                .entries()
+                .iter()
+                .map(|entry| entry.message.clone())
+                .collect();
+            snapshot.model_semantics = write
+                .entries()
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.message.message_id.clone(),
+                        entry.model_semantics.clone(),
+                    )
+                })
+                .collect();
+            snapshot.history = Default::default();
         }
         Ok(snapshot)
     }

@@ -1,4 +1,5 @@
 mod execution_capacity_tests;
+mod session_history_tests;
 use centaeris_core::runtime::contracts::{CheckpointRecord, EventVisibility, RuntimeEvent};
 use centaeris_core::session::external_context::{
     ExternalContextObject, ExternalContextObjectLink, ExternalContextStorePort,
@@ -35,6 +36,20 @@ use super::PostgresRuntimeStore;
 use centaeris_runtime_sqlite::SqliteRuntimeStore;
 
 pub(super) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn session_snapshot_fixture(session_id: &str, marker: &str) -> String {
+    let mut snapshot =
+        centaeris_core::session::state::SessionStateSnapshot::new(session_id.into(), 1);
+    if !marker.is_empty() {
+        snapshot.metadata.insert("marker".into(), marker.into());
+    }
+    centaeris_core::session::history::prepare_session_snapshot_write(
+        &serde_json::to_string(&snapshot).unwrap(),
+    )
+    .unwrap()
+    .snapshot_json()
+    .to_owned()
+}
 
 mod checkpoint_requests;
 mod cleanup_migration_tests;
@@ -473,7 +488,7 @@ fn reset_store(url: &str) {
     owned_database::require_owned_database(&mut client);
     client.batch_execute("CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY, session_id text NOT NULL, \"preAdmissionCancelledAt\" timestamptz); ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text; DELETE FROM public.app_core_agentrun;").expect("reset hosted run receipts");
     client
-        .batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE")
+        .batch_execute("DROP INDEX IF EXISTS public.session_tool_call_origins; DROP SCHEMA IF EXISTS runtime CASCADE")
         .expect("reset runtime schema");
     client
         .batch_execute(
@@ -506,9 +521,9 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
     db.batch_execute(
         "DROP TABLE IF EXISTS public.app_core_sessionevent CASCADE;
         DROP TABLE IF EXISTS public.app_core_session CASCADE;
-        CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL);
-        CREATE TABLE public.app_core_sessionevent(agent_run_id text,session_level boolean NOT NULL);
-        INSERT INTO public.app_core_session VALUES('cancel-session','cancel-workspace');
+        CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL,status text NOT NULL DEFAULT 'active',\"purgedAt\" timestamptz);
+        CREATE TABLE public.app_core_sessionevent(agent_run_id text,session_level boolean NOT NULL,session_id text,payload jsonb NOT NULL DEFAULT '{}');
+        INSERT INTO public.app_core_session(id,workspace_id) VALUES('cancel-session','cancel-workspace');
         INSERT INTO public.app_core_agentrun(id,session_id) VALUES('cancel-run','cancel-session');",
     )
     .unwrap();
@@ -634,7 +649,7 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
     );
     cancellation_result.unwrap();
     db.execute(
-        "INSERT INTO public.app_core_sessionevent VALUES('cancel-run',false)",
+        "INSERT INTO public.app_core_sessionevent(agent_run_id,session_level) VALUES('cancel-run',false)",
         &[],
     )
     .unwrap();
@@ -2456,15 +2471,16 @@ fn shared_runtime_store_contract<
             .turn_id,
         "shared_turn"
     );
+    let snapshot = session_snapshot_fixture("shared_session", "sharedSnapshot");
     store
-        .save_agent_runtime_snapshot("shared_session", "{\"sharedSnapshot\":true}", 4)
+        .save_agent_runtime_snapshot("shared_session", &snapshot, 4)
         .expect("shared snapshot");
     assert_eq!(
         store
             .load_agent_runtime_snapshot("shared_session")
             .expect("shared load snapshot")
             .as_deref(),
-        Some("{\"sharedSnapshot\":true}")
+        Some(snapshot.as_str())
     );
 }
 
@@ -3060,15 +3076,16 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
             .turn_id,
         "turn_pg"
     );
+    let snapshot = session_snapshot_fixture("session_pg", "snapshot");
     store
-        .save_agent_runtime_snapshot("session_pg", "{\"snapshot\":true}", 4)
+        .save_agent_runtime_snapshot("session_pg", &snapshot, 4)
         .expect("snapshot");
     assert_eq!(
         store
             .load_agent_runtime_snapshot("session_pg")
             .expect("load snapshot")
             .as_deref(),
-        Some("{\"snapshot\":true}")
+        Some(snapshot.as_str())
     );
     store
         .schedule_runtime_job(ScheduleRuntimeJobRequest {
@@ -4873,6 +4890,35 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
         )
         .expect("admission commits");
     assert_eq!(receipt.records.len(), 3);
+    let base = centaeris_core::session::restore_runtime_snapshot_from_session_records(
+        session_id,
+        &old_records
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let advanced = centaeris_core::session::recovery::apply_new_user_turn_admission(
+        base,
+        &receipt
+            .records
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let recovered = crate::load_recovery_session_state(&store, session_id, 7)
+        .unwrap()
+        .snapshot;
+    assert_eq!(
+        serde_json::to_value(&advanced.messages).unwrap(),
+        serde_json::to_value(&recovered.messages).unwrap()
+    );
+    assert_eq!(advanced.model_semantics, recovered.model_semantics);
+    assert_eq!(
+        serde_json::to_value(&advanced.context_window).unwrap(),
+        serde_json::to_value(&recovered.context_window).unwrap()
+    );
 
     let mut audit = Client::connect(&url, NoTls).expect("connect audit");
     let closure_row = audit
@@ -5159,6 +5205,24 @@ fn postgres_fenced_rewrite_tombstones_completed_tool_request() {
         10,
     )
     .unwrap();
+    let archived =
+        centaeris_core::session::restore_runtime_snapshot_from_session_records(session, &existing)
+            .unwrap();
+    centaeris_core::session::manager::SessionManager::new(store.clone())
+        .save_session_owned(archived)
+        .unwrap();
+    assert_eq!(
+        store
+            .load_session_history_page(
+                session,
+                None,
+                10,
+                centaeris_core::session::history::SessionHistorySelectionV1::OriginalUserRequests
+            )
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         planned.payload["targetEventIds"].as_array().unwrap().len(),
         6
@@ -5266,6 +5330,51 @@ fn postgres_fenced_rewrite_tombstones_completed_tool_request() {
         "SELECT count(*) FROM public.app_core_sessionevent WHERE agent_run_id=$1 AND NOT projects_to_agent_run_stream", &[&source_run],
     ).unwrap().get(0);
     assert_eq!(inactive, 6);
+    assert!(
+        store
+            .load_session_history_page(
+                session,
+                None,
+                10,
+                centaeris_core::session::history::SessionHistorySelectionV1::OriginalUserRequests
+            )
+            .unwrap()
+            .is_empty(),
+        "the Tombstone commit must atomically retire the old original request"
+    );
+    let recovery = crate::load_recovery_session_state(
+        &store,
+        session,
+        receipt.last_sequence().unwrap() as i32,
+    )
+    .unwrap();
+    assert!(recovery
+        .retired_message_ids
+        .contains(&"message:turn_pg_fenced_terminal:user".to_string()));
+    centaeris_core::session::manager::SessionManager::new(store.clone())
+        .save_recovered_session_owned(recovery.snapshot, recovery.retired_message_ids)
+        .unwrap();
+    let reopened = PostgresRuntimeStore::new(&url).unwrap();
+    let replay = reopened
+        .load_session_history_page(
+            session,
+            None,
+            10,
+            centaeris_core::session::history::SessionHistorySelectionV1::OriginalUserRequests,
+        )
+        .unwrap();
+    assert_eq!(
+        replay
+            .iter()
+            .map(|record| record.entry.message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["message:turn_work_replacement:user"]
+    );
+    let old_bodies: i64 = audit.query_one("SELECT count(*) FROM runtime.session_message_history_entries WHERE session_id=$1 AND message_id=$2",&[&session,&"message:turn_pg_fenced_terminal:user"]).unwrap().get(0);
+    assert!(
+        old_bodies > 0,
+        "retirement preserves immutable evidence while excluding it from replay"
+    );
     println!(
         "completed-dispatch-rewrite-ok: real Core planner and fenced PostgreSQL rewrite invalidate committed call/result after a terminal Final; Session lock serializes replacement"
     );

@@ -392,3 +392,217 @@ fn reclaimed_outputs_are_not_revisited_by_admission_or_receipt_replay() {
         "replay cannot recreate the retired output directory"
     );
 }
+
+#[test]
+#[ignore = "explicit diagnostic of 2500 synthetic closed tasks on durable storage"]
+fn closed_run_takeover_reports_large_cold_history_collection() {
+    const TASKS: usize = 2500;
+    let fixture = OutputFixture::new();
+    let control = fixture.root.join("control");
+    let output = fixture.root.join("output");
+    let observe = || {
+        let manager = fixture.manager.lock().unwrap();
+        let mut state = store::inspection(&control, &output).unwrap();
+        let connection = rusqlite::Connection::open_with_flags(
+            control.join("history.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let (operations, barriers): (u64, u64) = connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM operations),(SELECT count(*) FROM owner_barriers)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        state["operationRows"] = serde_json::json!(operations);
+        state["ownerBarrierRows"] = serde_json::json!(barriers);
+        state["memoryHotTasks"] = serde_json::json!(manager.journal.tasks.len());
+        state["outputFiles"] = serde_json::json!(fs::read_dir(&output).unwrap().count());
+        state
+    };
+    let seed_started = Instant::now();
+    let mut peak_hot_tasks = 0;
+    // Reuse completed synthetic records; no Start is dispatched and no child or
+    // cgroup is created. Cooling retains each original Start identity on disk.
+    for index in 0..TASKS {
+        fixture.completed(&format!("synthetic-history-{index}"), 0);
+        let mut manager = fixture.manager.lock().unwrap();
+        peak_hot_tasks = peak_hot_tasks.max(manager.journal.tasks.len());
+        manager.retire_history(1).unwrap();
+    }
+    let seed_wall_ms = seed_started.elapsed().as_secs_f64() * 1000.0;
+    let cleanup = EnvironmentTaskFence {
+        controller_epoch: 2,
+        controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
+        ..fixture.fence.clone()
+    };
+    Manager::handle(
+        &fixture.manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: cleanup.environment_instance_id.clone(),
+            controller_owner: cleanup.controller_owner.clone(),
+            controller_epoch: cleanup.controller_epoch,
+            controller_purpose: cleanup.controller_purpose.clone(),
+        },
+    )
+    .unwrap();
+    let ended = Manager::handle(
+        &fixture.manager,
+        EnvironmentTaskRequest::EndRun {
+            fence: cleanup.clone(),
+            run_id: cleanup.controller_owner.id().into(),
+            operation_id: cleanup.operation_id("close-run"),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        &ended,
+        EnvironmentTaskResult::RunEnded {
+            cleanup_complete: true,
+            ..
+        }
+    ));
+    assert!(store::next_closed(&control, "", &cleanup.controller_owner)
+        .unwrap()
+        .is_none());
+    let next = EnvironmentTaskFence {
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: "next-run".into(),
+        },
+        controller_epoch: 3,
+        controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        ..fixture.fence.clone()
+    };
+    let mut candidates = 0;
+    let mut after_id = String::new();
+    while let Some((id, _)) =
+        store::next_closed(&control, &after_id, &next.controller_owner).unwrap()
+    {
+        candidates += 1;
+        after_id = id;
+    }
+    let before = observe();
+    let started = Instant::now();
+    let result = Manager::handle(
+        &fixture.manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: next.environment_instance_id.clone(),
+            controller_owner: next.controller_owner.clone(),
+            controller_epoch: next.controller_epoch,
+            controller_purpose: next.controller_purpose.clone(),
+        },
+    );
+    let takeover_wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let after = observe();
+    eprintln!(
+        "TASK_CLOSED_HISTORY_OBSERVATION {}",
+        serde_json::json!({
+            "syntheticFixture":true,"seededTasks":TASKS,"eligibleCandidates":candidates,
+            "seedWallMs":seed_wall_ms,"takeoverWallMs":takeover_wall_ms,
+            "measuredPath":"Manager::handle(Takeover), including synchronous GC and persistence",
+            "peakMemoryHotTasks":peak_hot_tasks,"before":before,"after":after,
+            "takeoverError":result.as_ref().err(),
+        })
+    );
+    assert!(matches!(result, Ok(EnvironmentTaskResult::TakenOver { fence }) if fence == next));
+    assert_eq!(candidates, TASKS);
+    assert_eq!(before["indexedTasks"], TASKS);
+    assert_eq!(before["hotTasks"], 0);
+    assert_eq!(before["memoryHotTasks"], 0);
+    assert_eq!(before["outputFiles"], TASKS);
+    assert_eq!(after["indexedTasks"], 0);
+    assert_eq!(after["hotTasks"], 0);
+    assert_eq!(after["memoryHotTasks"], 0);
+    assert_eq!(after["outputFiles"], 0);
+    assert_eq!(before["ownerBarrierRows"], 1);
+    assert_eq!(after["ownerBarrierRows"], 1);
+    assert_eq!(before["operationRows"], 1);
+    assert_eq!(after["operationRows"], 1);
+    assert!(store::closed(&control, &cleanup.controller_owner).unwrap());
+    assert_eq!(
+        store::check_execution(&control, &cleanup.controller_owner).unwrap_err(),
+        "task_run_closed"
+    );
+    assert!(store::check_execution(&control, &next.controller_owner).is_ok());
+    assert_eq!(
+        store::receipt(
+            &control,
+            &format!("endRun:{}", cleanup.controller_owner.id())
+        )
+        .unwrap()
+        .unwrap()
+        .result,
+        Some(ended),
+        "GC preserves the permanent Run closure acknowledgement"
+    );
+    let reopened = Journal::open(&control, "i").unwrap();
+    assert_eq!(reopened.fence.as_ref(), Some(&next));
+    assert!(reopened.tasks.is_empty());
+}
+
+#[test]
+fn closed_history_partial_file_failure_keeps_batch_metadata_until_retry() {
+    let fixture = OutputFixture::new();
+    let control = fixture.root.join("control");
+    let output = fixture.root.join("output");
+    let mut ids = Vec::new();
+    for name in ["first", "middle", "last"] {
+        let (_, id) = fixture.completed(name, 0);
+        fixture.manager.lock().unwrap().retire_history(1).unwrap();
+        ids.push(id);
+    }
+    ids.sort();
+    let ended = Manager::handle(
+        &fixture.manager,
+        EnvironmentTaskRequest::EndRun {
+            fence: fixture.fence.clone(),
+            run_id: fixture.fence.controller_owner.id().into(),
+            operation_id: fixture.fence.operation_id("close-run"),
+        },
+    )
+    .unwrap();
+    let blocked = output.join(format!("{}.output", ids[1]));
+    fs::remove_file(&blocked).unwrap();
+    fs::create_dir(&blocked).unwrap();
+    let takeover = EnvironmentTaskRequest::Takeover {
+        environment_instance_id: fixture.fence.environment_instance_id.clone(),
+        controller_owner: EnvironmentTaskOwner::AgentRun {
+            run_id: "next-run".into(),
+        },
+        controller_epoch: 2,
+        controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+    };
+    assert_eq!(
+        Manager::handle(&fixture.manager, takeover.clone()).unwrap_err(),
+        "task_history_retirement_pending"
+    );
+    assert!(!output.join(format!("{}.output", ids[0])).exists());
+    assert!(blocked.is_dir());
+    assert!(output.join(format!("{}.output", ids[2])).is_file());
+    for id in &ids {
+        assert!(store::task(&control, id).unwrap().is_some());
+    }
+    assert!(fixture.manager.lock().unwrap().journal.tasks.is_empty());
+    assert!(store::closed(&control, &fixture.fence.controller_owner).unwrap());
+    fs::remove_dir(&blocked).unwrap();
+    assert!(matches!(
+        Manager::handle(&fixture.manager, takeover).unwrap(),
+        EnvironmentTaskResult::TakenOver { .. }
+    ));
+    for id in &ids {
+        assert!(store::task(&control, id).unwrap().is_none());
+    }
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+    assert!(store::closed(&control, &fixture.fence.controller_owner).unwrap());
+    assert_eq!(
+        store::receipt(
+            &control,
+            &format!("endRun:{}", fixture.fence.controller_owner.id())
+        )
+        .unwrap()
+        .unwrap()
+        .result,
+        Some(ended)
+    );
+}

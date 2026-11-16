@@ -197,7 +197,7 @@ async fn model_question_resumes_original_run_and_closes_one_provider_tool_result
             )
             .await
             .unwrap();
-        assert_eq!(resumed.continuation, QueryContinuation::ExecuteTools);
+        assert_eq!(resumed.continuation, QueryContinuation::Continue);
         assert_eq!(resumed.tool_results.len(), 1);
         assert_eq!(resumed.tool_results[0].tool_call_id, "question-call");
         assert_eq!(resumed.tool_results[0].details["action"], action);
@@ -321,7 +321,7 @@ async fn public_question_routing_retains_serialized_snapshot_and_checkpoint_cont
         })
         .await
         .unwrap();
-    assert_eq!(routed.continuation, QueryContinuation::AwaitQuestion);
+    assert_eq!(routed.route, ModelRoute::AwaitQuestion);
     let expected = question::question_from_result(&result).unwrap().unwrap();
     let snapshot = serde_json::to_value(&routed.state).unwrap();
     let serialized_question = snapshot["pending_question_json"].as_str().unwrap();

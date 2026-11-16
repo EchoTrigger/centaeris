@@ -35,6 +35,7 @@ fn fixture() -> (SqliteRuntimeStore, WaitHandoff, SessionStateSnapshot) {
         model_request_id: "request-parent".into(),
         wait_checkpoint: wait,
         snapshot_json: serde_json::to_string(&serde_json::to_value(&snapshot).unwrap()).unwrap(),
+        normalized_snapshot_json: None,
     };
     (store, handoff, snapshot)
 }
@@ -134,4 +135,52 @@ fn wait_replay_accepts_committed_child_result_without_resealing() {
         .expect("a completed child must not fail the parent while its sibling is queued");
     assert_eq!(handoff.checkpoint_id().unwrap(), sealed_id);
     assert_eq!(handoff.source_session_sequence, 19);
+}
+
+#[test]
+fn input_usage_projection_preserves_sealed_identity_and_rejects_changed_state() {
+    let (_, mut handoff, _) = fixture();
+    let current = handoff.snapshot_json.clone();
+    let mut previous: serde_json::Value = serde_json::from_str(&current).unwrap();
+    previous["history"]["promptUsageAnchor"] = serde_json::json!({
+        "schema": "runtime.prompt_usage_anchor.v1",
+        "bindingDigest": format!("sha256:{}", "a".repeat(64)),
+        "messages": [{"digest": format!("sha256:{}", "b".repeat(64)), "estimatedTokens": 0}],
+        "actualInputTokens": 17
+    });
+    handoff.snapshot_json = previous.to_string();
+    let sealed_json = serde_json::to_string(&handoff).unwrap();
+    let old_digest = format!("{PREFIX}{}", digest(&handoff).unwrap());
+    assert_eq!(handoff.checkpoint_id().unwrap(), old_digest);
+    assert!(
+        handoff.normalized_snapshot().is_err(),
+        "current reads cannot accept an unmigrated input-only anchor"
+    );
+    assert!(handoff.migrate_prompt_usage_anchor().unwrap());
+    assert_eq!(handoff.checkpoint_id().unwrap(), old_digest);
+    assert_eq!(handoff.snapshot_json, previous.to_string());
+    let (write, legacy) = handoff.normalized_snapshot().unwrap();
+    assert!(!legacy);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(write.snapshot_json()).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&current).unwrap()
+    );
+    assert!(!handoff.migrate_prompt_usage_anchor().unwrap());
+    let mut source_only = serde_json::to_value(&handoff).unwrap();
+    source_only
+        .as_object_mut()
+        .unwrap()
+        .remove("normalizedSnapshotJson");
+    assert_eq!(
+        source_only,
+        serde_json::from_str::<serde_json::Value>(&sealed_json).unwrap()
+    );
+    let mut changed: serde_json::Value =
+        serde_json::from_str(handoff.normalized_snapshot_json.as_ref().unwrap()).unwrap();
+    changed["metadata"]["unrelated-state"] = "tampered".into();
+    handoff.normalized_snapshot_json = Some(changed.to_string());
+    assert!(handoff
+        .normalized_snapshot()
+        .unwrap_err()
+        .contains("normalized snapshot binding mismatch"));
 }

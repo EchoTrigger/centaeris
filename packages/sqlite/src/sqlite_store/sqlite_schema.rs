@@ -21,6 +21,27 @@ CREATE TABLE external_context_objects (
 const EXTERNAL_CONTEXT_PROVIDER_INDEX_SQL: &str = "CREATE INDEX idx_external_context_objects_provider_updated ON external_context_objects(source_provider_id, source_tool_name, updated_at_ms DESC, object_id ASC)";
 const EXTERNAL_CONTEXT_KIND_INDEX_SQL: &str = "CREATE INDEX idx_external_context_objects_kind_updated ON external_context_objects(object_kind, updated_at_ms DESC, object_id ASC)";
 
+const SESSION_HISTORY_ENTRIES_SQL: &str = "CREATE TABLE session_message_history_entries (
+    session_id TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    entry_json TEXT NOT NULL,
+    PRIMARY KEY(session_id,record_id)
+)";
+const SESSION_HISTORY_HEADS_SQL: &str = "CREATE TABLE session_message_history_heads (
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK(position > 0),
+    current_record_id TEXT NOT NULL,
+    is_original_user_request INTEGER NOT NULL CHECK(is_original_user_request IN (0,1)),
+    retired INTEGER NOT NULL CHECK(retired IN (0,1)),
+    PRIMARY KEY(session_id,message_id),
+    UNIQUE(session_id,position),
+    FOREIGN KEY(session_id,current_record_id) REFERENCES session_message_history_entries(session_id,record_id)
+)";
+const SESSION_HISTORY_RECENT_INDEX_SQL: &str = "CREATE INDEX idx_session_message_history_recent_user ON session_message_history_heads(session_id,is_original_user_request,retired,position DESC)";
+const SESSION_HISTORY_IMMUTABLE_SQL: &str = "CREATE TRIGGER session_message_history_immutable BEFORE UPDATE ON session_message_history_entries BEGIN SELECT RAISE(ABORT, 'session message history is immutable'); END";
+
 pub(super) fn ensure_schema(conn: &Connection) -> Result<(), String> {
     let empty_db = runtime_schema_user_table_count(conn)? == 0;
     if empty_db {
@@ -31,8 +52,89 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<(), String> {
 
     upgrade_lease_reclaim_budget(conn)?;
     upgrade_model_input_images(conn)?;
+    upgrade_session_working_set(conn)?;
+    upgrade_prompt_usage_anchors(conn)?;
     validate_schema_history(conn)?;
     validate_schema_shape(conn)
+}
+
+fn upgrade_prompt_usage_anchors(conn: &Connection) -> Result<(), String> {
+    if object_sql(conn, "table", "schema_migrations")?.is_none()
+        || schema_versions(conn)? != (1..=7).collect::<Vec<_>>()
+    {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    validate_schema_shape(&tx)?;
+    let mut after = None::<String>;
+    loop {
+        let row = tx.query_row(
+            "SELECT session_id,snapshot_json FROM session_runtime_snapshots WHERE (?1 IS NULL OR session_id>?1) ORDER BY session_id LIMIT 1",
+            params![after], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional().map_err(|error| error.to_string())?;
+        let Some((session_id, raw)) = row else { break };
+        let upgraded =
+            centaeris_core::session::history::migrate_prompt_usage_anchor_snapshot(&raw)?;
+        let snapshot: centaeris_core::session::state::SessionStateSnapshot =
+            serde_json::from_str(&upgraded).map_err(|error| error.to_string())?;
+        if snapshot.session_id != session_id {
+            return Err("usage_anchor_snapshot_identity_mismatch".into());
+        }
+        if upgraded != raw {
+            tx.execute(
+                "UPDATE session_runtime_snapshots SET snapshot_json=?2 WHERE session_id=?1",
+                params![session_id, upgraded],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        after = Some(session_id);
+    }
+    tx.execute(
+        "INSERT INTO schema_migrations VALUES(8,CAST(strftime('%s','now') AS INTEGER)*1000)",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())
+}
+
+fn upgrade_session_working_set(conn: &Connection) -> Result<(), String> {
+    if object_sql(conn, "table", "schema_migrations")?.is_none()
+        || schema_versions(conn)? != [1, 2, 3, 4, 5, 6]
+    {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    validate_schema_shape(&tx)?;
+    tx.execute_batch(&format!("{SESSION_HISTORY_ENTRIES_SQL};{SESSION_HISTORY_HEADS_SQL};{SESSION_HISTORY_RECENT_INDEX_SQL};{SESSION_HISTORY_IMMUTABLE_SQL};"))
+        .map_err(|error| error.to_string())?;
+    let mut after = None::<String>;
+    loop {
+        let row = tx.query_row(
+            "SELECT session_id,snapshot_json FROM session_runtime_snapshots WHERE (?1 IS NULL OR session_id>?1) ORDER BY session_id LIMIT 1",
+            params![after], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional().map_err(|error| error.to_string())?;
+        let Some((session_id, raw)) = row else { break };
+        let write = centaeris_core::session::history::migrate_legacy_session_snapshot(&raw)?;
+        if write.session_id() != session_id {
+            return Err("legacy_session_snapshot_identity_mismatch".into());
+        }
+        super::sqlite_runtime::persist_session_history_conn(&tx, &session_id, &write)?;
+        tx.execute(
+            "UPDATE session_runtime_snapshots SET snapshot_json=?2 WHERE session_id=?1",
+            params![session_id, write.snapshot_json()],
+        )
+        .map_err(|error| error.to_string())?;
+        after = Some(session_id);
+    }
+    tx.execute(
+        "INSERT INTO schema_migrations VALUES(7,CAST(strftime('%s','now') AS INTEGER)*1000)",
+        [],
+    )
+    .map_err(|error| error.to_string())?;
+    validate_schema_shape(&tx)?;
+    tx.commit().map_err(|error| error.to_string())
 }
 
 fn upgrade_lease_reclaim_budget(conn: &Connection) -> Result<(), String> {
@@ -127,6 +229,8 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
     }
     ddl.push_str(MODEL_INPUT_IMAGES_TRIGGER);
     ddl.push(';');
+    ddl.push_str(SESSION_HISTORY_IMMUTABLE_SQL);
+    ddl.push(';');
     let transaction = conn
         .unchecked_transaction()
         .map_err(|error| format!("begin runtime sqlite schema transaction failed: {error}"))?;
@@ -155,6 +259,14 @@ struct RequiredObject {
 }
 
 const REQUIRED_TABLES: &[RequiredObject] = &[
+    RequiredObject {
+        name: "session_message_history_entries",
+        sql: SESSION_HISTORY_ENTRIES_SQL,
+    },
+    RequiredObject {
+        name: "session_message_history_heads",
+        sql: SESSION_HISTORY_HEADS_SQL,
+    },
     RequiredObject {
         name: "session_model_input_images",
         sql: MODEL_INPUT_IMAGES_SQL,
@@ -501,6 +613,10 @@ const TRANSCRIPT_TABLES: &[RequiredObject] = &[
 
 const REQUIRED_INDEXES: &[RequiredObject] = &[
     RequiredObject {
+        name: "idx_session_message_history_recent_user",
+        sql: SESSION_HISTORY_RECENT_INDEX_SQL,
+    },
+    RequiredObject {
         name: "idx_runtime_job_waiters_source",
         sql: "CREATE INDEX idx_runtime_job_waiters_source ON runtime_job_waiters(source_job_id,checkpoint_id,tool_call_id)",
     },
@@ -630,6 +746,11 @@ fn validate_schema_shape_with_reclaim_budget(
         }
     }
     for table in REQUIRED_TABLES.iter().chain(TRANSCRIPT_TABLES) {
+        if table.name.starts_with("session_message_history_")
+            && !schema_versions(conn)?.contains(&7)
+        {
+            continue;
+        }
         if table.name == "session_model_input_images" && !schema_versions(conn)?.contains(&6) {
             continue;
         }
@@ -641,6 +762,11 @@ fn validate_schema_shape_with_reclaim_budget(
         validate_object_sql(conn, "table", table.name, &expected_sql)?;
     }
     for index in REQUIRED_INDEXES.iter().chain(TRANSCRIPT_INDEXES) {
+        if index.name == "idx_session_message_history_recent_user"
+            && !schema_versions(conn)?.contains(&7)
+        {
+            continue;
+        }
         validate_object_sql(conn, "index", index.name, index.sql)?;
     }
     if schema_versions(conn)?.contains(&6) {
@@ -649,6 +775,14 @@ fn validate_schema_shape_with_reclaim_budget(
             "trigger",
             "model_input_image_facts",
             MODEL_INPUT_IMAGES_TRIGGER,
+        )?;
+    }
+    if schema_versions(conn)?.contains(&7) {
+        validate_object_sql(
+            conn,
+            "trigger",
+            "session_message_history_immutable",
+            SESSION_HISTORY_IMMUTABLE_SQL,
         )?;
     }
     Ok(())
@@ -771,7 +905,9 @@ mod tests {
 
     fn previous_schema(conn: &Connection) {
         for table in REQUIRED_TABLES.iter().chain(TRANSCRIPT_TABLES) {
-            if table.name == "session_model_input_images" {
+            if table.name == "session_model_input_images"
+                || table.name.starts_with("session_message_history_")
+            {
                 continue;
             }
             let sql = if table.name == "runtime_jobs" {
@@ -782,6 +918,9 @@ mod tests {
             conn.execute_batch(&sql).unwrap();
         }
         for index in REQUIRED_INDEXES.iter().chain(TRANSCRIPT_INDEXES) {
+            if index.name == "idx_session_message_history_recent_user" {
+                continue;
+            }
             conn.execute_batch(index.sql).unwrap();
         }
         for version in 1..=4 {
@@ -821,7 +960,7 @@ mod tests {
             .unwrap(),
             4
         );
-        assert_eq!(schema_versions(&conn).unwrap(), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(schema_versions(&conn).unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
         ensure_schema(&conn).unwrap();
         assert!(conn
             .execute("UPDATE runtime_jobs SET lease_reclaim_count=-1", [])

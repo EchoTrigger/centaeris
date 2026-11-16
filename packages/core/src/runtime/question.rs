@@ -321,11 +321,11 @@ impl<
                     &generate,
                     std::slice::from_ref(&closure.result),
                 )?;
-                self.session_manager.save_session(&session)?;
+                session = self.session_manager.save_session_owned(session)?;
                 return Ok(Some(TurnStepResult {
                     current_assistant_reply: None,
                     turn_id: wait.turn_id,
-                    continuation: QueryContinuation::ExecuteTools,
+                    continuation: QueryContinuation::Continue,
                     checkpoint: None,
                     provider_tool_calls: generate.tool_calls,
                     tool_results: vec![closure.result],
@@ -429,7 +429,7 @@ impl<
         let generate = original_generate(&session, &wait)?;
         self.repair_tool_batch_transcript(&mut session, &generate, std::slice::from_ref(&result))?;
         // Persist the paired provider result before removing its recovery checkpoint.
-        self.session_manager.save_session(&session)?;
+        session = self.session_manager.save_session_owned(session)?;
         let changed = RuntimeWaitChangedV1 {
             schema: contracts::RUNTIME_WAIT_CHANGED_SCHEMA_V1.into(),
             continuation_id: wait.continuation_id.clone(),
@@ -514,7 +514,7 @@ impl<
         Ok(TurnStepResult {
             current_assistant_reply: None,
             turn_id: checkpoint.turn_id,
-            continuation: QueryContinuation::ExecuteTools,
+            continuation: QueryContinuation::Continue,
             checkpoint: None,
             provider_tool_calls: generate.tool_calls,
             tool_results: vec![result],

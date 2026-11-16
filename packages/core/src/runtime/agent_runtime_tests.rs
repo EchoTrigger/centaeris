@@ -9,6 +9,7 @@ use crate::extension::skills::{
     add_skill_source, SkillCatalogLoadConfig, SkillSourceAddRequest, SkillSourceKindV1,
     SkillSourceScopeV1, SkillSourcesConfigV1,
 };
+use crate::model::prepared_prompt::estimate_prepared_prompt_tokens;
 use crate::model::{
     ModelClientError, ModelClientErrorKind, ModelClientFuture, ModelClientRequest,
     ModelClientResponse, ModelClientStreamEvent, ModelSessionConfig,
@@ -89,11 +90,20 @@ struct AgentRuntimeTestState {
     checkpoints: Vec<CheckpointRecord>,
     events: Vec<RuntimeEvent>,
     snapshots: HashMap<String, String>,
+    history_records: HashMap<
+        String,
+        std::collections::BTreeMap<u64, crate::session::history::SessionHistoryRecordV1>,
+    >,
+    history_positions: HashMap<(String, String), u64>,
+    history_entries: HashMap<(String, String), crate::session::history::SessionHistoryEntryV1>,
+    retired_history: std::collections::HashSet<(String, String)>,
     model_input_images: HashMap<(String, String), Vec<u8>>,
     snapshot_load_count: usize,
     snapshot_load_bytes: usize,
     snapshot_save_count: usize,
     snapshot_save_bytes: usize,
+    history_page_read_count: usize,
+    history_body_bytes_loaded: usize,
     fail_after_input_snapshot: Option<String>,
     reject_tool_execution_receipts: bool,
     lose_creation_reply: bool,
@@ -531,7 +541,118 @@ impl RuntimeStore for AgentRuntimeTestStore {
     }
 }
 
+fn apply_test_snapshot(
+    state: &mut AgentRuntimeTestState,
+    session_id: &str,
+    write: &crate::session::history::SessionSnapshotWriteV1,
+) -> Result<(), String> {
+    if write.session_id() != session_id {
+        return Err("session_history_session_mismatch".into());
+    }
+    for entry in write.entries() {
+        entry.validate()?;
+        let key = (session_id.to_owned(), entry.record_id.clone());
+        if let Some(stored) = state.history_entries.get(&key) {
+            if serde_json::to_value(stored).map_err(|error| error.to_string())?
+                != serde_json::to_value(entry).map_err(|error| error.to_string())?
+            {
+                return Err("session_history_entry_content_conflict".into());
+            }
+        } else {
+            state.history_entries.insert(key, entry.clone());
+        }
+        let identity = (session_id.to_owned(), entry.message.message_id.clone());
+        let records = state
+            .history_records
+            .entry(session_id.to_owned())
+            .or_default();
+        let next = records
+            .last_key_value()
+            .map_or(1, |(position, _)| position + 1);
+        let position = *state
+            .history_positions
+            .entry(identity.clone())
+            .or_insert(next);
+        state.retired_history.remove(&identity);
+        records.insert(
+            position,
+            crate::session::history::SessionHistoryRecordV1 {
+                position,
+                entry: entry.clone(),
+            },
+        );
+    }
+    for id in write.retired_message_ids() {
+        state
+            .retired_history
+            .insert((session_id.to_owned(), id.clone()));
+    }
+    for id in write.recovery_retired_message_ids() {
+        let identity = (session_id.to_owned(), id.clone());
+        if state.history_positions.contains_key(&identity) {
+            state.retired_history.insert(identity);
+        }
+    }
+    for reference in write.retained_entries() {
+        let identity = (session_id.to_owned(), reference.message_id.clone());
+        let stored = state
+            .history_positions
+            .get(&identity)
+            .and_then(|position| state.history_records.get(session_id)?.get(position));
+        if stored.is_none_or(|record| record.entry.record_id != reference.record_id)
+            || state.retired_history.contains(&identity)
+        {
+            return Err("session_history_working_binding_mismatch".into());
+        }
+    }
+    state.snapshot_save_count += 1;
+    state.snapshot_save_bytes += write.snapshot_json().len();
+    state
+        .snapshots
+        .insert(session_id.to_owned(), write.snapshot_json().to_owned());
+    Ok(())
+}
+
 impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
+    fn load_session_history_page(
+        &self,
+        session_id: &str,
+        before_position: Option<u64>,
+        limit: usize,
+        selection: crate::session::history::SessionHistorySelectionV1,
+    ) -> Result<Vec<crate::session::history::SessionHistoryRecordV1>, String> {
+        let mut state = self.state()?;
+        state.history_page_read_count += 1;
+        let Some(records) = state.history_records.get(session_id) else {
+            return Ok(Vec::new());
+        };
+        let page = records
+            .iter()
+            .rev()
+            .filter(|(position, record)| {
+                before_position.is_none_or(|before| **position < before)
+                    && !state.retired_history.contains(&(
+                        session_id.to_owned(),
+                        record.entry.message.message_id.clone(),
+                    ))
+                    && (selection == crate::session::history::SessionHistorySelectionV1::All
+                        || record.entry.is_original_user_request())
+            })
+            .take(limit)
+            .map(|(_, record)| record.clone())
+            .collect::<Vec<_>>();
+        state.history_body_bytes_loaded += page
+            .iter()
+            .map(|record| {
+                serde_json::to_vec(&record.entry)
+                    .map(|bytes| bytes.len())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum::<usize>();
+        Ok(page)
+    }
     fn save_model_input_image(
         &self,
         session_id: &str,
@@ -578,11 +699,8 @@ impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
         if state.snapshots.get(session_id).map(String::as_str) != expected_snapshot {
             return Ok(false);
         }
-        state.snapshot_save_count += 1;
-        state.snapshot_save_bytes += snapshot_json.len();
-        state
-            .snapshots
-            .insert(session_id.into(), snapshot_json.into());
+        let write = crate::session::history::prepare_session_snapshot_write(snapshot_json)?;
+        apply_test_snapshot(&mut state, session_id, &write)?;
         Ok(true)
     }
 
@@ -600,16 +718,24 @@ impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
         snapshot_json: &str,
         _updated_at_ms: i64,
     ) -> Result<(), String> {
+        let write = crate::session::history::prepare_session_snapshot_write(snapshot_json)?;
+        if write.session_id() != session_id {
+            return Err("session_history_session_mismatch".into());
+        }
+        self.save_prepared_agent_runtime_snapshot(write, _updated_at_ms)?;
+        Ok(())
+    }
+
+    fn save_prepared_agent_runtime_snapshot(
+        &self,
+        write: crate::session::history::SessionSnapshotWriteV1,
+        _updated_at_ms: i64,
+    ) -> Result<SessionStateSnapshot, String> {
         let mut state = self.state()?;
-        state.snapshot_save_count += 1;
-        state.snapshot_save_bytes += snapshot_json.len();
-        state
-            .snapshots
-            .insert(session_id.to_string(), snapshot_json.to_string());
+        apply_test_snapshot(&mut state, write.session_id(), &write)?;
         if let Some(message_id) = &state.fail_after_input_snapshot {
-            let snapshot: SessionStateSnapshot = serde_json::from_str(snapshot_json)
-                .map_err(|error| format!("decode injected snapshot failed: {error}"))?;
-            if snapshot
+            if write
+                .snapshot()
                 .messages
                 .iter()
                 .any(|message| &message.message_id == message_id)
@@ -618,7 +744,7 @@ impl AgentRuntimeSnapshotStorePort for AgentRuntimeTestStore {
                 return Err("injected_prepared_snapshot_response_failure".into());
             }
         }
-        Ok(())
+        Ok(write.into_snapshot())
     }
 }
 
@@ -2416,6 +2542,9 @@ async fn failed_stream_retracts_tentative_content_before_runtime_error() {
     };
     let driver = ModelClientGenerateDriver::new(&model_client, &config_store);
     let request = GenerateDriverRequest {
+        context_was_compacted: false,
+        prompt_usage_basis: None,
+        session_config: None,
         execution_tools: ToolLayer::new(),
         tool_contracts: Vec::new(),
         prompt_compaction: None,
@@ -2886,12 +3015,13 @@ async fn query_loop_preserves_dynamic_description_at_durable_model_request_bound
     observations.push(ModelObservationV1::ToolCatalog {
         tool_definitions: prepared_prompt.tool_definitions.clone(),
     });
-    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        &serde_json::to_string(&prepared_prompt.messages[0]).unwrap(),
-    ) + crate::model::prepared_prompt::estimate_text_tokens(
-        &serde_json::to_string(&prepared_prompt.tool_definitions).unwrap(),
-    );
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = GenerateDriverRequest {
+        context_was_compacted: false,
+        prompt_usage_basis: None,
+        session_config: None,
         execution_tools: ToolLayer::new(),
         tool_contracts: environment.tool_contracts.clone(),
         prompt_compaction: None,
@@ -2974,12 +3104,13 @@ async fn query_loop_persistence_fences_provider_dispatch_and_stream_output() {
         8_192,
     )
     .expect("valid prepared prompt");
-    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        serde_json::to_string(&prepared_prompt.messages[0])
-            .expect("serialize prompt message")
-            .as_str(),
-    );
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = GenerateDriverRequest {
+        context_was_compacted: false,
+        prompt_usage_basis: None,
+        session_config: None,
         execution_tools: ToolLayer::new(),
         tool_contracts: Vec::new(),
         prompt_compaction: None,
@@ -6060,36 +6191,6 @@ fn generate_driver_request_keeps_conversation_prefix_before_dynamic_context_for_
         "第二轮问题：继续审计缓存前缀。"
     );
 
-    let expected_context_tokens =
-        request
-            .prepared_prompt
-            .messages
-            .iter()
-            .fold(0u32, |total, message| {
-                total.saturating_add(crate::model::prepared_prompt::estimate_text_tokens(
-                    serde_json::to_string(message)
-                        .expect("serialize model message")
-                        .as_str(),
-                ))
-            });
-    let expected_system_tokens = request
-        .prepared_prompt
-        .system_prompt
-        .as_deref()
-        .map(crate::model::prepared_prompt::estimate_text_tokens)
-        .unwrap_or_default();
-    let serialized_tools = serde_json::to_string(&request.prepared_prompt.tool_definitions)
-        .expect("serialize model tool definitions");
-    let expected_tool_tokens =
-        crate::model::prepared_prompt::estimate_text_tokens(serialized_tools.as_str());
-    assert_eq!(
-        request.context_token_estimate,
-        expected_system_tokens
-            .saturating_add(expected_context_tokens)
-            .saturating_add(expected_tool_tokens),
-        "request token estimate must include system, context, and tool definitions"
-    );
-
     let audit_lines = request
         .prepared_prompt
         .messages
@@ -7774,7 +7875,30 @@ async fn prompt_compaction_persists_minimal_markdown_commit() {
     assert!(session_snapshot
         .messages
         .iter()
-        .any(|message| message.content.contains("old model compaction request")));
+        .all(|message| !message.content.contains("old model compaction request")));
+    let history = store
+        .load_session_history_page(
+            &session.session_id,
+            None,
+            256,
+            crate::session::history::SessionHistorySelectionV1::All,
+        )
+        .unwrap();
+    let archived = history
+        .iter()
+        .find(|record| record.entry.message.message_id == session.messages[0].message_id)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&archived.entry.message).unwrap(),
+        serde_json::to_value(&session.messages[0]).unwrap()
+    );
+    assert_eq!(
+        &archived.entry.model_semantics,
+        session
+            .model_semantics
+            .get(&session.messages[0].message_id)
+            .unwrap()
+    );
 }
 #[tokio::test]
 async fn model_prompt_compaction_generate_request_uses_model_client_summary() {
@@ -7851,7 +7975,30 @@ async fn model_prompt_compaction_generate_request_uses_model_client_summary() {
     assert!(saved_session
         .messages
         .iter()
-        .any(|message| message.content.contains("old model compaction request")));
+        .all(|message| !message.content.contains("old model compaction request")));
+    let history = store
+        .load_session_history_page(
+            &session.session_id,
+            None,
+            256,
+            crate::session::history::SessionHistorySelectionV1::All,
+        )
+        .unwrap();
+    let archived = history
+        .iter()
+        .find(|record| record.entry.message.message_id == session.messages[0].message_id)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&archived.entry.message).unwrap(),
+        serde_json::to_value(&session.messages[0]).unwrap()
+    );
+    assert_eq!(
+        &archived.entry.model_semantics,
+        session
+            .model_semantics
+            .get(&session.messages[0].message_id)
+            .unwrap()
+    );
     let stats_json = saved_session
         .metadata
         .get("prompt_compaction_stats_json")
@@ -8724,7 +8871,7 @@ async fn query_loop_external_cancel_stops_before_another_provider_request() {
     assert!(response
         .turn_receipts
         .iter()
-        .all(|turn| turn.continuation == QueryContinuation::ExecuteTools));
+        .all(|turn| turn.continuation == QueryContinuation::Continue));
     assert_eq!(model_client.request_count.load(Ordering::SeqCst), 30);
     assert_eq!(execution_count.load(Ordering::SeqCst), 30);
     assert!(!stream_events
@@ -10237,7 +10384,7 @@ async fn complete_turn_tool_failure_continues_to_provider() {
     assert_eq!(execution_count.load(Ordering::SeqCst), 1);
     assert_eq!(
         response.turn_receipts[0].continuation,
-        QueryContinuation::ExecuteTools
+        QueryContinuation::Continue
     );
 }
 
@@ -12080,18 +12227,9 @@ fn canonical_model_request_record_embeds_ordered_observations() {
         32_768,
     )
     .expect("prepared prompt");
-    let context_token_estimate =
-        crate::model::prepared_prompt::estimate_text_tokens("stable system prompt")
-            .saturating_add(crate::model::prepared_prompt::estimate_text_tokens(
-                serde_json::to_string(&context_message)
-                    .expect("serialize context message")
-                    .as_str(),
-            ))
-            .saturating_add(crate::model::prepared_prompt::estimate_text_tokens(
-                serde_json::to_string(&prepared_prompt.tool_definitions)
-                    .expect("serialize tool definitions")
-                    .as_str(),
-            ));
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = ModelClientRequest {
         session_id: "chat-1".to_string(),
         turn_id: "turn-1".to_string(),
@@ -12258,11 +12396,18 @@ fn canonical_model_request_record_embeds_ordered_observations() {
         tool_call_id: None,
         reasoning_content: None,
     };
-    let compaction_context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        serde_json::to_string(&compaction_prompt)
-            .expect("serialize compaction prompt")
-            .as_str(),
-    );
+    let compaction_prepared_prompt = crate::model::prepared_prompt::PreparedPromptV1::new(
+        None,
+        vec![compaction_prompt.clone()],
+        vec![],
+        crate::tool::ModelToolChoice::None,
+        4_096,
+    )
+    .expect("compaction prompt");
+    let compaction_context_token_estimate =
+        estimate_prepared_prompt_tokens(&compaction_prepared_prompt, None)
+            .expect("compaction prompt token estimate")
+            .total_tokens();
     let compaction_request = ModelClientRequest {
         session_id: "chat-1".to_string(),
         turn_id: "turn-compaction".to_string(),
@@ -12272,14 +12417,7 @@ fn canonical_model_request_record_embeds_ordered_observations() {
         system_prompt_manifest_json: None,
         compression_stats_json: None,
         context_token_estimate: compaction_context_token_estimate,
-        prepared_prompt: crate::model::prepared_prompt::PreparedPromptV1::new(
-            None,
-            vec![compaction_prompt.clone()],
-            vec![],
-            crate::tool::ModelToolChoice::None,
-            4_096,
-        )
-        .expect("compaction prompt"),
+        prepared_prompt: compaction_prepared_prompt,
         session_config: ModelSessionConfig::default(),
     };
     let compaction_started = ModelRequestStartedV1::from_request(
@@ -12339,12 +12477,13 @@ async fn query_loop_reasoning_commits_before_return_and_persistence_failure_stop
         8_192,
     )
     .expect("valid prepared prompt");
-    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        serde_json::to_string(&prepared_prompt.messages[0])
-            .expect("serialize prompt message")
-            .as_str(),
-    );
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = GenerateDriverRequest {
+        context_was_compacted: false,
+        prompt_usage_basis: None,
+        session_config: None,
         execution_tools: ToolLayer::new(),
         tool_contracts: Vec::new(),
         prompt_compaction: None,
@@ -12512,12 +12651,13 @@ async fn query_loop_live_reasoning_seals_failure_cancel_and_retry_without_mixing
         8_192,
     )
     .expect("valid prepared prompt");
-    let context_token_estimate = crate::model::prepared_prompt::estimate_text_tokens(
-        serde_json::to_string(&prepared_prompt.messages[0])
-            .expect("serialize prompt message")
-            .as_str(),
-    );
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .expect("prompt token estimate")
+        .total_tokens();
     let request = GenerateDriverRequest {
+        context_was_compacted: false,
+        prompt_usage_basis: None,
+        session_config: None,
         execution_tools: ToolLayer::new(),
         tool_contracts: Vec::new(),
         prompt_compaction: None,
@@ -12699,9 +12839,11 @@ async fn query_loop_compact_results_preserve_real_tool_pairing_and_observe_snaps
         );
         let state = store.state().unwrap();
         assert_eq!(state.snapshots.len(), 1);
+        assert_eq!(state.history_page_read_count, 0);
+        assert_eq!(state.history_body_bytes_loaded, 0);
         println!(
             "{}",
-            json!({"realLoopToolTurns":tool_turns,"currentSnapshotBytes":state.snapshots.values().next().unwrap().len(),"snapshotLoadCount":state.snapshot_load_count,"snapshotLoadedStringBytes":state.snapshot_load_bytes,"snapshotSaveCount":state.snapshot_save_count,"snapshotSavedStringBytes":state.snapshot_save_bytes,"measurement":"test store strings, not disk IO; full-history load/save remains"})
+            json!({"realLoopToolTurns":tool_turns,"currentSnapshotBytes":state.snapshots.values().next().unwrap().len(),"snapshotLoadCount":state.snapshot_load_count,"snapshotLoadedStringBytes":state.snapshot_load_bytes,"snapshotSaveCount":state.snapshot_save_count,"snapshotSavedStringBytes":state.snapshot_save_bytes,"historyPageReadCount":state.history_page_read_count,"historyBodyBytesLoaded":state.history_body_bytes_loaded,"measurement":"test store snapshot strings and archive API payload bytes; not disk IO"})
         );
     }
 }

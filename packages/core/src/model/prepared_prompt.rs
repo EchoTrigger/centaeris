@@ -11,6 +11,13 @@ use crate::session::state::{
 };
 use crate::tool::{ModelToolChoice, ModelToolDefinition};
 
+mod token_estimate;
+
+pub(crate) use token_estimate::{
+    estimate_prepared_prompt_tokens, estimate_prepared_prompt_tokens_with_images,
+    PromptTokenEstimate,
+};
+
 pub const PREPARED_PROMPT_SCHEMA: &str = "prepared_prompt.v1";
 pub const MODEL_INPUT_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 pub const MODEL_INPUT_IMAGE_MAX_PIXELS: u64 = 100_000_000;
@@ -497,15 +504,39 @@ pub fn estimate_projected_message_tokens(
     message: &ChatMessage,
     semantics: &ModelMessageSemanticsV1,
 ) -> Result<u32, String> {
-    let projected = project_chat_message_to_model_message(message, semantics)?;
-    let encoded = serde_json::to_string(&projected)
-        .map_err(|error| format!("serialize projected model message failed: {error}"))?;
-    Ok(estimate_text_tokens(encoded.as_str()))
+    let mut bytes = message.content.len();
+    match (&message.role, semantics) {
+        (
+            MessageRole::System | MessageRole::User | MessageRole::Assistant,
+            ModelMessageSemanticsV1::Plain,
+        )
+        | (MessageRole::Tool, ModelMessageSemanticsV1::ToolResult { .. }) => {}
+        (
+            MessageRole::Assistant,
+            ModelMessageSemanticsV1::Assistant {
+                reasoning_content,
+                tool_calls,
+            },
+        ) => {
+            bytes = bytes.saturating_add(reasoning_content.as_deref().map_or(0, str::len));
+            for call in tool_calls {
+                bytes = bytes
+                    .saturating_add(call.name.len())
+                    .saturating_add(call.args_json.len());
+            }
+        }
+        _ => {
+            return Err(format!(
+                "model_message_semantics_role_mismatch: messageId={} role={:?}",
+                message.message_id, message.role
+            ));
+        }
+    }
+    Ok(token_estimate::estimate_bytes_tokens(bytes))
 }
 
 pub fn estimate_text_tokens(text: &str) -> u32 {
-    let chars = text.chars().count();
-    u32::try_from(chars.saturating_add(3) / 4).unwrap_or(u32::MAX)
+    token_estimate::estimate_bytes_tokens(text.len())
 }
 
 #[cfg(test)]

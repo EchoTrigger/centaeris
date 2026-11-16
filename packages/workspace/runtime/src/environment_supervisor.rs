@@ -1,5 +1,7 @@
 //! Bounded private host transport; workload containers receive no control channel.
-use centaeris_core::execution::{EnvironmentTaskEnvelope, EnvironmentTaskResult};
+use centaeris_core::execution::{
+    EnvironmentTaskEnvelope, EnvironmentTaskOwner, EnvironmentTaskRequest, EnvironmentTaskResult,
+};
 use centaeris_core::execution::{EnvironmentTaskSnapshot, EnvironmentTaskState};
 use hosted_execution::host_supervisor::HostHelperRequest;
 use hosted_execution::host_supervisor::{
@@ -518,25 +520,48 @@ fn task_with(
     target.validate()?;
     envelope.validate()?;
     envelope.request.validate_authority()?;
-    match transport(HostSupervisorRequest::Register {
-        target: target.clone(),
-    })? {
-        HostSupervisorResult::Registered { target: actual } if actual == target => {}
-        _ => return Err("environment_host_registration_rejected".into()),
-    }
-    match transport(HostSupervisorRequest::Task { envelope })? {
-        HostSupervisorResult::Task { response } => {
-            response.validate()?;
-            match response {
-                centaeris_core::execution::EnvironmentTaskResponse::Success { result, .. } => {
-                    Ok(result)
-                }
-                centaeris_core::execution::EnvironmentTaskResponse::Error { error, .. } => {
-                    Err(safe_error(&error))
+    let takeover_run_id = match &envelope.request {
+        EnvironmentTaskRequest::Takeover {
+            controller_owner: EnvironmentTaskOwner::AgentRun { run_id },
+            ..
+        } => Some(run_id.clone()),
+        _ => None,
+    };
+    {
+        let mut register = || -> Result<(), String> {
+            match transport(HostSupervisorRequest::Register {
+                target: target.clone(),
+            })? {
+                HostSupervisorResult::Registered { target: actual } if actual == target => Ok(()),
+                _ => Err("environment_host_registration_rejected".into()),
+            }
+        };
+        if let Some(run_id) = takeover_run_id.as_deref() {
+            crate::observations::execution_boundary("environmentHostRegister", run_id, register)
+        } else {
+            register()
+        }
+    }?;
+    let task = || -> Result<EnvironmentTaskResult, String> {
+        match transport(HostSupervisorRequest::Task { envelope })? {
+            HostSupervisorResult::Task { response } => {
+                response.validate()?;
+                match response {
+                    centaeris_core::execution::EnvironmentTaskResponse::Success {
+                        result, ..
+                    } => Ok(result),
+                    centaeris_core::execution::EnvironmentTaskResponse::Error { error, .. } => {
+                        Err(safe_error(&error))
+                    }
                 }
             }
+            _ => Err("environment_host_task_unconfirmed".into()),
         }
-        _ => Err("environment_host_task_unconfirmed".into()),
+    };
+    if let Some(run_id) = takeover_run_id.as_deref() {
+        crate::observations::execution_boundary("environmentHostTakeover", run_id, task)
+    } else {
+        task()
     }
 }
 
@@ -704,6 +729,87 @@ mod tests {
             Err("environment_host_registration_rejected".into())
         );
         assert_eq!(calls, 1);
+    }
+    #[test]
+    fn takeover_observations_distinguish_registration_and_task_dispatch() {
+        let expected = target();
+        let fence = EnvironmentTaskFence {
+            environment_instance_id: expected.environment_instance_id.clone(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "observed-run".into(),
+            },
+            controller_epoch: 2,
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        };
+        let request = EnvironmentTaskEnvelope {
+            schema: ENVIRONMENT_TASK_SCHEMA.into(),
+            request: EnvironmentTaskRequest::Takeover {
+                environment_instance_id: fence.environment_instance_id.clone(),
+                controller_owner: fence.controller_owner.clone(),
+                controller_epoch: fence.controller_epoch,
+                controller_purpose: fence.controller_purpose.clone(),
+            },
+        };
+        let mut calls = 0;
+        let (result, records) = crate::observations::capture_operation_records(|| {
+            task_with(expected.clone(), request.clone(), |request| {
+                calls += 1;
+                Ok(match request {
+                    HostSupervisorRequest::Register { target } => {
+                        assert_eq!(target, expected);
+                        HostSupervisorResult::Registered { target }
+                    }
+                    HostSupervisorRequest::Task { .. } => HostSupervisorResult::Task {
+                        response: EnvironmentTaskResponse::from_result(Ok(
+                            EnvironmentTaskResult::TakenOver {
+                                fence: fence.clone(),
+                            },
+                        )),
+                    },
+                    _ => panic!("unexpected request"),
+                })
+            })
+        });
+        assert_eq!(result.unwrap(), EnvironmentTaskResult::TakenOver { fence });
+        assert_eq!(calls, 2);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| (
+                    record["boundary"].as_str().unwrap(),
+                    record["outcome"].as_str().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("environmentHostRegister", "started"),
+                ("environmentHostRegister", "ok"),
+                ("environmentHostTakeover", "started"),
+                ("environmentHostTakeover", "ok"),
+            ]
+        );
+        assert!(records.iter().all(|record| {
+            record["runId"] == "observed-run"
+                && record["jobId"] == "agent_run.lifecycle:observed-run"
+        }));
+
+        calls = 0;
+        let (result, records) = crate::observations::capture_operation_records(|| {
+            task_with(expected, request, |_| {
+                calls += 1;
+                Err("environment_host_transport_unavailable".into())
+            })
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            "environment_host_transport_unavailable"
+        );
+        assert_eq!(calls, 1, "registration failure must not dispatch a task");
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .all(|record| record["boundary"] == "environmentHostRegister"));
+        assert_eq!(records[0]["outcome"], "started");
+        assert_eq!(records[1]["outcome"], "error");
     }
     #[test]
     fn external_supervisor_jsonl_is_bounded_strict_and_redacts_remote_diagnostics() {

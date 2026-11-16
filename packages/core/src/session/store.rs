@@ -206,6 +206,22 @@ pub trait RuntimeStore {
 }
 
 pub trait AgentRuntimeSnapshotStorePort {
+    /// Atomically commits verified facts and returns their normalized working state.
+    fn save_prepared_agent_runtime_snapshot(
+        &self,
+        prepared: crate::session::history::SessionSnapshotWriteV1,
+        updated_at_ms: i64,
+    ) -> Result<crate::session::state::SessionStateSnapshot, String>;
+
+    /// Reads latest visible message revisions in descending stable Session order.
+    fn load_session_history_page(
+        &self,
+        session_id: &str,
+        before_position: Option<u64>,
+        limit: usize,
+        selection: crate::session::history::SessionHistorySelectionV1,
+    ) -> Result<Vec<crate::session::history::SessionHistoryRecordV1>, String>;
+
     /// Retain verified execution-image bytes as immutable, Session-owned history.
     /// A repeated digest must contain the exact same bytes.
     fn save_model_input_image(

@@ -617,7 +617,7 @@ fn one_hundred_controller_windows_retire_history_and_keep_environment_task() {
         // Model closed-Run collection before admitting the next window. The real
         // Manager also verifies physical retirement before calling this store API.
         while let Some((id, _)) = store::next_closed(&p, "", &fence.controller_owner).unwrap() {
-            store::forget_closed(&p, &id).unwrap();
+            store::forget_closed(&p, std::slice::from_ref(&id)).unwrap();
         }
         let records = if epoch == 1 {
             ENVIRONMENT_TASK_MAX_RECORDS - 1
@@ -944,7 +944,7 @@ fn closed_history_collection_preserves_environment_and_uncertain_input_and_does_
     .unwrap()
     .unwrap();
     assert_eq!(id, ids["complete"]);
-    store::forget_closed(&p, &id).unwrap();
+    store::forget_closed(&p, std::slice::from_ref(&id)).unwrap();
     j.persist(&p).unwrap();
     assert!(store::task(&p, &ids["complete"]).unwrap().is_none());
     assert!(store::task(&p, &ids["uncertain"]).unwrap().is_some());

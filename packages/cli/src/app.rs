@@ -77,7 +77,6 @@ use transcript::{SubagentTranscriptLine, TranscriptLine};
 use view::*;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const CLI_USAGE: &str = "Usage: centa [--workspace <path>]";
 const STATUS_REDRAW_INTERVAL: Duration = Duration::from_secs(1);
 const RUNTIME_REPLACEMENT_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNTIME_REPLACEMENT_IDLE_WAIT: Duration = Duration::from_secs(7);
@@ -492,34 +491,15 @@ struct SessionRestore {
     replay_items: Vec<Value>,
 }
 
-pub(crate) fn run() -> Result<(), Box<dyn Error>> {
+pub(crate) fn run(workspace: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
     install_panic_hook();
-    let arguments = env::args().skip(1).collect::<Vec<_>>();
-    if let Some(output) = local_cli_output(arguments.as_slice()) {
-        println!("{output}");
-        return Ok(());
-    }
-    let config = parse_args(arguments).map_err(|message| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{message}\n{CLI_USAGE}"),
-        )
-    })?;
+    let config = resolve_config(workspace)
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
     let mut terminal = setup_terminal()?;
     let app = App::new(config);
     let result = run_event_loop(&mut terminal, app);
     restore_terminal(&mut terminal)?;
     result
-}
-
-fn local_cli_output(arguments: &[String]) -> Option<String> {
-    match arguments {
-        [argument] if matches!(argument.as_str(), "--help" | "-h") => Some(CLI_USAGE.to_string()),
-        [argument] if matches!(argument.as_str(), "--version" | "-V") => {
-            Some(format!("centa {}", env!("CARGO_PKG_VERSION")))
-        }
-        _ => None,
-    }
 }
 
 /// panic 时恢复终端，避免 alternate screen/raw mode 泄漏到 shell。
@@ -530,40 +510,25 @@ fn install_panic_hook() {
     }));
 }
 
-fn parse_args(args: impl IntoIterator<Item = String>) -> Result<AppConfig, String> {
+fn resolve_config(workspace: Option<PathBuf>) -> Result<AppConfig, String> {
     let default_workspace = env::current_dir()
         .map_err(|error| format!("cannot read current directory as default workspace: {error}"))?;
-    parse_args_with_default_and_home(args, default_workspace, user_home_dir())
+    resolve_config_with_default_and_home(workspace, default_workspace, user_home_dir())
 }
 
 #[cfg(test)]
-fn parse_args_with_default(
-    args: impl IntoIterator<Item = String>,
+fn resolve_config_with_default(
+    workspace: Option<PathBuf>,
     default_workspace: PathBuf,
 ) -> Result<AppConfig, String> {
-    parse_args_with_default_and_home(args, default_workspace, user_home_dir())
+    resolve_config_with_default_and_home(workspace, default_workspace, user_home_dir())
 }
 
-fn parse_args_with_default_and_home(
-    args: impl IntoIterator<Item = String>,
+fn resolve_config_with_default_and_home(
+    workspace_root: Option<PathBuf>,
     default_workspace: PathBuf,
     home_dir: Option<PathBuf>,
 ) -> Result<AppConfig, String> {
-    let mut workspace_root = None;
-    let mut args = args.into_iter();
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--workspace" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--workspace requires a path".to_string())?;
-                workspace_root = Some(PathBuf::from(value));
-            }
-            _ => return Err(format!("unknown argument: {arg}")),
-        }
-    }
-
     let workspace_was_explicit = workspace_root.is_some();
     let workspace_root = workspace_root.unwrap_or(default_workspace);
     let workspace_root = workspace_root

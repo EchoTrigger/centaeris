@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 use centaeris_core::runtime::contracts::{
     CheckpointKindV1, CheckpointRecord, EventVisibility, RuntimeEvent,
 };
+use centaeris_core::session::history::{
+    prepare_session_snapshot_write, SessionHistoryRecordV1, SessionHistorySelectionV1,
+    SessionSnapshotWriteV1,
+};
 use centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND;
 use centaeris_core::session::store::{
     AgentRuntimeSnapshotStorePort, RuntimeStore, RuntimeStoreError, SessionDataStorePort,
@@ -26,6 +30,11 @@ use super::{
 };
 
 pub(crate) mod session_deletion;
+pub(super) mod session_history;
+pub(super) mod session_source;
+
+use session_history::{append_history_write, load_session_history_page};
+use session_source::SessionSourceWitness;
 
 // Lock by identity first, then evaluate time after any lock wait. A WHERE
 // predicate evaluated before waiting cannot authorize a later commit.
@@ -76,6 +85,39 @@ fn load_latest_wait_model_request_id<C: GenericClient>(
         .map(|row| row.map(|row| row.get(0)))
 }
 
+pub(super) fn load_wait_handoff_attachment(
+    client: &mut impl GenericClient,
+    checkpoint_id: &str,
+) -> Result<Option<crate::wait_recovery::WaitHandoff>, String> {
+    let Some(row) = client.query_opt(
+        "SELECT checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json,wait_handoff_json FROM runtime.checkpoints WHERE checkpoint_id=$1 AND kind='recovery'",
+        &[&checkpoint_id],
+    ).map_err(|error| error.to_string())? else { return Ok(None); };
+    let Some(value) = row.get::<_, Option<String>>(8) else {
+        return Ok(None);
+    };
+    let handoff: crate::wait_recovery::WaitHandoff =
+        serde_json::from_str(&value).map_err(|error| error.to_string())?;
+    let checkpoint = row_to_checkpoint(&row)?;
+    let payload: centaeris_core::runtime::contracts::RuntimeRecoveryCheckpointV1 =
+        serde_json::from_str(&checkpoint.payload_json).map_err(|error| error.to_string())?;
+    handoff.validate(&payload)?;
+    let reference = client.query_opt(
+        "SELECT sequence,payload::text FROM app_core_sessionevent WHERE session_id=$1 AND agent_run_id=$2 AND payload->>'type'='checkpoint_ref' AND payload->'payload'->>'checkpointId'=$3",
+        &[&payload.session_id, &payload.agent_run_id, &checkpoint_id],
+    ).map_err(|error| error.to_string())?.ok_or("wait recovery checkpoint reference missing")?;
+    if u64::try_from(reference.get::<_, i32>(0)).ok() != Some(payload.session_sequence) {
+        return Err("wait recovery checkpoint reference position mismatch".into());
+    }
+    let wire =
+        serde_json::from_str(&reference.get::<_, String>(1)).map_err(|error| error.to_string())?;
+    let event = parse_wire_record(&wire)
+        .map_err(|error| error.to_string())?
+        .event;
+    crate::wait_recovery::WaitHandoff::validate_reference(&checkpoint, &event)?;
+    Ok(Some(handoff))
+}
+
 fn validate_wait_handoff_source(
     tx: &mut Transaction<'_>,
     run: &str,
@@ -98,11 +140,27 @@ fn validate_wait_handoff_source(
         return Err("wait handoff source position changed".into());
     }
     let snapshot: String = tx.query_opt("SELECT snapshot_json FROM runtime.session_runtime_snapshots WHERE session_id=$1 FOR UPDATE", &[&wait.session_id]).map_err(|e|e.to_string())?.ok_or("wait handoff Core snapshot missing")?.get(0);
+    let (sealed, legacy) = handoff.normalized_snapshot()?;
     if serde_json::from_str::<serde_json::Value>(&snapshot).map_err(|e| e.to_string())?
-        != serde_json::from_str::<serde_json::Value>(&handoff.snapshot_json)
+        != serde_json::from_str::<serde_json::Value>(sealed.snapshot_json())
             .map_err(|e| e.to_string())?
     {
         return Err("wait handoff Core snapshot changed".into());
+    }
+    if legacy {
+        let current = tx.query(
+            "SELECT message_id,current_record_id FROM runtime.session_message_history_heads WHERE session_id=$1 AND NOT retired ORDER BY position",
+            &[&wait.session_id],
+        ).map_err(|error| error.to_string())?.into_iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1))).collect::<Vec<_>>();
+        let expected = sealed
+            .entries()
+            .iter()
+            .map(|entry| (entry.message.message_id.clone(), entry.record_id.clone()))
+            .collect::<Vec<_>>();
+        if current != expected {
+            return Err("wait handoff historical source changed".into());
+        }
     }
     let anchor = load_latest_wait_model_request_id(tx, &wait.session_id, run, &wait.turn_id)?
         .ok_or("wait handoff model request missing")?;
@@ -132,30 +190,71 @@ fn validate_wait_handoff_source(
 }
 
 impl PostgresRuntimeStore {
+    pub(crate) fn load_session_source_checkpoint(
+        &self,
+        session_id: &str,
+        sequence: u64,
+    ) -> Result<
+        Option<(
+            centaeris_core::session::state::SessionStateSnapshot,
+            SessionSourceWitness,
+            SessionSourceObservations,
+        )>,
+        String,
+    > {
+        self.with_client(|client| session_source::load_checkpoint(client, session_id, sequence))
+    }
+
+    pub(crate) fn session_source_revision(&self, session_id: &str) -> Result<i64, String> {
+        self.with_client(|client| {
+            session_source::require_source_guard(client)?;
+            session_source::revision(client, session_id)
+        })
+    }
+
+    pub(crate) fn load_tool_call_origins(
+        &self,
+        session_id: &str,
+        call_ids: &[String],
+    ) -> Result<Vec<centaeris_core::session::SessionLogRecord>, String> {
+        if call_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_client(|client| {
+            let rows = client.query(
+                "SELECT e.payload::text FROM unnest($2::text[]) ids(call_id) CROSS JOIN LATERAL (SELECT max(sequence) AS sequence FROM public.app_core_sessionevent WHERE session_id=$1 AND payload->>'type'='tool_call' AND payload->'payload'->>'callId'=ids.call_id GROUP BY agent_run_id,payload->>'turnId' ORDER BY max(sequence) DESC LIMIT 2) origins JOIN public.app_core_sessionevent e ON e.session_id=$1 AND e.sequence=origins.sequence ORDER BY e.sequence",
+                &[&session_id,&call_ids],
+            ).map_err(|error| error.to_string())?;
+            rows.into_iter().map(|row| {
+                let mut wire = serde_json::from_str(&row.get::<_,String>(0)).map_err(|error| error.to_string())?;
+                super::decode_session_payload(&mut wire)?;
+                crate::recovery_read::validate_for_replay(wire, |_| Ok(()))
+            }).collect()
+        })
+    }
+
     pub(crate) fn load_wait_handoff(
         &self,
         checkpoint_id: &str,
     ) -> Result<Option<crate::wait_recovery::WaitHandoff>, String> {
         self.with_client(|client| {
-            let Some(row) = client.query_opt(
-                "SELECT checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json,wait_handoff_json FROM runtime.checkpoints WHERE checkpoint_id=$1 AND kind='recovery'", &[&checkpoint_id],
-            ).map_err(|e|e.to_string())? else { return Ok(None); };
-            let Some(value) = row.get::<_,Option<String>>(8) else { return Ok(None); };
-            let handoff:crate::wait_recovery::WaitHandoff=serde_json::from_str(&value).map_err(|e|e.to_string())?;
-            let checkpoint=row_to_checkpoint(&row)?;
-            let payload:centaeris_core::runtime::contracts::RuntimeRecoveryCheckpointV1=serde_json::from_str(&checkpoint.payload_json).map_err(|e|e.to_string())?;
-            handoff.validate(&payload)?;
-            let reference=client.query_opt(
-                "SELECT sequence,payload::text FROM app_core_sessionevent WHERE session_id=$1 AND agent_run_id=$2 AND payload->>'type'='checkpoint_ref' AND payload->'payload'->>'checkpointId'=$3",
-                &[&payload.session_id,&payload.agent_run_id,&checkpoint_id],
-            ).map_err(|e|e.to_string())?.ok_or("wait recovery checkpoint reference missing")?;
-            if u64::try_from(reference.get::<_,i32>(0)).ok()!=Some(payload.session_sequence) {
-                return Err("wait recovery checkpoint reference position mismatch".into());
+            let handoff = load_wait_handoff_attachment(client, checkpoint_id)?;
+            if let Some(handoff) = &handoff {
+                let (write, legacy) = handoff.normalized_snapshot()?;
+                let records = if legacy {
+                    write.entries().iter().map(|entry| entry.record_id.clone()).collect::<Vec<_>>()
+                } else {
+                    write.retained_entries().iter().map(|entry| entry.record_id.clone()).collect::<Vec<_>>()
+                };
+                let retained: i64 = client.query_one(
+                    "SELECT count(*) FROM runtime.session_message_history_entries WHERE session_id=$1 AND record_id=ANY($2::text[])",
+                    &[&write.session_id(), &records],
+                ).map_err(|error| error.to_string())?.get(0);
+                if usize::try_from(retained).ok() != Some(records.len()) {
+                    return Err("wait recovery immutable history source missing".into());
+                }
             }
-            let wire=serde_json::from_str(&reference.get::<_,String>(1)).map_err(|e|e.to_string())?;
-            let event=parse_wire_record(&wire).map_err(|e|e.to_string())?.event;
-            crate::wait_recovery::WaitHandoff::validate_reference(&checkpoint,&event)?;
-            Ok(Some(handoff))
+            Ok(handoff)
         })
     }
 
@@ -465,6 +564,8 @@ pub(super) fn delete_session_records(
     for table in [
         "transcript_projection_heads",
         "runtime_events",
+        "session_message_history_heads",
+        "session_message_history_entries",
         "session_runtime_snapshots",
         "session_model_input_images",
         "checkpoints",
@@ -474,6 +575,8 @@ pub(super) fn delete_session_records(
         "external_context_links",
         "model_observation_contents",
         "model_observation_manifests",
+        "session_source_checkpoints",
+        "session_source_mutations",
     ] {
         tx.execute(
             format!("DELETE FROM {table} WHERE session_id=$1").as_str(),
@@ -494,6 +597,38 @@ pub(super) fn delete_session_records(
 }
 
 impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {
+    fn save_prepared_agent_runtime_snapshot(
+        &self,
+        prepared: SessionSnapshotWriteV1,
+        updated_at_ms: i64,
+    ) -> Result<centaeris_core::session::state::SessionStateSnapshot, String> {
+        if self.subagent_persistence_scope.is_some() {
+            self.with_subagent_persistence_transaction(Some(prepared.session_id()), |tx| {
+                save_prepared_snapshot(tx, prepared.session_id(), &prepared, updated_at_ms)?;
+                self.notify_subagent_snapshot(tx)
+            })?;
+        } else {
+            self.with_client(|client| {
+                let mut tx = client.transaction().map_err(|error| error.to_string())?;
+                save_prepared_snapshot(&mut tx, prepared.session_id(), &prepared, updated_at_ms)?;
+                tx.commit().map_err(|error| error.to_string())
+            })?;
+        }
+        Ok(prepared.into_snapshot())
+    }
+
+    fn load_session_history_page(
+        &self,
+        session_id: &str,
+        before_position: Option<u64>,
+        limit: usize,
+        selection: SessionHistorySelectionV1,
+    ) -> Result<Vec<SessionHistoryRecordV1>, String> {
+        self.with_client(|client| {
+            load_session_history_page(client, session_id, before_position, limit, selection)
+        })
+    }
+
     fn save_model_input_image(
         &self,
         session_id: &str,
@@ -543,13 +678,16 @@ impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {
             });
         }
         self.with_client(|client| {
-            compare_and_save_snapshot(
-                client,
+            let mut tx = client.transaction().map_err(|error| error.to_string())?;
+            let written = compare_and_save_snapshot(
+                &mut tx,
                 session_id,
                 expected_snapshot,
                 snapshot_json,
                 updated_at_ms,
-            )
+            )?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(written)
         })
     }
 
@@ -577,7 +715,11 @@ impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {
                 self.notify_subagent_snapshot(tx)
             });
         }
-        self.with_client(|client| save_snapshot(client, session_id, snapshot, updated_at_ms))
+        self.with_client(|client| {
+            let mut tx = client.transaction().map_err(|error| error.to_string())?;
+            save_snapshot(&mut tx, session_id, snapshot, updated_at_ms)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
     }
 }
 
@@ -610,16 +752,23 @@ fn compare_and_save_snapshot(
     snapshot_json: &str,
     updated_at_ms: i64,
 ) -> Result<bool, String> {
+    let write = prepare_session_snapshot_write(snapshot_json)?;
+    if write.session_id() != session_id {
+        return Err("Session snapshot identity mismatch".into());
+    }
     let written = match expected_snapshot {
         Some(expected) => client.execute(
             "UPDATE session_runtime_snapshots SET snapshot_json=$3,updated_at_ms=$4 WHERE session_id=$1 AND snapshot_json=$2",
-            &[&session_id, &expected, &snapshot_json, &updated_at_ms],
+            &[&session_id, &expected, &write.snapshot_json(), &updated_at_ms],
         ),
         None => client.execute(
             "INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES($1,$2,$3) ON CONFLICT(session_id) DO NOTHING",
-            &[&session_id, &snapshot_json, &updated_at_ms],
+            &[&session_id, &write.snapshot_json(), &updated_at_ms],
         ),
     }.map_err(|error| format!("compare and save Postgres session snapshot failed: {error}"))?;
+    if written == 1 {
+        append_history_write(client, session_id, &write)?;
+    }
     Ok(written == 1)
 }
 
@@ -629,7 +778,21 @@ fn save_snapshot(
     snapshot: &str,
     updated_at_ms: i64,
 ) -> Result<(), String> {
-    client.execute("INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES($1,$2,$3) ON CONFLICT(session_id) DO UPDATE SET snapshot_json=excluded.snapshot_json,updated_at_ms=excluded.updated_at_ms", &[&session_id,&snapshot,&updated_at_ms]).map(|_| ()).map_err(|error| format!("save Postgres session snapshot failed: {error}"))
+    let write = prepare_session_snapshot_write(snapshot)?;
+    save_prepared_snapshot(client, session_id, &write, updated_at_ms)
+}
+
+pub(super) fn save_prepared_snapshot(
+    client: &mut impl GenericClient,
+    session_id: &str,
+    write: &SessionSnapshotWriteV1,
+    updated_at_ms: i64,
+) -> Result<(), String> {
+    if write.session_id() != session_id {
+        return Err("Session snapshot identity mismatch".into());
+    }
+    client.execute("INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES($1,$2,$3) ON CONFLICT(session_id) DO UPDATE SET snapshot_json=excluded.snapshot_json,updated_at_ms=excluded.updated_at_ms", &[&session_id,&write.snapshot_json(),&updated_at_ms]).map_err(|error| format!("save Postgres session snapshot failed: {error}"))?;
+    append_history_write(client, session_id, write)
 }
 
 pub(super) fn save_checkpoint<C: postgres::GenericClient>(
@@ -798,6 +961,8 @@ pub struct PostgresSessionLog {
     accepted_start: Option<crate::contract::AgentRunStart>,
     projection_store: Option<PostgresRuntimeStore>,
     agent_run_state: Arc<Mutex<HashMap<String, AgentRunAppendState>>>,
+    source_witness: Arc<Mutex<Option<SessionSourceWitness>>>,
+    source_observations: Arc<Mutex<Option<SessionSourceObservations>>>,
     /// Clones share incremental state and serialize append validation for this
     /// AgentRun, while each transaction holds a pooled connection only until commit.
     append_lock: Arc<Mutex<()>>,
@@ -805,6 +970,11 @@ pub struct PostgresSessionLog {
     cold_append_observation: Arc<Mutex<ColdAppendObservation>>,
     #[cfg(test)]
     cold_append_barrier: Arc<Mutex<Option<ColdAppendBarrier>>>,
+}
+
+struct SessionAppendCheckpoint<'a> {
+    record: &'a CheckpointRecord,
+    wait_handoff: Option<&'a crate::wait_recovery::WaitHandoff>,
 }
 
 impl std::fmt::Debug for PostgresSessionLog {
@@ -848,6 +1018,7 @@ pub(crate) struct ColdAppendObservation {
     pub max_encoded_page_bytes: usize,
     pub max_expanded_model_records: usize,
     pub max_expanded_model_bytes: usize,
+    pub latest_model_ancestor_loads: usize,
 }
 
 #[cfg(test)]
@@ -876,10 +1047,18 @@ struct ModelObservationContent {
     first_seen_at_ms: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ModelObservationReference {
     kind: String,
     content_digest: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SessionSourceObservations {
+    root_digest: Option<String>,
+    references: Vec<ModelObservationReference>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -915,6 +1094,7 @@ struct PreparedSessionAppend {
     rows: Vec<PreparedSessionRow>,
     contents: Vec<ModelObservationContent>,
     manifests: Vec<ModelObservationManifest>,
+    source_observations: Option<SessionSourceObservations>,
 }
 
 /// One admission-time event. Session-level closures keep the originating run id
@@ -1377,6 +1557,12 @@ pub(crate) struct SessionWireHydrator {
 }
 
 impl SessionWireHydrator {
+    pub(crate) fn into_source_observations(self) -> SessionSourceObservations {
+        SessionSourceObservations {
+            root_digest: self.root.map(|(_, digest)| digest),
+            references: self.references,
+        }
+    }
     pub(crate) fn hydrate_record<C: GenericClient>(
         &mut self,
         client: &mut C,
@@ -1637,6 +1823,55 @@ fn hydrate_model_request_wire(
 }
 
 impl PostgresSessionLog {
+    pub(crate) fn bind_verified_session_source(
+        &self,
+        witness: SessionSourceWitness,
+        observations: SessionSourceObservations,
+    ) -> Result<(), String> {
+        *self
+            .source_witness
+            .lock()
+            .map_err(|_| "Session source witness lock poisoned")? = Some(witness);
+        *self
+            .source_observations
+            .lock()
+            .map_err(|_| "Session source observation lock poisoned")? = Some(observations);
+        Ok(())
+    }
+
+    fn source_after_append(
+        &self,
+        client: &mut impl GenericClient,
+        previous_head: i32,
+        records: &[CommittedSessionRecord],
+    ) -> Result<Option<SessionSourceWitness>, String> {
+        let known = *self
+            .source_witness
+            .lock()
+            .map_err(|_| "Session source witness lock poisoned")?;
+        let Some(mut witness) = known else {
+            return Ok(None);
+        };
+        if witness.mutation_revision != session_source::revision(client, &self.session_id)? {
+            return Ok(None);
+        }
+        if u64::try_from(previous_head).ok() != Some(witness.sequence) {
+            return Ok(None);
+        }
+        for record in records {
+            if record.sequence
+                != witness
+                    .sequence
+                    .checked_add(1)
+                    .ok_or("Session source sequence overflow")?
+            {
+                return Ok(None);
+            }
+            witness.sequence = record.sequence;
+        }
+        Ok(Some(witness))
+    }
+
     pub(crate) fn append_wait_handoff(
         &self,
         agent_run_id: &str,
@@ -1651,8 +1886,11 @@ impl PostgresSessionLog {
                 events,
                 Some(fence),
                 None,
-                Some(checkpoint),
-                Some(handoff),
+                Some(SessionAppendCheckpoint {
+                    record: checkpoint,
+                    wait_handoff: Some(handoff),
+                }),
+                None,
             )
         })
     }
@@ -1789,6 +2027,8 @@ impl PostgresSessionLog {
             accepted_start: None,
             projection_store: None,
             agent_run_state: Arc::new(Mutex::new(HashMap::new())),
+            source_witness: Arc::new(Mutex::new(None)),
+            source_observations: Arc::new(Mutex::new(None)),
             append_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             cold_append_observation: Arc::new(Mutex::new(ColdAppendObservation::default())),
@@ -1898,8 +2138,39 @@ impl PostgresSessionLog {
                 events,
                 Some(fence),
                 None,
-                Some(checkpoint),
+                Some(SessionAppendCheckpoint {
+                    record: checkpoint,
+                    wait_handoff: None,
+                }),
                 None,
+            )
+        })
+    }
+
+    pub(crate) fn append_terminal_with_source_snapshot(
+        &self,
+        agent_run_id: &str,
+        events: &[SequencedSessionRecord],
+        fence: &RuntimeJobLeaseFence,
+        snapshot: centaeris_core::session::state::SessionStateSnapshot,
+    ) -> Result<SessionCommitReceipt, String> {
+        if snapshot.session_id != self.session_id
+            || !events
+                .iter()
+                .any(|record| record.event.event_type == SessionRecordType::AgentRunCompleted)
+        {
+            return Err("terminal source checkpoint binding mismatch".into());
+        }
+        let prepared =
+            centaeris_core::session::history::prepare_session_snapshot_state_write(snapshot)?;
+        run_postgres_blocking(|| {
+            self.append_transaction(
+                agent_run_id,
+                events,
+                Some(fence),
+                None,
+                None,
+                Some(&prepared),
             )
         })
     }
@@ -1922,8 +2193,8 @@ impl PostgresSessionLog {
         events: &[SequencedSessionRecord],
         fence: Option<&RuntimeJobLeaseFence>,
         rewrite: Option<&RewriteLastUserTailRequest>,
-        checkpoint: Option<&CheckpointRecord>,
-        handoff: Option<&crate::wait_recovery::WaitHandoff>,
+        checkpoint: Option<SessionAppendCheckpoint<'_>>,
+        source_snapshot: Option<&SessionSnapshotWriteV1>,
     ) -> Result<SessionCommitReceipt, String> {
         let result = self.connections.with_client(|client| {
             self.append_transaction_on_client(
@@ -1932,11 +2203,18 @@ impl PostgresSessionLog {
                 events,
                 fence,
                 rewrite,
-                checkpoint,
-                handoff,
+                checkpoint.as_ref().map(|checkpoint| checkpoint.record),
+                checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.wait_handoff),
+                source_snapshot,
             )
         });
         if result.is_err() {
+            *self
+                .source_witness
+                .lock()
+                .map_err(|_| "Session source witness lock poisoned")? = None;
             self.agent_run_state
                 .lock()
                 .map_err(|_| "session record AgentRun state lock poisoned".to_string())?
@@ -1964,6 +2242,7 @@ impl PostgresSessionLog {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1978,6 +2257,7 @@ impl PostgresSessionLog {
         rewrite: Option<&RewriteLastUserTailRequest>,
         checkpoint: Option<&CheckpointRecord>,
         handoff: Option<&crate::wait_recovery::WaitHandoff>,
+        source_snapshot: Option<&SessionSnapshotWriteV1>,
     ) -> Result<SessionCommitReceipt, String> {
         validate_sequenced_session_records(events)?;
         let _append_guard = self
@@ -2083,6 +2363,7 @@ impl PostgresSessionLog {
                 return Ok(receipt);
             }
             let mut records_to_append = events.to_vec();
+            let mut retired_source_messages = Vec::new();
             let tombstoned_event_ids = if let Some(rewrite) = rewrite {
                 if events.first().is_none_or(|item| item.sequence != 2) {
                     return Err(
@@ -2120,6 +2401,11 @@ impl PostgresSessionLog {
                 let mut whole_session = existing;
                 whole_session.extend(records_to_append.iter().map(|item| item.event.clone()));
                 reduce_events(self.session_id.as_str(), whole_session.iter())?;
+                retired_source_messages =
+                    centaeris_core::session::recovery::retired_plaintext_source_message_ids(
+                        &self.session_id,
+                        &whole_session,
+                    )?;
                 targets
             } else {
                 Vec::new()
@@ -2146,7 +2432,34 @@ impl PostgresSessionLog {
                 .iter()
                 .any(|item| item.event.event_type == SessionRecordType::ModelRequestStarted)
             {
-                load_latest_model_observation_state(&mut tx, self.session_id.as_str())?
+                let witness = *self
+                    .source_witness
+                    .lock()
+                    .map_err(|_| "Session source witness lock poisoned")?;
+                let cached = if witness.is_some_and(|witness| {
+                    u64::try_from(next_session_sequence).ok() == Some(witness.sequence)
+                }) && witness.map(|witness| witness.mutation_revision)
+                    == Some(session_source::revision(&mut tx, &self.session_id)?)
+                {
+                    self.source_observations
+                        .lock()
+                        .map_err(|_| "Session source observation lock poisoned")?
+                        .clone()
+                } else {
+                    None
+                };
+                if let Some(state) = cached {
+                    (state.root_digest, state.references)
+                } else {
+                    #[cfg(test)]
+                    {
+                        self.cold_append_observation
+                            .lock()
+                            .unwrap()
+                            .latest_model_ancestor_loads += 1;
+                    }
+                    load_latest_model_observation_state(&mut tx, self.session_id.as_str())?
+                }
             } else {
                 (None, Vec::new())
             };
@@ -2162,8 +2475,17 @@ impl PostgresSessionLog {
                 validate_wait_handoff_source(&mut tx, agent_run_id, handoff)?;
             }
             self.insert_session_append(&mut tx, &prepared)?;
+            if !retired_source_messages.is_empty() {
+                tx.execute("UPDATE runtime.session_message_history_heads SET retired=TRUE WHERE session_id=$1 AND message_id=ANY($2::text[])",&[&self.session_id,&retired_source_messages])
+                    .map_err(|error| error.to_string())?;
+            }
             consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
-            let records = prepared.rows.into_iter().map(|row| row.record).collect();
+            let new_source_observations = prepared.source_observations;
+            let records = prepared
+                .rows
+                .into_iter()
+                .map(|row| row.record)
+                .collect::<Vec<_>>();
             if !tombstoned_event_ids.is_empty() {
                 tx.execute(
                     "UPDATE app_core_sessionevent SET projects_to_agent_run_stream=FALSE WHERE session_id=$1 AND \"eventId\"=ANY($2)",
@@ -2181,12 +2503,47 @@ impl PostgresSessionLog {
             }) {
                 super::lifecycle_control::mark_terminal_pending(&mut tx, agent_run_id)?;
             }
+            let next_source = if rewrite.is_some() {
+                None
+            } else {
+                self.source_after_append(&mut tx, next_session_sequence, &records)?
+            };
+            if let (Some(snapshot), Some(witness)) = (source_snapshot, next_source) {
+                append_history_write(&mut tx, &self.session_id, snapshot)?;
+                let observations = match &new_source_observations {
+                    Some(state) => Some(state.clone()),
+                    None => self
+                        .source_observations
+                        .lock()
+                        .map_err(|_| "Session source observation lock poisoned")?
+                        .clone(),
+                }
+                .ok_or("verified source observations missing")?;
+                session_source::save_checkpoint(&mut tx, snapshot, witness, &observations)?;
+            }
             tx.commit().map_err(|error| {
                 crate::session_delivery::postgres_error("commit session log append failed", error)
             })?;
+            *self
+                .source_witness
+                .lock()
+                .map_err(|_| "Session source witness lock poisoned")? = next_source;
+            let mut observations = self
+                .source_observations
+                .lock()
+                .map_err(|_| "Session source observation lock poisoned")?;
+            if next_source.is_none() {
+                *observations = None;
+            } else if let Some(next) = new_source_observations {
+                *observations = Some(next);
+            }
             Ok(SessionCommitReceipt { records })
         })();
         if result.is_err() {
+            *self
+                .source_witness
+                .lock()
+                .map_err(|_| "Session source witness lock poisoned")? = None;
             self.agent_run_state
                 .lock()
                 .map_err(|_| "session record AgentRun state lock poisoned".to_string())?
@@ -2604,6 +2961,13 @@ impl PostgresSessionLog {
             rows,
             contents: contents.into_values().collect(),
             manifests: manifests.into_values().collect(),
+            source_observations: events
+                .iter()
+                .any(|event| event.event.event_type == SessionRecordType::ModelRequestStarted)
+                .then_some(SessionSourceObservations {
+                    root_digest: parent_digest,
+                    references: parent_references,
+                }),
         })
     }
 
@@ -2858,6 +3222,7 @@ impl PostgresSessionLog {
             rows,
             contents: Vec::new(),
             manifests: Vec::new(),
+            source_observations: None,
         })
     }
 
@@ -3034,6 +3399,13 @@ impl PostgresSessionLog {
             {
                 return Err("new user turn admission plan is stale: session head changed".to_string());
             }
+            if let Some(witness) = *self.source_witness.lock().map_err(|_| "Session source witness lock poisoned")? {
+                if witness.sequence != plan.expected_session_sequence
+                    || witness.mutation_revision != session_source::revision(&mut tx,&self.session_id)?
+                {
+                    return Err("new user turn admission plan is stale: source changed".into());
+                }
+            }
             for precondition in &plan.evidence_preconditions {
                 if precondition.receipt_present {
                     let receipt_event_id = precondition
@@ -3119,11 +3491,12 @@ impl PostgresSessionLog {
                 new_agent_run_id,
                 new_run_events,
             )?;
+            let records = prepared.rows.into_iter().map(|row| row.record).collect::<Vec<_>>();
+            let next_source = self.source_after_append(&mut tx,head,&records)?;
             tx.commit()
                 .map_err(|error| crate::session_delivery::postgres_error("commit session admission failed", error))?;
-            Ok(SessionCommitReceipt {
-                records: prepared.rows.into_iter().map(|row| row.record).collect(),
-            })
+            *self.source_witness.lock().map_err(|_| "Session source witness lock poisoned")? = next_source;
+            Ok(SessionCommitReceipt { records })
         })
     }
 }

@@ -18,7 +18,7 @@ $standaloneRoot = Join-Path $tuiHome "packages/standalone"
 $releasesDir = Join-Path $standaloneRoot "releases"
 $currentLink = Join-Path $standaloneRoot "current"
 $binDir = Join-Path $standaloneRoot "bin"
-$binPath = Join-Path $binDir "centa.exe"
+$binPath = Join-Path $binDir "cet.exe"
 
 function Write-Step {
     param([string]$Message)
@@ -139,7 +139,7 @@ if (Test-Path -LiteralPath $currentLink) {
 New-Item -ItemType Junction -Path $currentLink -Target $installDir | Out-Null
 
 New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $currentLink "centa.exe") -Destination $binPath -Force
+Copy-Item -LiteralPath (Join-Path $currentLink "cet.exe") -Destination $binPath -Force
 Write-Step "Installed: $binPath"
 Write-Step "Current version: $version"
 Write-Step "Run: & '$binPath'"

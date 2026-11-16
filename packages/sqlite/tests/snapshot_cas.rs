@@ -45,11 +45,20 @@ impl Drop for SnapshotDatabase {
 }
 
 fn snapshot(key: &str) -> String {
-    let mut state = SessionStateSnapshot::new("parent".to_string(), 1);
+    snapshot_for("parent", key)
+}
+
+fn snapshot_for(session_id: &str, key: &str) -> String {
+    let mut state = SessionStateSnapshot::new(session_id.to_string(), 1);
     state
         .metadata
         .insert(key.to_string(), "retained".to_string());
-    serde_json::to_string(&state).expect("snapshot JSON")
+    centaeris_core::session::history::prepare_session_snapshot_write(
+        &serde_json::to_string(&state).expect("snapshot JSON"),
+    )
+    .expect("canonical snapshot")
+    .snapshot_json()
+    .to_owned()
 }
 
 #[test]
@@ -196,7 +205,7 @@ fn snapshot_cas_conflicts_do_not_modify_content_or_update_time() {
         .compare_and_save_agent_runtime_snapshot(
             "missing",
             Some("stale snapshot"),
-            &snapshot("replacement"),
+            &snapshot_for("missing", "replacement"),
             99,
         )
         .unwrap());
@@ -215,7 +224,7 @@ fn snapshot_cas_compares_exact_bytes_and_changes_only_the_named_session() {
         .save_agent_runtime_snapshot("parent", &original, 1)
         .unwrap();
     store
-        .save_agent_runtime_snapshot("other", "other-session-snapshot", 1)
+        .save_agent_runtime_snapshot("other", &snapshot_for("other", "other-session-snapshot"), 1)
         .unwrap();
     let equivalent_json = format!("{original}\n");
     assert!(!store
@@ -240,7 +249,7 @@ fn snapshot_cas_compares_exact_bytes_and_changes_only_the_named_session() {
     );
     assert_eq!(
         store.load_agent_runtime_snapshot("other").unwrap(),
-        Some("other-session-snapshot".to_string())
+        Some(snapshot_for("other", "other-session-snapshot"))
     );
 }
 
@@ -254,7 +263,7 @@ fn snapshot_databases_with_the_same_clock_value_remain_isolated_after_cleanup() 
     let second = SnapshotDatabase::with_nonce(nonce);
     first
         .store()
-        .save_agent_runtime_snapshot("parent", "first", 1)
+        .save_agent_runtime_snapshot("parent", &snapshot("first"), 1)
         .unwrap();
     let second_store = second.store();
     assert!(second_store
@@ -262,7 +271,7 @@ fn snapshot_databases_with_the_same_clock_value_remain_isolated_after_cleanup() 
         .unwrap()
         .is_none());
     second_store
-        .save_agent_runtime_snapshot("parent", "second", 2)
+        .save_agent_runtime_snapshot("parent", &snapshot("second"), 2)
         .unwrap();
     drop(first);
     assert_eq!(
@@ -270,6 +279,6 @@ fn snapshot_databases_with_the_same_clock_value_remain_isolated_after_cleanup() 
             .store()
             .load_agent_runtime_snapshot("parent")
             .unwrap(),
-        Some("second".to_string())
+        Some(snapshot("second"))
     );
 }

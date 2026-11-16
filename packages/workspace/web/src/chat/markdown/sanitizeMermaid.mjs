@@ -3,7 +3,7 @@ import { generate, parse, walk } from "css-tree";
 
 const localReference = /^#[\w:.-]+$/;
 const resourceAttributes = new Set(["fill", "stroke", "filter", "clip-path", "mask", "marker-start", "marker-mid", "marker-end"]);
-const properties = new Set(("color fill stroke fill-opacity stroke-opacity opacity stroke-width stroke-dasharray stroke-dashoffset stroke-linecap stroke-linejoin stroke-miterlimit font-family font-size font-weight font-style text-decoration text-anchor dominant-baseline alignment-baseline paint-order white-space line-height letter-spacing word-spacing display visibility overflow shape-rendering transform transform-origin filter clip-path mask marker-start marker-mid marker-end background-color border-color").split(" "));
+const properties = new Set(("color fill stroke fill-opacity stroke-opacity opacity stroke-width stroke-dasharray stroke-dashoffset stroke-linecap stroke-linejoin stroke-miterlimit font-family font-size font-weight font-style text-decoration text-anchor dominant-baseline alignment-baseline paint-order white-space line-height letter-spacing word-spacing display visibility overflow shape-rendering transform transform-origin filter clip-path mask marker-start marker-mid marker-end background-color border-color max-width").split(" "));
 const functions = new Set(("rgb rgba hsl hsla hwb lab lch oklab oklch color color-mix calc min max clamp translate translatex translatey scale rotate matrix").split(" "));
 
 function safeValue(value) {

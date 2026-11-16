@@ -123,7 +123,125 @@ pub struct SessionRecoveryResult {
     /// Real active source facts for admission closure identity, never synthetic
     /// request records with missing observations.
     pub source_records: Vec<SessionLogRecord>,
+    /// Exact plaintext message identities retired by canonical tombstones,
+    /// excluding every identity still present in the active source history.
+    pub retired_message_ids: Vec<String>,
     pub(crate) tool_call_origins: Vec<ToolCallRecoveryOrigin>,
+}
+
+pub fn recover_session_records(
+    session_id: &str,
+    records: &[SessionLogRecord],
+) -> Result<SessionRecoveryResult, String> {
+    let references = records.iter().collect::<Vec<_>>();
+    let inactive = active_tombstone_targets(session_id, &references)?;
+    let mut recovery = SessionRecoveryAccumulator::new(session_id);
+    for record in records {
+        if inactive.contains(&record.event_id) {
+            recovery.push_inactive_record(record.clone())?;
+        } else if record.event_type != SessionRecordType::Tombstone {
+            recovery.push(record.clone())?;
+        }
+    }
+    recovery.finish()
+}
+
+/// Original plaintext identities can be retired exactly; tool message identities
+/// are supplied by runtime/model observations and are not invented from call IDs.
+pub fn plaintext_source_message_id(record: &SessionLogRecord) -> Result<Option<String>, String> {
+    if matches!(
+        record.event_type,
+        SessionRecordType::UserMessage
+            | SessionRecordType::TurnSupplement
+            | SessionRecordType::AssistantMessage
+            | SessionRecordType::HostEventInput
+    ) {
+        return required_payload_string(payload_object(record)?, "messageId", record).map(Some);
+    }
+    Ok(None)
+}
+
+pub fn retired_plaintext_source_message_ids(
+    session_id: &str,
+    records: &[SessionLogRecord],
+) -> Result<Vec<String>, String> {
+    let references = records.iter().collect::<Vec<_>>();
+    let inactive = active_tombstone_targets(session_id, &references)?;
+    let mut retired = HashSet::new();
+    let mut active = HashSet::new();
+    for record in records {
+        if let Some(id) = plaintext_source_message_id(record)? {
+            if inactive.contains(&record.event_id) {
+                retired.insert(id);
+            } else {
+                active.insert(id);
+            }
+        }
+    }
+    let mut retired = retired.difference(&active).cloned().collect::<Vec<_>>();
+    retired.sort();
+    Ok(retired)
+}
+
+/// Advance a verified bounded Session view with the actual committed records of
+/// a new-user admission. Source ordering, the lease and receipt preconditions
+/// remain the host's commit responsibility; no historical records are invented.
+pub fn apply_new_user_turn_admission(
+    mut snapshot: SessionStateSnapshot,
+    records: &[SessionLogRecord],
+) -> Result<SessionStateSnapshot, String> {
+    let mut result_ids = snapshot
+        .model_semantics
+        .values()
+        .filter_map(|semantics| match semantics {
+            ModelMessageSemanticsV1::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let first_new_message = snapshot.messages.len();
+    for record in records {
+        validate_event_shape(record)?;
+        if record.session_id != snapshot.session_id {
+            return Err("admission delta crosses Session boundary".into());
+        }
+        match record.event_type {
+            SessionRecordType::ToolCallClosure => {
+                append_restored_tool_result(&mut snapshot, record, &mut result_ids)?;
+            }
+            SessionRecordType::UserMessage => {
+                append_plain_session_message(
+                    &mut snapshot,
+                    record,
+                    "messageId",
+                    "text",
+                    MessageRole::User,
+                )?;
+                let id = required_payload_string(payload_object(record)?, "messageId", record)?;
+                let message = snapshot
+                    .messages
+                    .iter_mut()
+                    .find(|message| message.message_id == id)
+                    .ok_or("admitted UserMessage is missing")?;
+                message.metadata.insert(
+                    crate::runtime::keys::metadata::MESSAGE_SEMANTIC_KIND.into(),
+                    crate::runtime::MESSAGE_SEMANTIC_USER_REQUEST.into(),
+                );
+            }
+            SessionRecordType::AgentRunStarted | SessionRecordType::AgentRunExecutionStarted => {}
+            _ => {
+                return Err(format!(
+                    "unsupported admission delta record: {}",
+                    record.event_type.as_str()
+                ))
+            }
+        }
+        snapshot.updated_at_ms = record.created_at_ms;
+    }
+    snapshot
+        .context_window
+        .extend_from_slice(&snapshot.messages[first_new_message..]);
+    snapshot.completed_turn = None;
+    Ok(snapshot)
 }
 
 #[derive(Default)]
@@ -256,6 +374,8 @@ pub struct SessionRecoveryAccumulator {
     seen: HashSet<String>,
     open_calls: HashMap<String, (String, String, String)>,
     updated_at_ms: i64,
+    inactive_message_ids: HashSet<String>,
+    active_message_ids: HashSet<String>,
 }
 impl SessionRecoveryAccumulator {
     pub fn new(session_id: &str) -> Self {
@@ -271,6 +391,8 @@ impl SessionRecoveryAccumulator {
             seen: HashSet::new(),
             open_calls: HashMap::new(),
             updated_at_ms: 0,
+            inactive_message_ids: HashSet::new(),
+            active_message_ids: HashSet::new(),
         }
     }
     pub fn push(&mut self, record: SessionLogRecord) -> Result<(), String> {
@@ -284,6 +406,9 @@ impl SessionRecoveryAccumulator {
             &mut self.open_calls,
             &record,
         )?;
+        if let Some(id) = plaintext_source_message_id(&record)? {
+            self.active_message_ids.insert(id);
+        }
         if let Some(origin) = ToolCallRecoveryOrigin::from_record(&record)? {
             self.tool_call_origins.push(origin);
         }
@@ -308,6 +433,9 @@ impl SessionRecoveryAccumulator {
         validate_event_shape(&record)?;
         if record.session_id != self.session_id {
             return Err("cross-session inactive recovery record".into());
+        }
+        if let Some(id) = plaintext_source_message_id(&record)? {
+            self.inactive_message_ids.insert(id);
         }
         if let Some(origin) = ToolCallRecoveryOrigin::from_record(&record)? {
             self.tool_call_origins.push(origin);
@@ -349,9 +477,16 @@ impl SessionRecoveryAccumulator {
         )?;
         self.records
             .retain(|record| record.event_type != SessionRecordType::ModelRequestStarted);
+        let mut retired_message_ids = self
+            .inactive_message_ids
+            .difference(&self.active_message_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        retired_message_ids.sort();
         Ok(SessionRecoveryResult {
             snapshot,
             source_records: self.records,
+            retired_message_ids,
             tool_call_origins: self.tool_call_origins,
         })
     }

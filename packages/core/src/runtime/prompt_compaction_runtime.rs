@@ -42,20 +42,36 @@ impl<
             return Ok(self.prompt_compaction_circuit_result(session, turn_id));
         }
 
+        let mut plan = match crate::model::prompt::compaction::plan_prompt_compaction(
+            session,
+            turn_id,
+            &self.prompt_compaction_config,
+            runtime_scope,
+            prompt_input_token_estimate,
+            false,
+        ) {
+            crate::model::prompt::compaction::PromptCompactionPlanResult::Ready(plan) => *plan,
+            crate::model::prompt::compaction::PromptCompactionPlanResult::Skipped(outcome) => {
+                return self.apply_prompt_compaction_outcome(session, turn_id, None, *outcome);
+            }
+            crate::model::prompt::compaction::PromptCompactionPlanResult::Failed(error) => {
+                return Ok(self.prompt_compaction_failure_result(session, turn_id, error));
+            }
+        };
+        self.hydrate_compaction_user_replay_sources(session, &mut plan)
+            .map_err(|error| error.to_string())?;
         let mut compacted_session = session.clone();
         let outcome = match self.run_prompt_compaction_summary_producer(
             &mut compacted_session,
-            turn_id,
-            runtime_scope,
+            plan,
             session,
             model_candidate_producer,
-            prompt_input_token_estimate,
         ) {
             Ok(outcome) => outcome,
             Err(error) if error.phase == "session_log" => return Err(error.to_string()),
             Err(error) => return Ok(self.prompt_compaction_failure_result(session, turn_id, error)),
         };
-        self.apply_prompt_compaction_outcome(session, turn_id, compacted_session, outcome)
+        self.apply_prompt_compaction_outcome(session, turn_id, Some(compacted_session), outcome)
     }
 
     pub(super) async fn apply_prompt_compaction_for_generate_request_async(
@@ -77,16 +93,31 @@ impl<
             return Ok(self.prompt_compaction_circuit_result(session, turn_id));
         }
 
+        let mut plan = match crate::model::prompt::compaction::plan_prompt_compaction(
+            session,
+            turn_id,
+            &self.prompt_compaction_config,
+            runtime_scope,
+            prompt_input_token_estimate,
+            force,
+        ) {
+            crate::model::prompt::compaction::PromptCompactionPlanResult::Ready(plan) => *plan,
+            crate::model::prompt::compaction::PromptCompactionPlanResult::Skipped(outcome) => {
+                return self.apply_prompt_compaction_outcome(session, turn_id, None, *outcome);
+            }
+            crate::model::prompt::compaction::PromptCompactionPlanResult::Failed(error) => {
+                return Ok(self.prompt_compaction_failure_result(session, turn_id, error));
+            }
+        };
+        self.hydrate_compaction_user_replay_sources(session, &mut plan)
+            .map_err(|error| error.to_string())?;
         let mut compacted_session = session.clone();
         let outcome = match self
             .run_prompt_compaction_summary_producer_async(
                 &mut compacted_session,
-                turn_id,
-                runtime_scope,
+                plan,
                 session,
                 model_candidate_producer,
-                prompt_input_token_estimate,
-                force,
             )
             .await
         {
@@ -94,14 +125,103 @@ impl<
             Err(error) if error.phase == "session_log" => return Err(error.to_string()),
             Err(error) => return Ok(self.prompt_compaction_failure_result(session, turn_id, error)),
         };
-        self.apply_prompt_compaction_outcome(session, turn_id, compacted_session, outcome)
+        self.apply_prompt_compaction_outcome(session, turn_id, Some(compacted_session), outcome)
+    }
+
+    fn hydrate_compaction_user_replay_sources(
+        &self,
+        session: &SessionStateSnapshot,
+        plan: &mut crate::model::prompt::compaction::PromptCompactionPlan,
+    ) -> Result<(), PromptCompactionError> {
+        use crate::session::history::SessionHistorySelectionV1;
+        use std::collections::{BTreeMap, HashSet};
+
+        let retained_ids = session
+            .history
+            .retained_entries
+            .iter()
+            .map(|entry| entry.message_id.as_str())
+            .collect::<HashSet<_>>();
+        let mut seen = HashSet::new();
+        let mut sources = Vec::new();
+        let mut semantics = BTreeMap::new();
+        let mut tokens = 0u32;
+        let target = plan.user_replay_target();
+        let mut full = false;
+        // Newly accepted, not-yet-archived inputs precede the stored history.
+        for message in session.messages.iter().rev().filter(|message| {
+            !retained_ids.contains(message.message_id.as_str())
+                && message.role == MessageRole::User
+                && message.metadata.get("kind").map(String::as_str)
+                    != Some("prompt_compaction_user_replay")
+                && message
+                    .metadata
+                    .get("message_semantic_kind")
+                    .map(String::as_str)
+                    == Some("user_request")
+                && !plan.protects_replay_source(&message.message_id)
+        }) {
+            let meaning = session
+                .model_semantics_for(&message.message_id)
+                .map_err(PromptCompactionError::validation)?;
+            let cost =
+                crate::model::prepared_prompt::estimate_projected_message_tokens(message, meaning)
+                    .map_err(PromptCompactionError::validation)?;
+            if tokens.saturating_add(cost) > target {
+                full = true;
+                break;
+            }
+            tokens = tokens.saturating_add(cost);
+            seen.insert(message.message_id.clone());
+            semantics.insert(message.message_id.clone(), meaning.clone());
+            sources.push(message.clone());
+        }
+        let mut before = None;
+        while !full && tokens < target {
+            let page = self
+                .runtime_store
+                .load_session_history_page(
+                    &session.session_id,
+                    before,
+                    64,
+                    SessionHistorySelectionV1::OriginalUserRequests,
+                )
+                .map_err(PromptCompactionError::durability)?;
+            let exhausted = page.len() < 64;
+            before = page.last().map(|record| record.position);
+            for record in page {
+                let entry = record.entry;
+                if !seen.insert(entry.message.message_id.clone())
+                    || plan.protects_replay_source(&entry.message.message_id)
+                {
+                    continue;
+                }
+                let cost = crate::model::prepared_prompt::estimate_projected_message_tokens(
+                    &entry.message,
+                    &entry.model_semantics,
+                )
+                .map_err(PromptCompactionError::validation)?;
+                if tokens.saturating_add(cost) > target {
+                    full = true;
+                    break;
+                }
+                tokens = tokens.saturating_add(cost);
+                semantics.insert(entry.message.message_id.clone(), entry.model_semantics);
+                sources.push(entry.message);
+            }
+            if exhausted {
+                break;
+            }
+        }
+        sources.reverse();
+        plan.replace_user_replay_sources(&sources, &semantics)
     }
 
     pub(super) fn apply_prompt_compaction_outcome(
         &self,
         session: &mut SessionStateSnapshot,
         turn_id: &str,
-        mut compacted_session: SessionStateSnapshot,
+        compacted_session: Option<SessionStateSnapshot>,
         outcome: PromptCompactionOutcome,
     ) -> Result<PromptCompactionApplyResult, String> {
         let stats_json = serde_json::to_string(&outcome.stats)
@@ -138,6 +258,8 @@ impl<
             });
         };
 
+        let mut compacted_session =
+            compacted_session.ok_or("committed compaction requires its prepared session")?;
         let session_id = session.session_id.clone();
         compacted_session.metadata.insert(
             "prompt_compaction_stats_json".to_string(),
@@ -341,11 +463,9 @@ impl<
     pub(super) fn run_prompt_compaction_summary_producer(
         &self,
         session: &mut SessionStateSnapshot,
-        turn_id: &str,
-        runtime_scope: PromptCompactionScopeV1,
+        plan: crate::model::prompt::compaction::PromptCompactionPlan,
         hook_session: &SessionStateSnapshot,
         model_candidate_producer: Option<&dyn ModelCompactionSummaryCandidateProducer>,
-        prompt_input_token_estimate: Option<u32>,
     ) -> Result<PromptCompactionOutcome, PromptCompactionError> {
         let candidate_producer = model_candidate_producer.ok_or_else(|| {
             PromptCompactionError::provider(
@@ -356,32 +476,22 @@ impl<
         let pre_compact_hook = |plan: &PromptCompactionPlanV1| {
             self.pre_compact_hook_decision(hook_session_id.as_str(), plan)
         };
-        run_one_turn_model_compaction_and_pre_hook(
+        crate::model::prompt::compaction::run_planned_model_compaction(
             session,
-            turn_id,
-            &self.prompt_compaction_config,
-            runtime_scope,
+            plan,
             candidate_producer,
-            prompt_input_token_estimate,
             Some(&pre_compact_hook),
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "compaction orchestration keeps producer inputs explicit"
-    )]
     pub(super) async fn run_prompt_compaction_summary_producer_async(
         &self,
         session: &mut SessionStateSnapshot,
-        turn_id: &str,
-        runtime_scope: PromptCompactionScopeV1,
+        plan: crate::model::prompt::compaction::PromptCompactionPlan,
         hook_session: &SessionStateSnapshot,
         model_candidate_producer: Option<
             &(dyn AsyncModelCompactionSummaryCandidateProducer + Send + Sync),
         >,
-        prompt_input_token_estimate: Option<u32>,
-        force: bool,
     ) -> Result<PromptCompactionOutcome, PromptCompactionError> {
         let candidate_producer = model_candidate_producer.ok_or_else(|| {
             PromptCompactionError::provider(
@@ -392,14 +502,10 @@ impl<
         let pre_compact_hook = |plan: &PromptCompactionPlanV1| {
             self.pre_compact_hook_decision(hook_session_id.as_str(), plan)
         };
-        run_one_turn_model_compaction_async_and_pre_hook(
+        crate::model::prompt::compaction::run_planned_model_compaction_async(
             session,
-            turn_id,
-            &self.prompt_compaction_config,
-            runtime_scope,
+            plan,
             candidate_producer,
-            prompt_input_token_estimate,
-            force,
             Some(&pre_compact_hook),
         )
         .await

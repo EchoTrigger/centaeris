@@ -780,20 +780,31 @@ pub(super) fn consumed_outputs(root: &Path, after: &str) -> Result<Vec<String>, 
     ids
 }
 
-pub(super) fn forget_closed(root: &Path, id: &str) -> Result<(), String> {
+pub(super) fn forget_closed(root: &Path, ids: &[String]) -> Result<(), String> {
     let mut connection = db(root, false)?;
     let tx = connection
         .transaction()
         .map_err(|_| "task_index_unavailable")?;
-    tx.execute("DELETE FROM output_consumptions WHERE id=?1", [id])
-        .map_err(|_| "task_index_unavailable")?;
-    tx.execute(
-        "DELETE FROM operations WHERE task_id=?1",
-        [Sha256::digest(id.as_bytes()).as_slice()],
-    )
-    .map_err(|_| "task_index_unavailable")?;
-    tx.execute("DELETE FROM tasks WHERE id=?1 AND live=0", [id])
-        .map_err(|_| "task_index_unavailable")?;
+    {
+        let mut consumptions = tx
+            .prepare("DELETE FROM output_consumptions WHERE id=?1")
+            .map_err(|_| "task_index_unavailable")?;
+        let mut operations = tx
+            .prepare("DELETE FROM operations WHERE task_id=?1")
+            .map_err(|_| "task_index_unavailable")?;
+        let mut tasks = tx
+            .prepare("DELETE FROM tasks WHERE id=?1 AND live=0")
+            .map_err(|_| "task_index_unavailable")?;
+        for id in ids {
+            consumptions
+                .execute([id])
+                .map_err(|_| "task_index_unavailable")?;
+            operations
+                .execute([Sha256::digest(id.as_bytes()).as_slice()])
+                .map_err(|_| "task_index_unavailable")?;
+            tasks.execute([id]).map_err(|_| "task_index_unavailable")?;
+        }
+    }
     tx.commit().map_err(|_| "task_index_unavailable".into())
 }
 

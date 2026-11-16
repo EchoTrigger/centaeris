@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,12 +15,6 @@ const runtimePath = process.env.CENTAERIS_RUNTIME_EXE ?? resolve(
   "target/release",
   runtimeName,
 );
-
-if (!existsSync(runtimePath)) {
-  console.error(`Centa release Runtime not found: ${runtimePath}`);
-  console.error("Run .\\scripts\\build-desktop.ps1 from the Centaeris repository first.");
-  process.exit(1);
-}
 
 const result = spawnSync(
   process.platform === "win32" ? "cargo.exe" : "cargo",
@@ -41,11 +35,11 @@ const result = spawnSync(
 );
 
 if (result.error) {
-  console.error(`Failed to start Centa TUI: ${result.error.message}`);
+  console.error(`Failed to start Centaeris CLI: ${result.error.message}`);
   process.exit(1);
 }
 if (result.status === null) {
-  console.error(`Centa TUI terminated by signal: ${result.signal ?? "unknown"}`);
+  console.error(`Centaeris CLI terminated by signal: ${result.signal ?? "unknown"}`);
   process.exit(1);
 }
 process.exit(result.status);

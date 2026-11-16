@@ -1,7 +1,7 @@
 use super::contracts::CheckpointKindV1;
 use super::*;
 use crate::model::prepared_prompt::{
-    estimate_text_tokens, ModelInputImageObservationV1, ModelMessageV1, PreparedPromptV1,
+    ModelInputImageObservationV1, ModelMessageV1, PreparedPromptV1,
 };
 use crate::model::ModelClientRequest;
 use crate::session::supplement::{
@@ -14,7 +14,7 @@ use crate::session::turn_input::{
 use crate::tool::ModelToolDefinition;
 use std::collections::VecDeque;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnInput {
     UserMessage(String),
     UserMessageBatch {
@@ -898,7 +898,7 @@ pub enum ToolSafePoint {
         call: ToolCallEnvelope,
         result: ToolExecutionResult,
     },
-    CompletedTurn(TurnStepResult),
+    CompletedTurn(Box<TurnStepResult>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1027,9 +1027,24 @@ impl ModelRequestStartedV1 {
         observations: Vec<ModelObservationV1>,
         agent_composition: crate::extension::composition::ResolvedAgentCompositionV1,
     ) -> Result<Self, String> {
+        let estimate = crate::model::prepared_prompt::estimate_prepared_prompt_tokens(
+            &request.prepared_prompt,
+            Some(&request.session_config),
+        )?;
+        Self::from_measured_request(purpose, request, observations, agent_composition, &estimate)
+    }
+
+    pub(super) fn from_measured_request(
+        purpose: ModelRequestPurposeV1,
+        request: &ModelClientRequest,
+        observations: Vec<ModelObservationV1>,
+        agent_composition: crate::extension::composition::ResolvedAgentCompositionV1,
+        estimate: &crate::model::prepared_prompt::PromptTokenEstimate,
+    ) -> Result<Self, String> {
         request.prepared_prompt.validate()?;
         crate::extension::composition::validate_resolved_agent_composition(&agent_composition)?;
-        let context_token_breakdown = context_token_breakdown(request, &agent_composition)?;
+        let context_token_breakdown =
+            context_token_breakdown_from_estimate(request, &agent_composition, estimate)?;
         context_token_breakdown.validate(request.context_token_estimate)?;
         let uptake = observations
             .iter()
@@ -1050,7 +1065,7 @@ impl ModelRequestStartedV1 {
                     if request.prepared_prompt.system_prompt.as_deref()
                         != Some(content.as_str()) =>
                 {
-                    return Err("model request system prompt observation mismatch".to_string())
+                    return Err("model request system prompt observation mismatch".to_string());
                 }
                 ModelObservationV1::InputImage { image }
                     if !request
@@ -1066,19 +1081,19 @@ impl ModelRequestStartedV1 {
                     return Err(format!(
                         "model request input image observation is absent from prepared prompt: {}",
                         image.message_id
-                    ))
+                    ));
                 }
                 ModelObservationV1::ToolCatalog { tool_definitions }
                     if &request.prepared_prompt.tool_definitions != tool_definitions =>
                 {
-                    return Err("model request tool catalog observation mismatch".to_string())
+                    return Err("model request tool catalog observation mismatch".to_string());
                 }
                 ModelObservationV1::CompactionPrompt { message }
                     if purpose != ModelRequestPurposeV1::Compaction
                         || request.prepared_prompt.messages.len() != 1
                         || request.prepared_prompt.messages.first() != Some(message) =>
                 {
-                    return Err("model compaction prompt observation mismatch".to_string())
+                    return Err("model compaction prompt observation mismatch".to_string());
                 }
                 _ => {}
             }
@@ -1128,13 +1143,13 @@ impl ModelRequestStartedV1 {
             {
                 return Err(
                     "model request context observation coverage or order mismatch".to_string(),
-                )
+                );
             }
             ModelRequestPurposeV1::Compaction if !context_messages.is_empty() => {
                 return Err(
                     "compaction model request cannot contain context message observations"
                         .to_string(),
-                )
+                );
             }
             _ => {}
         }
@@ -1218,48 +1233,52 @@ pub(crate) fn validate_input_uptake_ids(ids: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn context_token_breakdown(
     request: &ModelClientRequest,
     composition: &crate::extension::composition::ResolvedAgentCompositionV1,
 ) -> Result<ContextTokenBreakdownV1, String> {
-    let system_prompt_tokens = request
-        .prepared_prompt
-        .system_prompt
-        .as_deref()
-        .map(estimate_text_tokens)
-        .unwrap_or_default();
+    let estimate = crate::model::prepared_prompt::estimate_prepared_prompt_tokens(
+        &request.prepared_prompt,
+        Some(&request.session_config),
+    )?;
+    context_token_breakdown_from_estimate(request, composition, &estimate)
+}
+
+fn context_token_breakdown_from_estimate(
+    request: &ModelClientRequest,
+    composition: &crate::extension::composition::ResolvedAgentCompositionV1,
+    estimate: &crate::model::prepared_prompt::PromptTokenEstimate,
+) -> Result<ContextTokenBreakdownV1, String> {
+    let system_prompt_tokens = estimate.system_tokens;
     let mut skills_tokens = 0u32;
     let mut message_tokens = 0u32;
-    for message in &request.prepared_prompt.messages {
-        let serialized = serde_json::to_string(message).map_err(|error| {
-            format!("serialize model message for context breakdown failed: {error}")
-        })?;
-        let tokens = estimate_text_tokens(serialized.as_str());
+    for (message, &tokens) in request
+        .prepared_prompt
+        .messages
+        .iter()
+        .zip(&estimate.message_tokens)
+    {
         if message.message_id.ends_with(":skill_catalog") {
             skills_tokens = skills_tokens.saturating_add(tokens);
         } else {
             message_tokens = message_tokens.saturating_add(tokens);
         }
     }
-    message_tokens = message_tokens
-        .saturating_add((request.prepared_prompt.input_images.len() as u32).saturating_mul(1_024));
-
-    let tool_tokens = if request.prepared_prompt.tool_definitions.is_empty() {
-        0
-    } else {
-        let serialized =
-            serde_json::to_string(&request.prepared_prompt.tool_definitions).map_err(|error| {
-                format!("serialize tool catalog for context breakdown failed: {error}")
-            })?;
-        estimate_text_tokens(serialized.as_str())
-    };
     let tool_contracts = composition
         .tool_contracts
         .iter()
         .map(|contract| (contract.name.as_str(), contract))
         .collect::<HashMap<_, _>>();
-    let mut weighted_tools = Vec::with_capacity(request.prepared_prompt.tool_definitions.len());
-    for definition in &request.prepared_prompt.tool_definitions {
+    let mut system_tool_tokens = 0u32;
+    let mut mcp_tool_tokens = 0u32;
+    let mut mcp_tools = Vec::new();
+    for (definition, &tokens) in request
+        .prepared_prompt
+        .tool_definitions
+        .iter()
+        .zip(&estimate.tool_tokens)
+    {
         let contract = tool_contracts
             .get(definition.name.as_str())
             .ok_or_else(|| {
@@ -1268,39 +1287,11 @@ fn context_token_breakdown(
                     definition.name
                 )
             })?;
-        let serialized = serde_json::to_string(definition)
-            .map_err(|error| format!("serialize tool for context breakdown failed: {error}"))?;
-        weighted_tools.push((
-            contract.provider_id.clone(),
-            definition.name.clone(),
-            contract.category == "external.mcp",
-            estimate_text_tokens(serialized.as_str()),
-        ));
-    }
-    let total_weight = weighted_tools
-        .iter()
-        .fold(0u32, |total, (_, _, _, weight)| {
-            total.saturating_add(*weight)
-        });
-    let mut allocated_tokens = 0u32;
-    let mut system_tool_tokens = 0u32;
-    let mut mcp_tool_tokens = 0u32;
-    let mut mcp_tools = Vec::new();
-    let weighted_tool_count = weighted_tools.len();
-    for (index, (provider_id, name, is_mcp, weight)) in weighted_tools.into_iter().enumerate() {
-        let tokens = if index + 1 == weighted_tool_count {
-            tool_tokens.saturating_sub(allocated_tokens)
-        } else if total_weight == 0 {
-            0
-        } else {
-            ((u64::from(tool_tokens) * u64::from(weight)) / u64::from(total_weight)) as u32
-        };
-        allocated_tokens = allocated_tokens.saturating_add(tokens);
-        if is_mcp {
+        if contract.category == "external.mcp" {
             mcp_tool_tokens = mcp_tool_tokens.saturating_add(tokens);
             mcp_tools.push(ContextToolTokenEstimateV1 {
-                provider_id,
-                name,
+                provider_id: contract.provider_id.clone(),
+                name: definition.name.clone(),
                 tokens,
             });
         } else {
@@ -1407,6 +1398,12 @@ pub struct GenerateDriverRequest {
     pub compression_stats_json: Option<String>,
     pub context_token_estimate: u32,
     pub prepared_prompt: PreparedPromptV1,
+    /// A known model configuration frozen with this request. Opaque bridges use None.
+    pub session_config: Option<crate::model::ModelSessionConfig>,
+    /// Compact measured contributions reused when the completed response reports usage.
+    pub prompt_usage_basis: Option<super::prompt_usage::PromptUsageBasisV1>,
+    /// Whether preparing this logical generation already committed a new summary.
+    pub context_was_compacted: bool,
     /// Execution contracts frozen alongside the model-visible tool definitions.
     pub tool_contracts: Vec<crate::tool::ToolContract>,
     pub execution_tools: crate::tool::layer::ToolLayer,
@@ -1455,6 +1452,11 @@ impl GenerateDriverError {
 
     pub fn is_output_token_limit(&self) -> bool {
         self.provider_code.as_deref() == Some("incomplete_output_token_limit")
+    }
+
+    /// Identifies a structured provider rejection that requires changing input.
+    pub fn is_context_overflow(&self) -> bool {
+        self.provider_code.as_deref() == Some("context_length_exceeded")
     }
 }
 
@@ -1563,6 +1565,14 @@ pub type GenerateDriverPromptCompactionFuture<'a> =
     Pin<Box<dyn Future<Output = Option<GenerateDriverPromptCompactionOutcome>> + Send + 'a>>;
 
 pub trait AsyncGenerateDriver: Send + Sync {
+    /// Returns the actual selected configuration only when this driver owns it.
+    fn trusted_session_model_config(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<crate::model::ModelSessionConfig>, String> {
+        Ok(None)
+    }
+
     fn durable_agent_run_id(&self) -> Option<&str> {
         None
     }

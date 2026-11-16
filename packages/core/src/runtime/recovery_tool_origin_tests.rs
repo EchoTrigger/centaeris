@@ -24,6 +24,52 @@ fn original_call(event_id: &str, run: &str, turn: &str) -> SessionLogRecord {
 }
 
 #[test]
+fn verified_snapshot_admission_rejects_cross_session_and_non_call_origins() {
+    let engine =
+        AgentRuntime::new_for_test(AgentRuntimeTestStore::new(), AgentRuntimeConfig::default());
+    let snapshot = SessionStateSnapshot::new("origin-recovery".into(), 0);
+    let call = original_call("source-call", "run", "turn");
+    let plan = |state: &SessionStateSnapshot, records: &[SessionLogRecord]| {
+        engine.plan_new_user_turn_closures_with_verified_snapshot(
+            "origin-recovery",
+            state,
+            records,
+            "trigger-run",
+            "trigger-turn",
+            1,
+            2,
+        )
+    };
+    assert!(plan(&snapshot, std::slice::from_ref(&call)).is_ok());
+    let mut wrong_snapshot = snapshot.clone();
+    wrong_snapshot.session_id = "other-session".into();
+    assert_eq!(
+        plan(&wrong_snapshot, std::slice::from_ref(&call)).unwrap_err(),
+        "closure_planner_snapshot_session_mismatch"
+    );
+    let mut foreign_call = call;
+    foreign_call.session_id = "other-session".into();
+    assert_eq!(
+        plan(&snapshot, &[foreign_call]).unwrap_err(),
+        "closure_planner_tool_call_source_mismatch"
+    );
+    let non_call = canonical_session_record(
+        "tombstone",
+        SessionRecordType::Tombstone,
+        "origin-recovery",
+        None,
+        None,
+        1,
+        json!({"tombstoneId":"tombstone","targetEventIds":["old"],"reasonType":"rewrite_tail"}),
+    )
+    .unwrap();
+    assert_eq!(
+        plan(&snapshot, &[non_call]).unwrap_err(),
+        "closure_planner_tool_call_source_mismatch"
+    );
+}
+
+#[test]
 fn query_loop_streamed_admission_keeps_inactive_tool_origin_ambiguity() {
     let store = AgentRuntimeTestStore::new();
     let executions = Arc::new(AtomicUsize::new(0));

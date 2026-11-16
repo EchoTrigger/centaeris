@@ -601,7 +601,7 @@ pub(crate) fn stop_agent_run_after_tool_closure(
 }
 
 fn recover_incomplete_tool_calls_before_new_turn(session_id: &str) -> Result<(), String> {
-    for agent_run in message_log::project_agent_runs_for_session(session_id)?
+    for agent_run in message_log::verified_session_agent_runs(session_id)?
         .into_iter()
         .filter(|agent_run| {
             agent_run.session_id == session_id
@@ -1057,7 +1057,7 @@ pub(crate) async fn compact_context(
     request: AgentContextCompactRequest,
 ) -> Result<AgentContextCompactResponse, String> {
     let session_id = required_string(request.session_id.as_str(), "sessionId")?;
-    let (agent_run_id, source_sequence) = {
+    let (agent_run_id, source_sequence, source_generation) = {
         let _guard = SESSION_PROMPT_OPERATION_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -1074,10 +1074,17 @@ pub(crate) async fn compact_context(
             .max_by_key(|run| run.updated_at_ms)
             .map(|run| run.agent_run_id.clone())
             .ok_or_else(|| "context compaction requires an existing AgentRun".to_string())?;
-        let (snapshot, sequence) =
-            message_log::restore_runtime_snapshot_with_sequence(session_id.as_str())?;
-        SessionManager::new(agent_runtime_store_actor()?).save_session(&snapshot)?;
-        (agent_run_id, sequence)
+        let (recovery, sequence, generation) =
+            message_log::restore_runtime_recovery_with_sequence(session_id.as_str())?;
+        let committed = SessionManager::new(agent_runtime_store_actor()?)
+            .save_recovered_session_owned(recovery.snapshot, recovery.retired_message_ids)?;
+        require_runtime_snapshot_checkpoint(
+            session_id.as_str(),
+            &committed,
+            sequence,
+            &generation,
+        )?;
+        (agent_run_id, sequence, generation)
     };
     let expected_sequence = Mutex::new(source_sequence);
     let turn_id = new_turn_id();
@@ -1089,7 +1096,7 @@ pub(crate) async fn compact_context(
         session_id.as_str(),
         agent_runtime.cwd.as_path(),
     )?;
-    let engine_config = agent_runtime_config(session_id.as_str(), &runtime_config, None)?;
+    let engine_config = agent_runtime_config(&runtime_config, None)?;
     let runtime = build_agent_runtime(AgentRuntimeBuildRequest {
         store,
         session_id: session_id.clone(),
@@ -1139,6 +1146,17 @@ pub(crate) async fn compact_context(
         &mut event_sink,
     )
     .await?;
+    let committed = SessionManager::new(agent_runtime_store_actor()?)
+        .load_session(session_id.as_str())?
+        .ok_or("compacted runtime state is missing")?;
+    require_runtime_snapshot_checkpoint(
+        session_id.as_str(),
+        &committed,
+        *expected_sequence
+            .lock()
+            .map_err(|_| "context compaction sequence lock poisoned")?,
+        &source_generation,
+    )?;
     Ok(AgentContextCompactResponse {
         session_id,
         compacted,
@@ -1537,8 +1555,41 @@ fn start_agent_run(mut request: StartAgentRunRequest) -> Result<StartedAgentRun,
 }
 
 fn restore_runtime_snapshot_from_session(session_id: &str) -> Result<(), String> {
-    let snapshot = message_log::restore_runtime_snapshot(session_id)?;
-    SessionManager::new(agent_runtime_store_actor()?).save_session(&snapshot)
+    let manager = SessionManager::new(agent_runtime_store_actor()?);
+    if let Some(snapshot) = manager.load_session(session_id)? {
+        if let Some((snapshot, sequence, changed, generation)) =
+            message_log::advance_verified_runtime_snapshot(session_id, snapshot)?
+        {
+            if changed {
+                let committed = manager.save_session_owned(snapshot)?;
+                require_runtime_snapshot_checkpoint(session_id, &committed, sequence, &generation)?;
+            }
+            return Ok(());
+        }
+    }
+    let (recovery, sequence, generation) =
+        message_log::restore_runtime_recovery_with_sequence(session_id)?;
+    let committed =
+        manager.save_recovered_session_owned(recovery.snapshot, recovery.retired_message_ids)?;
+    require_runtime_snapshot_checkpoint(session_id, &committed, sequence, &generation)
+}
+
+fn require_runtime_snapshot_checkpoint(
+    session_id: &str,
+    snapshot: &centaeris_core::session::state::SessionStateSnapshot,
+    sequence: usize,
+    generation: &str,
+) -> Result<(), String> {
+    if message_log::bind_runtime_snapshot_checkpoint(
+        session_id,
+        snapshot,
+        Some(sequence),
+        generation,
+    )? {
+        Ok(())
+    } else {
+        Err("Session source changed during runtime reconstruction".into())
+    }
 }
 
 fn persist_agent_run_started(
@@ -2302,11 +2353,7 @@ async fn run_session_agent_run(
         session_id.as_str(),
         &agent_runtime.cwd,
     )?;
-    let mut engine_config = agent_runtime_config(
-        session_id.as_str(),
-        &runtime_config,
-        auto_continue_after_resume_wait,
-    )?;
+    let mut engine_config = agent_runtime_config(&runtime_config, auto_continue_after_resume_wait)?;
     let native_plugin_activation = mcp::connect_enabled_plugins().await?;
     engine_config.plugin_activation_digest = Some(native_plugin_activation.digest.clone());
     let runtime = build_agent_runtime(AgentRuntimeBuildRequest {
@@ -2335,6 +2382,7 @@ async fn run_session_agent_run(
         resume_from_turn_id,
         auto_continue_after_resume_wait,
     };
+    let source_generation = message_log::runtime_source_generation(session_id.as_str())?;
     let mut final_answer = None::<String>;
     let mut completed_projection = None;
     let mut streamed_runtime_error = false;
@@ -2509,6 +2557,17 @@ async fn run_session_agent_run(
 
             match &response.stop {
                 AgentRunStop::Finalized | AgentRunStop::TerminalTool => {
+                    let committed = response
+                        .last_turn
+                        .as_ref()
+                        .ok_or("completed AgentRun has no canonical runtime state")?;
+                    // A successful loop receipt follows all durable source callbacks.
+                    message_log::bind_runtime_snapshot_checkpoint(
+                        session_id.as_str(),
+                        &committed.session_snapshot,
+                        None,
+                        &source_generation,
+                    )?;
                     completed_projection = Some(completed_turn_projection_from_result(
                         session_id.as_str(),
                         &agent_run_identity,
@@ -2697,7 +2756,6 @@ async fn run_session_agent_run(
 }
 
 fn agent_runtime_config(
-    session_id: &str,
     runtime_config: &runtime_config::AgentRuntimeConfigResponse,
     auto_continue_after_resume_wait: Option<bool>,
 ) -> Result<AgentRuntimeConfig, String> {
@@ -2715,30 +2773,7 @@ fn agent_runtime_config(
     config.tool_parallelism = runtime_config
         .tool_parallelism
         .unwrap_or(config.tool_parallelism);
-    let state = message_log::project_agent_context_state(session_id)?;
-    if let (Some(actual), Some(estimated)) = (
-        state
-            .provider_usage
-            .as_ref()
-            .and_then(|usage| usage.latest.input_tokens),
-        state.latest_provider_usage_context_token_estimate,
-    ) {
-        config.prompt_token_estimate_scale_basis_points =
-            prompt_token_estimate_scale_basis_points(actual, estimated);
-    }
     Ok(config)
-}
-
-fn prompt_token_estimate_scale_basis_points(actual: u64, estimated: u64) -> u32 {
-    if estimated == 0 {
-        return 10_000;
-    }
-    actual
-        .saturating_mul(10_000)
-        .saturating_add(estimated - 1)
-        .checked_div(estimated)
-        .unwrap_or(10_000)
-        .clamp(10_000, 100_000) as u32
 }
 
 fn final_answer_from_stream_payload(payload: &serde_json::Value) -> Option<String> {
@@ -3812,6 +3847,7 @@ fn required_string(raw: &str, field_name: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use centaeris_core::model::ToolCallEnvelope;
+    use centaeris_core::session::store::AgentRuntimeSnapshotStorePort;
     use std::collections::HashMap;
     use std::fs;
     use std::time::Duration;
@@ -4171,6 +4207,97 @@ mod tests {
     }
 
     #[test]
+    fn successful_agent_run_retains_verified_source_checkpoint_for_the_next_admission() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .expect("test environment lock");
+        let environment = PromptTestEnvironment::new("warm-source-checkpoint");
+        let runtime = tokio::runtime::Runtime::new().expect("prompt test runtime");
+        let result = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let model = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().await.expect("fixture connection");
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    let header_end = loop {
+                        if let Some(offset) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                            break offset + 4;
+                        }
+                        let count = stream.read(&mut buffer).await.expect("fixture request headers");
+                        assert!(count > 0, "request ended before headers");
+                        request.extend_from_slice(&buffer[..count]);
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let length = headers.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().expect("fixture content length"))
+                    }).expect("model JSON request content length");
+                    while request.len() < header_end + length {
+                        let count = stream.read(&mut buffer).await.expect("fixture request body");
+                        assert!(count > 0, "request ended before body");
+                        request.extend_from_slice(&buffer[..count]);
+                    }
+                    let body = concat!(
+                        "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"verified final\"},\"finish_reason\":null}]}\n\n",
+                        "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n",
+                    );
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    stream.write_all(response.as_bytes()).await.expect("fixture response");
+                    stream.shutdown().await.expect("fixture response shutdown");
+                }
+            });
+            let outcome = async {
+                runtime_config::set(serde_json::from_value(serde_json::json!({
+                    "customModelProviders": [{"providerId":"custom.warm-source", "name":"Local fixture",
+                        "baseUrl":format!("http://{address}/v1"), "api":"openai-completions",
+                        "models":[{"model":"fixture-model", "contextTokens":"200k", "maxOutputTokens":"32k", "supportsVision":false}]}]
+                }))?)?;
+                runtime_config::set(serde_json::from_value(serde_json::json!({
+                    "modelProviderId":"custom.warm-source", "modelApiKey":"synthetic-fixture-key"
+                }))?)?;
+                runtime_config::set(serde_json::from_value(serde_json::json!({
+                    "modelProviderId":"custom.warm-source", "model":"fixture-model"
+                }))?)?;
+                let session = environment.create_session("warm source checkpoint")?;
+                let (_clients, writer, _outbound) = prompt_event_writer("warm-source-viewer");
+                for index in 0..2 {
+                    if index == 1 {
+                        message_log::TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+                    }
+                    let response = input(writer.clone(), prompt_request(
+                        &format!("warm-source-{index}"), &session.id, "continue the verified task",
+                    )).map_err(|error| error.to_string())?;
+                    if index == 1 {
+                        assert!(message_log::TEST_DOCUMENT_READS.with(|reads| reads.borrow().is_empty()),
+                            "the next admission must reuse the successful loop's source proof");
+                    }
+                    tokio::time::timeout(Duration::from_secs(20), async {
+                        while writer.active_agent_run(&response.agent_run_id)?.is_some() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        Ok::<(), String>(())
+                    }).await??;
+                    let completed = message_log::project_agent_run(&response.agent_run_id)?.ok_or("completed Run missing")?;
+                    assert_eq!(completed.status, "succeeded");
+                }
+                Ok::<(), Box<dyn std::error::Error>>(())
+            }.await;
+            model.abort();
+            let _ = model.await;
+            outcome
+        });
+        drop(runtime);
+        drop(environment);
+        drop(guard);
+        result.expect("successful loop warm source checkpoint");
+    }
+
+    #[test]
     fn session_prompt_loop_preserves_model_retryability_metadata() {
         assert!(session_prompt_loop_failure_retryable(
             "model_client_error(kind=provider_response_interrupted,retryable=true): read SSE chunk failed"
@@ -4181,19 +4308,6 @@ mod tests {
         assert!(!session_prompt_loop_failure_retryable(
             "session store failed before model request"
         ));
-    }
-
-    #[test]
-    fn actual_provider_usage_calibrates_future_prompt_estimates_conservatively() {
-        assert_eq!(
-            prompt_token_estimate_scale_basis_points(228_800, 163_000),
-            14_037
-        );
-        assert_eq!(prompt_token_estimate_scale_basis_points(100, 200), 10_000);
-        assert_eq!(
-            prompt_token_estimate_scale_basis_points(2_000_000, 1),
-            100_000
-        );
     }
 
     #[test]
@@ -4456,6 +4570,84 @@ mod tests {
             if !(result_index < terminal_index && terminal_index < new_user_index) {
                 return Err("recovery did not finish before the new UserMessage".to_string());
             }
+            message_log::TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+            restore_runtime_snapshot_from_session(session.id.as_str())?;
+            message_log::append_agent_run_started(
+                session.id.as_str(),
+                "turn-following",
+                "agent-run-following",
+                "next input",
+                4,
+            )?;
+            restore_runtime_snapshot_from_session(session.id.as_str())?;
+            assert!(
+                message_log::TEST_DOCUMENT_READS.with(|reads| reads.borrow().is_empty()),
+                "verified warm admission must not reread historical source bodies",
+            );
+            let manager = SessionManager::new(agent_runtime_store_actor()?);
+            let mut current = manager.load_or_create_session(session.id.as_str())?;
+            assert!(current
+                .messages
+                .iter()
+                .any(|message| message.content == "next input"));
+            current
+                .metadata
+                .insert("unbound-write".into(), "changed".into());
+            manager.save_session(&current)?;
+            restore_runtime_snapshot_from_session(session.id.as_str())?;
+            assert!(
+                message_log::TEST_DOCUMENT_READS.with(|reads| !reads.borrow().is_empty()),
+                "an independently changed SQLite state must reconstruct authoritative source",
+            );
+            message_log::TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+            let generation = message_log::runtime_source_generation(session.id.as_str())?;
+            let prior = manager.load_or_create_session(session.id.as_str())?;
+            message_log::read_state::evict_all();
+            assert!(
+                !message_log::bind_runtime_snapshot_checkpoint(
+                    session.id.as_str(),
+                    &prior,
+                    None,
+                    &generation,
+                )?,
+                "a completed result must not overwrite a replaced validation lineage"
+            );
+            restore_runtime_snapshot_from_session(session.id.as_str())?;
+            assert!(
+                message_log::TEST_DOCUMENT_READS.with(|reads| !reads.borrow().is_empty()),
+                "cache eviction must use explicit cold reconstruction",
+            );
+            message_log::append_agent_run_terminal(
+                session.id.as_str(),
+                "turn-following",
+                "agent-run-following",
+                "cancelled",
+                Some("fixture_cancelled_before_execution"),
+                5,
+            )?;
+            message_log::rewrite_last_user_input(message_log::RewriteLastUserInputRequest {
+                session_id: session.id.as_str(),
+                target_chat_message_id: "message:turn-following:user",
+                expected_tail_chat_message_id: "message:turn-following:user",
+                new_turn_id: "turn-rewritten",
+                new_agent_run_id: "agent-run-rewritten",
+                new_content: "replacement input",
+                reason: "rewrite_last_user_input",
+                at_ms: 6,
+            })?;
+            restore_runtime_snapshot_from_session(session.id.as_str())?;
+            let requests = agent_runtime_store_actor()?.load_session_history_page(
+                session.id.as_str(),
+                None,
+                256,
+                centaeris_core::session::history::SessionHistorySelectionV1::OriginalUserRequests,
+            )?;
+            assert!(!requests
+                .iter()
+                .any(|record| record.entry.message.content == "next input"));
+            assert!(requests
+                .iter()
+                .any(|record| record.entry.message.content == "replacement input"));
             Ok::<(), String>(())
         })();
         match previous_data_dir {

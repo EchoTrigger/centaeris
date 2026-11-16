@@ -2,10 +2,18 @@ use super::*;
 use centaeris_core::runtime::contracts::{
     CheckpointKindV1, CheckpointRecord, EventVisibility, RuntimeEvent,
 };
+use centaeris_core::session::history::{
+    prepare_session_snapshot_write, SessionHistoryEntryV1, SessionHistoryRecordV1,
+    SessionHistorySelectionV1, SessionSnapshotWriteV1,
+};
 use centaeris_core::session::store::{
     AgentRuntimeSnapshotStorePort, RuntimeStore, RuntimeStoreError, SessionDataStorePort,
 };
 use rusqlite::{params, OptionalExtension};
+
+#[cfg(test)]
+#[path = "sqlite_runtime/history_tests.rs"]
+mod history_tests;
 
 impl RuntimeStore for SqliteRuntimeStore {
     fn list_runtime_job_waiters(
@@ -246,6 +254,8 @@ impl SessionDataStorePort for SqliteRuntimeStore {
             for table in [
                 "runtime_events",
                 "session_runtime_snapshots",
+                "session_message_history_heads",
+                "session_message_history_entries",
                 "session_model_input_images",
                 "checkpoints",
                 "dead_letters",
@@ -289,6 +299,43 @@ fn visibility_from_db(raw: &str) -> Result<EventVisibility, String> {
 }
 
 impl AgentRuntimeSnapshotStorePort for SqliteRuntimeStore {
+    fn load_session_history_page(
+        &self,
+        session_id: &str,
+        before_position: Option<u64>,
+        limit: usize,
+        selection: SessionHistorySelectionV1,
+    ) -> Result<Vec<SessionHistoryRecordV1>, String> {
+        if !(1..=256).contains(&limit) {
+            return Err("session_history_page_limit_invalid".into());
+        }
+        let before = before_position
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| "session_history_cursor_out_of_range".to_string())?
+            .unwrap_or(i64::MAX);
+        self.with_conn(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT h.position,e.entry_json FROM session_message_history_heads h
+                 JOIN session_message_history_entries e ON e.session_id=h.session_id AND e.record_id=h.current_record_id
+                 WHERE h.session_id=?1 AND h.position<?2 AND h.retired=0
+                 AND (?3=0 OR h.is_original_user_request=1)
+                 ORDER BY h.position DESC LIMIT ?4"
+            ).map_err(|error| error.to_string())?;
+            let rows = statement.query_map(params![session_id, before,
+                i64::from(selection == SessionHistorySelectionV1::OriginalUserRequests), limit as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|error| error.to_string())?;
+            rows.map(|row| {
+                let (position, raw) = row.map_err(|error| error.to_string())?;
+                let entry: SessionHistoryEntryV1 = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+                entry.validate()?;
+                Ok(SessionHistoryRecordV1 { position: u64::try_from(position)
+                    .map_err(|_| "session_history_position_invalid".to_string())?, entry })
+            }).collect()
+        })
+    }
+
     fn save_model_input_image(
         &self,
         session_id: &str,
@@ -345,6 +392,19 @@ impl AgentRuntimeSnapshotStorePort for SqliteRuntimeStore {
         snapshot_json: &str,
         updated_at_ms: i64,
     ) -> Result<(), String> {
+        let write = prepare_session_snapshot_write(snapshot_json)?;
+        if write.session_id() != session_id {
+            return Err("session_snapshot_identity_mismatch".into());
+        }
+        self.save_prepared_agent_runtime_snapshot(write, updated_at_ms)
+            .map(|_| ())
+    }
+
+    fn save_prepared_agent_runtime_snapshot(
+        &self,
+        write: SessionSnapshotWriteV1,
+        updated_at_ms: i64,
+    ) -> Result<centaeris_core::session::state::SessionStateSnapshot, String> {
         #[cfg(test)]
         if self
             .fail_next_session_snapshot_save
@@ -353,7 +413,9 @@ impl AgentRuntimeSnapshotStorePort for SqliteRuntimeStore {
             return Err("injected one-shot session runtime snapshot save failure".to_string());
         }
         self.with_conn(|conn| {
-            conn.execute(
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            persist_session_history_conn(&tx, write.session_id(), &write)?;
+            tx.execute(
                 "
                 INSERT INTO session_runtime_snapshots(
                     session_id, snapshot_json, updated_at_ms
@@ -363,11 +425,12 @@ impl AgentRuntimeSnapshotStorePort for SqliteRuntimeStore {
                     snapshot_json = excluded.snapshot_json,
                     updated_at_ms = excluded.updated_at_ms
                 ",
-                params![session_id, snapshot_json, updated_at_ms],
+                params![write.session_id(), write.snapshot_json(), updated_at_ms],
             )
             .map_err(|err| format!("save session runtime snapshot failed: {err}"))?;
-            Ok(())
-        })
+            tx.commit().map_err(|error| error.to_string())
+        })?;
+        Ok(write.into_snapshot())
     }
 
     fn compare_and_save_agent_runtime_snapshot(
@@ -384,24 +447,102 @@ impl AgentRuntimeSnapshotStorePort for SqliteRuntimeStore {
         {
             return Err("injected one-shot session runtime snapshot save failure".to_string());
         }
+        let write = prepare_session_snapshot_write(snapshot_json)?;
+        if write.session_id() != session_id {
+            return Err("session_snapshot_identity_mismatch".into());
+        }
         self.with_conn(|conn| {
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let actual = tx
+                .query_row(
+                    "SELECT snapshot_json FROM session_runtime_snapshots WHERE session_id=?1",
+                    [session_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if actual.as_deref() != expected_snapshot {
+                return Ok(false);
+            }
+            persist_session_history_conn(&tx, session_id, &write)?;
             let changed = match expected_snapshot {
-                Some(expected) => conn.execute(
+                Some(expected) => tx.execute(
                     "UPDATE session_runtime_snapshots
                      SET snapshot_json = ?2, updated_at_ms = ?3
                      WHERE session_id = ?1 AND snapshot_json = ?4",
-                    params![session_id, snapshot_json, updated_at_ms, expected],
+                    params![session_id, write.snapshot_json(), updated_at_ms, expected],
                 ),
-                None => conn.execute(
+                None => tx.execute(
                     "INSERT INTO session_runtime_snapshots(session_id, snapshot_json, updated_at_ms)
                      VALUES(?1, ?2, ?3) ON CONFLICT(session_id) DO NOTHING",
-                    params![session_id, snapshot_json, updated_at_ms],
+                    params![session_id, write.snapshot_json(), updated_at_ms],
                 ),
             }
             .map_err(|error| format!("compare and save session runtime snapshot failed: {error}"))?;
+            tx.commit().map_err(|error| error.to_string())?;
             Ok(changed == 1)
         })
     }
+}
+
+pub(super) fn persist_session_history_conn(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    write: &SessionSnapshotWriteV1,
+) -> Result<(), String> {
+    for entry in write.entries() {
+        let raw = entry.canonical_json()?;
+        let inserted = conn.execute(
+            "INSERT INTO session_message_history_entries(session_id,record_id,message_id,entry_json)
+             VALUES(?1,?2,?3,?4) ON CONFLICT(session_id,record_id) DO NOTHING",
+            params![session_id, entry.record_id, entry.message.message_id, raw],
+        ).map_err(|error| error.to_string())?;
+        if inserted == 0 {
+            let existing: String = conn.query_row(
+                "SELECT entry_json FROM session_message_history_entries WHERE session_id=?1 AND record_id=?2",
+                params![session_id, entry.record_id], |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            if existing != raw {
+                return Err("session_history_immutable_body_conflict".into());
+            }
+        }
+        conn.execute(
+            "INSERT INTO session_message_history_heads(session_id,message_id,position,current_record_id,is_original_user_request,retired)
+             SELECT ?1,?2,COALESCE(MAX(position),0)+1,?3,?4,0 FROM session_message_history_heads WHERE session_id=?1
+             ON CONFLICT(session_id,message_id) DO UPDATE SET current_record_id=excluded.current_record_id,
+             is_original_user_request=excluded.is_original_user_request,retired=0
+             WHERE current_record_id<>excluded.current_record_id OR is_original_user_request<>excluded.is_original_user_request OR retired<>0",
+            params![session_id, entry.message.message_id, entry.record_id,
+                i64::from(entry.is_original_user_request())],
+        ).map_err(|error| error.to_string())?;
+    }
+    for id in write.retired_message_ids() {
+        let changed = conn.execute(
+            "UPDATE session_message_history_heads SET retired=1 WHERE session_id=?1 AND message_id=?2",
+            params![session_id, id],
+        ).map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("session_history_retired_source_missing".into());
+        }
+    }
+    for id in write.recovery_retired_message_ids() {
+        conn.execute(
+            "UPDATE session_message_history_heads SET retired=1 WHERE session_id=?1 AND message_id=?2",
+            params![session_id, id],
+        ).map_err(|error| error.to_string())?;
+    }
+    for reference in write.retained_entries() {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_message_history_heads WHERE session_id=?1 AND message_id=?2 AND current_record_id=?3 AND retired=0)",
+            params![session_id, reference.message_id, reference.record_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if !present {
+            return Err("session_history_working_source_missing".into());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn save_checkpoint_conn(

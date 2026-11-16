@@ -15,15 +15,31 @@ enum ResolvedImageSource {
 }
 
 struct GeneratePromptProjection {
-    session: SessionStateSnapshot,
     prepared_prompt: PreparedPromptV1,
+    execution_tools: ToolLayer,
+    tool_contracts: Vec<crate::tool::ToolContract>,
+    session_config: Option<crate::model::ModelSessionConfig>,
+    raw_input_token_estimate: u32,
+    prompt_usage_basis: Option<super::prompt_usage::PromptUsageBasisV1>,
+    context_was_compacted: bool,
+    source_context_revision: String,
+    input: TurnInput,
+    observation_revision: Option<u64>,
+    agents_instructions: Option<(String, String)>,
+    skill_catalog_revision: String,
     image_observations: Vec<ModelInputImageObservationV1>,
     provider_prompt_cache_key: Option<String>,
     system_prompt_manifest_json: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum GenerateCompactionMode {
+    Automatic,
+    ContextOverflow,
+}
+
 pub(super) struct PreparedAgentsInstructions {
-    revision: u64,
+    revision: Option<u64>,
     instructions: Option<(String, String)>,
 }
 
@@ -35,9 +51,9 @@ pub(super) struct PreparedRequestInputs {
 type MainRequestIntake<'a> =
     dyn FnMut(&mut TurnInput) -> Result<Option<PreparedRequestInputs>, String> + Send + 'a;
 use crate::model::prepared_prompt::{
-    project_session_messages_to_model_messages, ModelInputImageObservationV1, ModelInputImageRefV1,
-    ModelInputImageSourceRefV1, ModelInputImageV1, ModelMessageRoleV1, ModelMessageV1,
-    ModelToolCallV1, PreparedPromptV1,
+    project_chat_message_to_model_message, project_session_messages_to_model_messages,
+    ModelInputImageObservationV1, ModelInputImageRefV1, ModelInputImageSourceRefV1,
+    ModelInputImageV1, ModelMessageRoleV1, ModelMessageV1, ModelToolCallV1, PreparedPromptV1,
 };
 use base64::Engine as _;
 
@@ -334,12 +350,13 @@ impl<
         }
         refresh_session_context_window(&mut session);
         let mut prepared_agents = None;
-        let prompt_input_token_estimate = self.estimate_generate_prompt_input_tokens(
+        let (mut projection, prompt_input_token_estimate) = self.prepare_generate_prompt(
             &session,
             session_id,
             turn_id,
             input,
             &mut prepared_agents,
+            None,
         )?;
 
         let compaction_result = self.apply_prompt_compaction_for_generate_request(
@@ -352,16 +369,39 @@ impl<
         if !compaction_result.runtime_events.is_empty() {
             prepared_agents = None;
         }
-        self.session_manager.save_session(&session)?;
-        self.build_generate_driver_request_from_session(
+        session = self.session_manager.save_session_owned(session)?;
+        let context_was_compacted = !compaction_result.runtime_events.is_empty()
+            && projection.source_context_revision != session.context_revision()?;
+        if context_was_compacted
+            || (!compaction_result.runtime_events.is_empty()
+                && !self.generate_projection_is_current(
+                    &projection,
+                    &session,
+                    input,
+                    &None,
+                    turn_id,
+                    &mut prepared_agents,
+                )?)
+        {
+            projection = self.project_generate_prompt_from_session(
+                &session,
+                session_id,
+                turn_id,
+                input,
+                &mut prepared_agents,
+                None,
+            )?;
+        }
+        projection.context_was_compacted = context_was_compacted;
+        self.finish_generate_driver_request(
             session,
+            projection,
             session_id,
             turn_id,
             input,
             loop_index,
             compaction_result.stats_json,
             None,
-            &mut prepared_agents,
         )
     }
 
@@ -375,7 +415,7 @@ impl<
         driver: &D,
     ) -> Result<GenerateDriverRequest, String> {
         let session = self.session_manager.load_or_create_session(session_id)?;
-        self.session_manager.save_session(&session)?;
+        self.session_manager.save_session_owned(session)?;
         let mut input = TurnInput::UserMessage(user_message.to_string());
         self.build_generate_driver_request_with_async_driver_and_runtime_scope(
             session_id,
@@ -409,8 +449,46 @@ impl<
         driver: &D,
         intake: Option<&mut MainRequestIntake<'_>>,
     ) -> Result<GenerateDriverRequest, String> {
+        self.build_generate_driver_request_with_compaction_mode(
+            session_id,
+            turn_id,
+            input,
+            loop_index,
+            runtime_scope,
+            agent_run_resource_usage,
+            tool_safe_point,
+            driver,
+            intake,
+            GenerateCompactionMode::Automatic,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "generate orchestration keeps frozen scope, intake and compaction cause explicit"
+    )]
+    pub(super) async fn build_generate_driver_request_with_compaction_mode<
+        D: AsyncGenerateDriver,
+    >(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        input: &mut TurnInput,
+        loop_index: u32,
+        runtime_scope: PromptCompactionScopeV1,
+        agent_run_resource_usage: Option<&mut AgentRunResourceUsageV1>,
+        tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
+        driver: &D,
+        intake: Option<&mut MainRequestIntake<'_>>,
+        compaction_mode: GenerateCompactionMode,
+    ) -> Result<GenerateDriverRequest, String> {
         self.tools_port.refresh_dynamic_tool_catalogs().await?;
         let mut session = self.session_manager.load_or_create_session(session_id)?;
+        if compaction_mode == GenerateCompactionMode::ContextOverflow {
+            session.history.prompt_usage_anchor = None;
+        }
+
         let pending_compaction = super::prompt_compaction_commit::active_commit(&session)?
             .filter(|commit| !commit.acknowledged);
         if let Some(commit) = pending_compaction.as_ref() {
@@ -439,12 +517,14 @@ impl<
         }
         refresh_session_context_window(&mut session);
         let mut prepared_agents = None;
-        let prompt_input_token_estimate = self.estimate_generate_prompt_input_tokens(
+        let mut session_config = driver.trusted_session_model_config(session_id)?;
+        let (mut projection, prompt_input_token_estimate) = self.prepare_generate_prompt(
             &session,
             session_id,
             turn_id,
             input,
             &mut prepared_agents,
+            session_config.clone(),
         )?;
 
         let candidate_producer = AsyncGenerateDriverPromptCompactionCandidateProducer {
@@ -476,7 +556,7 @@ impl<
                 turn_id,
                 runtime_scope,
                 Some(prompt_input_token_estimate),
-                false,
+                compaction_mode == GenerateCompactionMode::ContextOverflow,
                 Some(&candidate_producer),
             )
             .await?
@@ -500,7 +580,14 @@ impl<
                 .into_inner()
                 .map_err(|_| "compaction source identity lock poisoned")?,
         )?;
-        self.session_manager.save_session(&session)?;
+        session = self.session_manager.save_session_owned(session)?;
+        let compaction_changed_context = !compaction_result.runtime_events.is_empty()
+            && projection.source_context_revision != session.context_revision()?;
+        if compaction_mode == GenerateCompactionMode::ContextOverflow && !compaction_changed_context
+        {
+            return Err("model_context_overflow_compaction_did_not_change_context".into());
+        }
+        let had_intake = intake.is_some();
         let prepared_inputs = if let Some(intake) = intake {
             let intake_span = RequestPreparationSpan::new(
                 self.request_preparation_observer.as_ref(),
@@ -509,23 +596,66 @@ impl<
             );
             let prepared = intake(input)?;
             session = self.session_manager.load_or_create_session(session_id)?;
+            session_config = driver.trusted_session_model_config(session_id)?;
+            if compaction_changed_context
+                || !self.generate_projection_is_current(
+                    &projection,
+                    &session,
+                    input,
+                    &session_config,
+                    turn_id,
+                    &mut prepared_agents,
+                )?
+            {
+                projection = self.project_generate_prompt_from_session(
+                    &session,
+                    session_id,
+                    turn_id,
+                    input,
+                    &mut prepared_agents,
+                    session_config.clone(),
+                )?;
+            }
             intake_span.complete();
             prepared
         } else {
             None
         };
-        self.build_generate_driver_request_from_session(
+        if !had_intake
+            && (compaction_changed_context
+                || (!compaction_result.runtime_events.is_empty()
+                    && !self.generate_projection_is_current(
+                        &projection,
+                        &session,
+                        input,
+                        &session_config,
+                        turn_id,
+                        &mut prepared_agents,
+                    )?))
+        {
+            projection = self.project_generate_prompt_from_session(
+                &session,
+                session_id,
+                turn_id,
+                input,
+                &mut prepared_agents,
+                session_config.clone(),
+            )?;
+        }
+        projection.context_was_compacted = compaction_changed_context;
+        self.finish_generate_driver_request(
             session,
+            projection,
             session_id,
             turn_id,
             input,
             loop_index,
             compaction_result.stats_json,
             prepared_inputs,
-            &mut prepared_agents,
         )
     }
 
+    #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
         reason = "request preparation keeps frozen intake and compaction state explicit"
@@ -541,27 +671,55 @@ impl<
         prepared_inputs: Option<PreparedRequestInputs>,
         prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<GenerateDriverRequest, String> {
-        let execution_tools = self.tools_port.clone();
-        let projection_span = RequestPreparationSpan::new(
-            self.request_preparation_observer.as_ref(),
-            RequestPreparationStage::Projection,
-            turn_id,
-        );
         let projection = self.project_generate_prompt_from_session(
-            session,
+            &session,
             session_id,
             turn_id,
             input,
             prepared_agents,
-            &execution_tools,
+            None,
         )?;
+        self.finish_generate_driver_request(
+            session,
+            projection,
+            session_id,
+            turn_id,
+            input,
+            loop_index,
+            compression_stats_json,
+            prepared_inputs,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request completion keeps its frozen projection and input membership explicit"
+    )]
+    fn finish_generate_driver_request(
+        &self,
+        mut session: SessionStateSnapshot,
+        projection: GeneratePromptProjection,
+        session_id: &str,
+        turn_id: &str,
+        input: &TurnInput,
+        loop_index: u32,
+        compression_stats_json: Option<String>,
+        prepared_inputs: Option<PreparedRequestInputs>,
+    ) -> Result<GenerateDriverRequest, String> {
         let GeneratePromptProjection {
-            mut session,
             mut prepared_prompt,
+            execution_tools,
+            tool_contracts,
+            session_config,
+            mut raw_input_token_estimate,
+            mut prompt_usage_basis,
+            context_was_compacted,
             image_observations,
             provider_prompt_cache_key,
             system_prompt_manifest_json,
+            ..
         } = projection;
+        let resolved_images = !image_observations.is_empty();
         let (messages, images, image_observations) = self.resolve_model_input_images(
             session_id,
             prepared_prompt.messages,
@@ -569,7 +727,22 @@ impl<
         )?;
         prepared_prompt.messages = messages;
         prepared_prompt.set_input_images(images)?;
-        let context_token_estimate = estimate_prepared_prompt_input_tokens(&prepared_prompt)?;
+        if resolved_images {
+            prompt_usage_basis = Some(super::prompt_usage::PromptUsageBasisV1::from_prompt(
+                &prepared_prompt,
+                session_config.as_ref(),
+            )?);
+            raw_input_token_estimate = match &prompt_usage_basis {
+                Some(basis) => basis.estimated_input_tokens(),
+                None => estimate_prepared_prompt_input_tokens(&prepared_prompt)?,
+            };
+        }
+        let context_token_estimate = raw_input_token_estimate;
+        let admission_estimate = self.estimate_generate_prompt_admission_tokens(
+            &session,
+            prompt_usage_basis.as_ref(),
+            raw_input_token_estimate,
+        );
         let mut observations = Vec::new();
         if let Some(content) = prepared_prompt.system_prompt.clone() {
             observations.push(ModelObservationV1::SystemPrompt { content });
@@ -591,8 +764,13 @@ impl<
                 tool_definitions: prepared_prompt.tool_definitions.clone(),
             });
         }
+        let prompt_compaction = super::prompt_compaction_commit::active_commit(&session)?;
+        let context_was_compacted = context_was_compacted
+            || prompt_compaction
+                .as_ref()
+                .is_some_and(|commit| commit.event.turn_id == turn_id);
         let request = GenerateDriverRequest {
-            prompt_compaction: super::prompt_compaction_commit::active_commit(&session)?,
+            prompt_compaction,
             session_id: session_id.into(),
             turn_id: turn_id.into(),
             loop_index,
@@ -601,27 +779,20 @@ impl<
             system_prompt_manifest_json,
             compression_stats_json,
             context_token_estimate,
-            tool_contracts: self
-                .model_tool_contracts_for(&execution_tools)?
-                .into_iter()
-                .filter(|contract| {
-                    prepared_prompt
-                        .tool_definitions
-                        .iter()
-                        .any(|definition| definition.name == contract.name)
-                })
-                .collect(),
+            tool_contracts,
             execution_tools,
             prepared_prompt,
+            session_config,
+            prompt_usage_basis,
+            context_was_compacted,
             observations,
             live_content_prefix: input
                 .output_token_recovery_partial()
                 .unwrap_or_default()
                 .into(),
         };
-        projection_span.complete();
         validate_model_input_budget(
-            request.context_token_estimate,
+            admission_estimate,
             self.config.model_context_tokens,
             self.config.model_max_output_tokens,
         )?;
@@ -637,19 +808,20 @@ impl<
             self.stage_generate_driver_input_messages(&mut session, session_id, turn_id, input)?;
         if input_changed || prepared_inputs.is_some() {
             // The immutable body and its intake membership share one snapshot write.
-            self.session_manager.save_session(&session)?;
+            self.session_manager.save_session_owned(session)?;
         }
         Ok(request)
     }
 
-    fn estimate_generate_prompt_input_tokens(
+    fn prepare_generate_prompt(
         &self,
         session: &SessionStateSnapshot,
         session_id: &str,
         turn_id: &str,
         input: &TurnInput,
         prepared_agents: &mut Option<PreparedAgentsInstructions>,
-    ) -> Result<u32, String> {
+        session_config: Option<crate::model::ModelSessionConfig>,
+    ) -> Result<(GeneratePromptProjection, u32), String> {
         let estimate_span = RequestPreparationSpan::new(
             self.request_preparation_observer.as_ref(),
             RequestPreparationStage::Estimate,
@@ -661,27 +833,20 @@ impl<
         )?;
         let result = self
             .project_generate_prompt_from_session(
-                session.clone(),
+                session,
                 session_id,
                 turn_id,
                 input,
                 prepared_agents,
-                &self.tools_port,
+                session_config,
             )
-            .and_then(|projection| {
-                let estimate = u64::from(
-                    estimate_prepared_prompt_input_tokens(&projection.prepared_prompt)?
-                        .saturating_add(
-                            (projection.image_observations.len() as u32).saturating_mul(1_024),
-                        ),
+            .map(|projection| {
+                let estimate = self.estimate_generate_prompt_admission_tokens(
+                    session,
+                    projection.prompt_usage_basis.as_ref(),
+                    projection.raw_input_token_estimate,
                 );
-                let scale = u64::from(self.config.prompt_token_estimate_scale_basis_points);
-                Ok(estimate
-                    .saturating_mul(scale)
-                    .saturating_add(9_999)
-                    .checked_div(10_000)
-                    .unwrap_or(estimate)
-                    .min(u64::from(u32::MAX)) as u32)
+                (projection, estimate)
             });
         if result.is_ok() {
             estimate_span.complete();
@@ -691,19 +856,43 @@ impl<
 
     fn project_generate_prompt_from_session(
         &self,
-        mut session: SessionStateSnapshot,
+        session: &SessionStateSnapshot,
         session_id: &str,
         turn_id: &str,
         input: &TurnInput,
         prepared_agents: &mut Option<PreparedAgentsInstructions>,
-        execution_tools: &ToolLayer,
+        session_config: Option<crate::model::ModelSessionConfig>,
     ) -> Result<GeneratePromptProjection, String> {
+        let projection_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::Projection,
+            turn_id,
+        );
+        let execution_tools = self.tools_port.clone();
         let answer_now = input.answer_now_intervention().is_some();
-        let (tool_definitions, _) = if answer_now {
-            (Vec::new(), String::new())
+        let tool_contracts = if answer_now {
+            Vec::new()
         } else {
-            self.build_generate_tool_projection_with_tools(&session, execution_tools)?
+            self.model_tool_contracts_for(&execution_tools)?
         };
+        if self.config.question_input == question::QuestionInputCapability::PersistentResponses
+            && self.config.allowed_tools.is_none()
+            && tool_contracts
+                .iter()
+                .filter(|contract| contract.name == question::TOOL_NAME)
+                .count()
+                > 1
+        {
+            return Err("reserved_user_input_tool_collision".into());
+        }
+        let tool_definitions = tool_contracts
+            .iter()
+            .map(|contract| ModelToolDefinition {
+                name: contract.name.clone(),
+                description: contract.summary.clone(),
+                input_schema: contract.input_schema.clone(),
+            })
+            .collect::<Vec<_>>();
         let (system_prompt, system_prompt_manifest_json) =
             if self.config.enable_system_prompt_template {
                 let (content, manifest_json) =
@@ -717,7 +906,7 @@ impl<
             session.context_window.as_slice(),
             &session.model_semantics,
         )?;
-        crate::runtime::context_window::validate_context_window_materialization(&session)?;
+        crate::runtime::context_window::validate_context_window_materialization(session)?;
         let (context_messages, runtime_context_anchor_message_id) = build_model_context_messages(
             session.context_window.as_slice(),
             match input {
@@ -739,26 +928,24 @@ impl<
                     .map(|message| build_input_user_message(session_id, turn_id, input, message)),
             },
         )?;
-        for message in &context_messages {
-            if session
-                .model_semantics
-                .contains_key(message.message_id.as_str())
-            {
-                continue;
-            }
-            if !matches!(message.role, MessageRole::System | MessageRole::User) {
-                return Err(format!(
-                    "model_message_semantics_missing: messageId={}",
-                    message.message_id
-                ));
-            }
-            session.model_semantics.insert(
-                message.message_id.clone(),
-                crate::session::state::ModelMessageSemanticsV1::Plain,
-            );
-        }
-        let model_messages =
-            project_session_messages_to_model_messages(&session, context_messages.as_slice())?;
+        let model_messages = context_messages
+            .iter()
+            .map(|message| {
+                let semantics = match session.model_semantics.get(&message.message_id) {
+                    Some(semantics) => semantics,
+                    None if matches!(message.role, MessageRole::System | MessageRole::User) => {
+                        &ModelMessageSemanticsV1::Plain
+                    }
+                    None => {
+                        return Err(format!(
+                            "model_message_semantics_missing: messageId={}",
+                            message.message_id,
+                        ));
+                    }
+                };
+                project_chat_message_to_model_message(message, semantics)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let (mut model_messages, image_observations) =
             project_model_input_images(context_messages.as_slice(), model_messages)?;
         let insertion_index = model_messages
@@ -790,7 +977,7 @@ impl<
         let revision = self.tools_port.context_observation_revision();
         let agents_instructions = if let Some(prepared) = prepared_agents
             .as_ref()
-            .filter(|prepared| Some(prepared.revision) == revision)
+            .filter(|prepared| prepared.revision == revision)
         {
             let reuse_span = RequestPreparationSpan::new(
                 self.request_preparation_observer.as_ref(),
@@ -798,6 +985,9 @@ impl<
                 turn_id,
             );
             let instructions = prepared.instructions.clone();
+            if revision.is_none() {
+                *prepared_agents = None;
+            }
             reuse_span.complete();
             instructions
         } else {
@@ -813,11 +1003,12 @@ impl<
                     Some(*revision) == self.tools_port.context_observation_revision()
                 })
                 .map(|revision| PreparedAgentsInstructions {
-                    revision,
+                    revision: Some(revision),
                     instructions: instructions.clone(),
                 });
             instructions
         };
+        let agents_observation = agents_instructions.clone();
         let agents_context_message = match (self.tools_port.cwd(), agents_instructions) {
             (Some(cwd), Some((instructions, _file_hash))) => {
                 Some(prompt_projection::build_agents_context_message(
@@ -911,13 +1102,99 @@ impl<
             agent_instructions_hash.as_deref(),
             &self.config,
         )?;
+        let prompt_usage_basis = super::prompt_usage::PromptUsageBasisV1::from_prompt_with_images(
+            &prepared_prompt,
+            session_config.as_ref(),
+            &image_observations,
+        )?;
+        let raw_input_token_estimate = prompt_usage_basis.estimated_input_tokens();
+        let prompt_usage_basis = Some(prompt_usage_basis);
+        projection_span.complete();
         Ok(GeneratePromptProjection {
-            session,
             prepared_prompt,
+            execution_tools,
+            tool_contracts,
+            session_config,
+            raw_input_token_estimate,
+            prompt_usage_basis,
+            context_was_compacted: false,
+            source_context_revision: session.context_revision()?,
+            input: input.clone(),
+            observation_revision: revision,
+            agents_instructions: agents_observation,
+            skill_catalog_revision: self.tools_port.skill_index().snapshot().catalog_hash,
             image_observations,
             provider_prompt_cache_key,
             system_prompt_manifest_json,
         })
+    }
+
+    fn estimate_generate_prompt_admission_tokens(
+        &self,
+        session: &SessionStateSnapshot,
+        basis: Option<&super::prompt_usage::PromptUsageBasisV1>,
+        raw_estimate: u32,
+    ) -> u32 {
+        if let (Some(anchor), Some(basis)) = (&session.history.prompt_usage_anchor, basis) {
+            if let Some(estimate) = anchor.estimate(basis) {
+                return estimate;
+            }
+        }
+        u64::from(raw_estimate)
+            .saturating_mul(u64::from(
+                self.config.prompt_token_estimate_scale_basis_points,
+            ))
+            .saturating_add(9999)
+            .checked_div(10000)
+            .unwrap_or(u64::from(raw_estimate))
+            .min(u64::from(u32::MAX)) as u32
+    }
+
+    fn generate_projection_is_current(
+        &self,
+        projection: &GeneratePromptProjection,
+        session: &SessionStateSnapshot,
+        input: &TurnInput,
+        session_config: &Option<crate::model::ModelSessionConfig>,
+        turn_id: &str,
+        prepared_agents: &mut Option<PreparedAgentsInstructions>,
+    ) -> Result<bool, String> {
+        if projection.session_config != *session_config
+            || projection.source_context_revision != session.history.context_revision
+            || projection.input != *input
+            || !Arc::ptr_eq(
+                &projection.execution_tools.dynamic_tool_registry(),
+                &self.tools_port.dynamic_tool_registry(),
+            )
+            || projection.skill_catalog_revision
+                != self.tools_port.skill_index().snapshot().catalog_hash
+        {
+            return Ok(false);
+        }
+        let revision = self.tools_port.context_observation_revision();
+        if projection.observation_revision != revision {
+            return Ok(false);
+        }
+        if revision.is_some() {
+            return Ok(true);
+        }
+        // Without a Host revision the source must be read again, but an unchanged
+        // observation can still reuse the already constructed model projection.
+        let read_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::AgentsInstructionsRead,
+            turn_id,
+        );
+        let instructions = self.tools_port.read_agents_instructions()?;
+        read_span.complete();
+        let unchanged = instructions == projection.agents_instructions;
+        if !unchanged {
+            *prepared_agents = Some(PreparedAgentsInstructions {
+                revision: None,
+                instructions,
+            });
+        }
+        Ok(unchanged)
     }
 
     fn resolve_model_input_images(
@@ -1041,7 +1318,9 @@ impl<
             }
         };
         Ok(match resolved {
-            Ok(bytes) => ResolvedImageSource::Available(content_type.clone(), placeholder.clone(), bytes),
+            Ok(bytes) => {
+                ResolvedImageSource::Available(content_type.clone(), placeholder.clone(), bytes)
+            }
             Err(error) => ResolvedImageSource::Unavailable(format!(
                 "{placeholder} Image observation unavailable: {label}. {error}. The original pixels are not included in this request; re-read the source if needed."
             )),
@@ -1265,6 +1544,48 @@ impl<
             session_id,
             &recovery.snapshot,
             &recovery.tool_call_origins,
+            (trigger_agent_run_id, trigger_turn_id),
+            expected_session_sequence,
+            now_ms,
+        )
+    }
+
+    /// Plans admission using a verified working snapshot and original call records.
+    /// Callers retain all matching origins, including closed or tombstoned calls,
+    /// so reused call identities remain ambiguous rather than selecting one.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "admission binds the verified snapshot and original call records to its trigger"
+    )]
+    pub fn plan_new_user_turn_closures_with_verified_snapshot(
+        &self,
+        session_id: &str,
+        snapshot: &SessionStateSnapshot,
+        tool_call_records: &[crate::session::SessionLogRecord],
+        trigger_agent_run_id: &str,
+        trigger_turn_id: &str,
+        expected_session_sequence: u64,
+        now_ms: i64,
+    ) -> Result<crate::runtime::contracts::NewUserTurnClosurePlanV1, String> {
+        if snapshot.session_id != session_id {
+            return Err("closure_planner_snapshot_session_mismatch".into());
+        }
+        if tool_call_records.iter().any(|record| {
+            record.event_type != crate::session::SessionRecordType::ToolCall
+                || record.session_id != session_id
+        }) {
+            return Err("closure_planner_tool_call_source_mismatch".into());
+        }
+        let origins = tool_call_records
+            .iter()
+            .filter_map(|record| {
+                crate::session::recovery::ToolCallRecoveryOrigin::from_record(record).transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.plan_new_user_turn_closures_with_snapshot(
+            session_id,
+            snapshot,
+            &origins,
             (trigger_agent_run_id, trigger_turn_id),
             expected_session_sequence,
             now_ms,
@@ -1669,35 +1990,8 @@ fn project_model_input_images(
 pub(super) fn estimate_prepared_prompt_input_tokens(
     prepared_prompt: &PreparedPromptV1,
 ) -> Result<u32, String> {
-    let system_tokens = prepared_prompt
-        .system_prompt
-        .as_deref()
-        .map(crate::model::prepared_prompt::estimate_text_tokens)
-        .unwrap_or_default();
-    let context_tokens = prepared_prompt
-        .messages
-        .iter()
-        .try_fold(0u32, |total, message| {
-            let serialized = serde_json::to_string(message).map_err(|error| {
-                format!("serialize model message for context budget failed: {error}")
-            })?;
-            Ok::<u32, String>(total.saturating_add(
-                crate::model::prepared_prompt::estimate_text_tokens(serialized.as_str()),
-            ))
-        })?;
-    let tool_schema_tokens = if prepared_prompt.tool_definitions.is_empty() {
-        0
-    } else {
-        let serialized =
-            serde_json::to_string(&prepared_prompt.tool_definitions).map_err(|error| {
-                format!("serialize model tool definitions for context budget failed: {error}")
-            })?;
-        crate::model::prepared_prompt::estimate_text_tokens(serialized.as_str())
-    };
-    Ok(system_tokens
-        .saturating_add(context_tokens)
-        .saturating_add(tool_schema_tokens)
-        .saturating_add((prepared_prompt.input_images.len() as u32).saturating_mul(1_024)))
+    crate::model::prepared_prompt::estimate_prepared_prompt_tokens(prepared_prompt, None)
+        .map(|estimate| estimate.total_tokens())
 }
 
 fn validate_model_input_budget_config(
@@ -1760,9 +2054,12 @@ mod tests {
             assert_eq!(result.status, "blocked");
             assert_eq!(result.details["reason"], expected_reason);
             assert_eq!(result.transition_reason.as_deref(), Some(expected_reason));
-            assert_eq!(result.details["message"], format!(
-                "The previous tool call had no recorded tool result before {trigger} started; the tool call was not executed by this recovery step."
-            ));
+            assert_eq!(
+                result.details["message"],
+                format!(
+                    "The previous tool call had no recorded tool result before {trigger} started; the tool call was not executed by this recovery step."
+                )
+            );
         }
     }
 }

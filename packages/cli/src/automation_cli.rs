@@ -1,7 +1,7 @@
 use centaeris_desktop_services::rpc_client::RuntimeClient;
 use serde_json::{json, Value};
 
-pub(crate) const HELP: &str = "centa ssh connect <host>\ncenta ssh exec <host> <remote-command>\ncenta schedule list [cursor]\ncenta schedule create <spec.json> <operationId>\ncenta schedule update <scheduleId> <revision> <spec.json>\ncenta schedule pause|resume|delete <scheduleId>\ncenta schedule history <scheduleId> [cursor]\ncenta schedule run <scheduleId> <operationId>\ncenta schedule service start|stop";
+pub(crate) const HELP: &str = "cet ssh connect <host>\ncenta ssh exec <host> <remote-command>\ncenta schedule list [cursor]\ncenta schedule create <spec.json> <operationId>\ncenta schedule update <scheduleId> <revision> <spec.json>\ncenta schedule pause|resume|delete <scheduleId>\ncenta schedule history <scheduleId> [cursor]\ncenta schedule run <scheduleId> <operationId>\ncenta schedule service start|stop";
 
 pub(crate) fn schedule_request(args: &[String]) -> Result<Value, String> {
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();

@@ -42,7 +42,7 @@ This source matrix does not produce installers or claim desktop packaging suppor
 
 The Desktop command builds the UI, release Runtime, Electron directory, and
 license payload, then checks Runtime freshness and identity. The TUI command
-builds `centa.exe`, the matching Runtime, licenses, built-in System Skills, and
+builds `cet.exe`, the matching Runtime, licenses, built-in System Skills, and
 the package manifest before creating the Windows archive.
 
 Do not advertise an artifact for a platform that is absent from this build

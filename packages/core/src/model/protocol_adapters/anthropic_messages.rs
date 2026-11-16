@@ -149,6 +149,7 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
         let tool_calls = extract_anthropic_tool_calls(parsed.content.as_slice())?;
         validate_provider_tool_call_arguments("anthropic-messages", &tool_calls)?;
         let usage = parsed.usage.as_ref();
+        let input_tokens = usage.and_then(anthropic_input_tokens);
         Ok(ModelClientResponse {
             request_timings: None,
             generate_result: GenerateResult {
@@ -157,13 +158,9 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
                 continuation_reasoning_content: preserve_content_blocks
                     .then(|| serde_json::to_string(&raw_content).expect("valid content blocks")),
                 reasoning_content: extract_anthropic_reasoning(parsed.content.as_slice())?,
-                input_tokens: usage.and_then(|item| item.input_tokens),
-                total_tokens: usage.and_then(|item| {
-                    match (item.input_tokens, item.output_tokens) {
-                        (Some(input), Some(output)) => Some(input + output),
-                        _ => None,
-                    }
-                }),
+                input_tokens,
+                total_tokens: input_tokens
+                    .and_then(|input| input.checked_add(usage?.output_tokens?)),
                 prompt_cache_hit_tokens: usage.and_then(|item| item.cache_read_input_tokens),
                 prompt_cache_miss_tokens: usage.and_then(anthropic_cache_miss_tokens),
             },
@@ -670,6 +667,23 @@ fn is_minimax_provider(provider_id: &str) -> bool {
     matches!(provider_id, "minimax.default" | "minimax-cn.default")
 }
 
+pub(super) fn minimax_replayed_thinking_bytes(
+    provider_id: &str,
+    raw: &str,
+) -> Result<Option<usize>, ModelClientError> {
+    if !is_minimax_provider(provider_id) {
+        return Ok(None);
+    }
+    let blocks = parse_minimax_content_blocks(raw)?;
+    blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("thinking"))
+        .try_fold(0usize, |bytes, block| {
+            anthropic_thinking_text(block).map(|text| bytes.saturating_add(text.len()))
+        })
+        .map(Some)
+}
+
 fn parse_minimax_content_blocks(raw: &str) -> Result<Vec<Value>, ModelClientError> {
     let blocks = serde_json::from_str::<Vec<Value>>(raw).map_err(|_| {
         invalid_openai_compatible_request(
@@ -949,7 +963,19 @@ impl AnthropicMessagesStreamState {
                     .get("usage")
                     .and_then(|item| serde_json::from_value::<AnthropicUsage>(item.clone()).ok())
                 {
-                    self.usage = Some(usage);
+                    if let Some(current) = &mut self.usage {
+                        // Stream usage fields are cumulative, and may omit unchanged input buckets.
+                        current.input_tokens = usage.input_tokens.or(current.input_tokens);
+                        current.output_tokens = usage.output_tokens.or(current.output_tokens);
+                        current.cache_creation_input_tokens = usage
+                            .cache_creation_input_tokens
+                            .or(current.cache_creation_input_tokens);
+                        current.cache_read_input_tokens = usage
+                            .cache_read_input_tokens
+                            .or(current.cache_read_input_tokens);
+                    } else {
+                        self.usage = Some(usage);
+                    }
                 }
                 Vec::new()
             }
@@ -1117,12 +1143,15 @@ fn truncated_anthropic_tool_calls(content: &[Value]) -> Vec<TruncatedToolCall> {
         .collect()
 }
 
+fn anthropic_input_tokens(usage: &AnthropicUsage) -> Option<i64> {
+    // Anthropic's uncached, cache-write, and cache-read input buckets are disjoint.
+    anthropic_cache_miss_tokens(usage)?.checked_add(usage.cache_read_input_tokens.unwrap_or(0))
+}
+
 pub(super) fn anthropic_cache_miss_tokens(usage: &AnthropicUsage) -> Option<i64> {
-    usage.cache_creation_input_tokens.or_else(|| {
-        let input_tokens = usage.input_tokens?;
-        let cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
-        Some(input_tokens.saturating_sub(cache_read_tokens))
-    })
+    usage
+        .input_tokens?
+        .checked_add(usage.cache_creation_input_tokens.unwrap_or(0))
 }
 
 pub(super) fn reject_anthropic_stop_reason(
