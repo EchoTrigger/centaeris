@@ -75,6 +75,7 @@ pub use self::lifecycle_hooks_runtime::{
 };
 pub use self::loop_runtime::persist_answer_now_requested_fact;
 use self::prompt_compaction_metadata::*;
+pub use self::prompt_projection::driver_user_message_id;
 use self::provider_polling::*;
 pub use self::request_preparation::{
     RequestPreparationObserver, RequestPreparationStage, RequestPreparationTiming,
