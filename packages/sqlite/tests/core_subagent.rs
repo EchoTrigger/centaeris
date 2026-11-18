@@ -290,7 +290,7 @@ fn store_valid_subagent_work_packet(
         "run_context": {
             "schema": "agent_run_context_v1",
             "sessionId": "chat-resource-claim",
-            "branchId": "turn-resource-claim",
+            "branchId": format!("session-resource-fixture:{object_id}"),
             "turnId": "turn-resource-claim:subagent-test",
             "agentRunId": "agent-run-subagent-resource-claim",
             "agentRef": {

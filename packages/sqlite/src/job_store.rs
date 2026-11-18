@@ -445,6 +445,22 @@ impl AsyncJobStorePort for SqliteJobStore {
         })
         .await
     }
+    async fn request_subagent_job_cancellation(
+        &self,
+        req: RequestSubagentJobCancellation,
+    ) -> Result<SubagentJobCancellationReceipt, JobStoreError> {
+        self.execute(JobStoreOperation::Cancel, move |conn, observe| {
+            sqlite_reliability::request_subagent_job_cancellation_conn(conn, req, observe)
+        })
+        .await
+    }
+    async fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, JobStoreError> {
+        let job_id = job_id.to_owned();
+        self.execute(JobStoreOperation::Read, move |conn, _| {
+            sqlite_reliability::subagent_job_cancellation_requested_conn(conn, &job_id)
+        })
+        .await
+    }
     async fn reclaim_expired_runtime_job_leases(
         &self,
         now_ms: i64,

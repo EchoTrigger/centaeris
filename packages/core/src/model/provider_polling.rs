@@ -962,6 +962,15 @@ mod tests {
         fn cancel_runtime_job(&self, _req: CancelRuntimeJobRequest) -> Result<(), String> {
             panic!("unexpected provider polling store call")
         }
+        fn request_subagent_job_cancellation(
+            &self,
+            _req: crate::session::reliability::RequestSubagentJobCancellation,
+        ) -> Result<crate::session::reliability::SubagentJobCancellationReceipt, String> {
+            panic!("unexpected provider polling store call")
+        }
+        fn subagent_job_cancellation_requested(&self, _job_id: &str) -> Result<bool, String> {
+            panic!("unexpected provider polling store call")
+        }
         fn reclaim_expired_runtime_job_leases(
             &self,
             _now_ms: TimestampMs,

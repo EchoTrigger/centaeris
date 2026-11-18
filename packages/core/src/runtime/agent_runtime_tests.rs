@@ -111,6 +111,7 @@ struct AgentRuntimeTestState {
     external_objects: HashMap<String, ExternalContextObject>,
     external_links: Vec<ExternalContextObjectLink>,
     jobs: HashMap<String, RuntimeJobRecord>,
+    subagent_cancel_requests: HashSet<String>,
     dead_letters: HashMap<String, crate::session::reliability::DeadLetterRecord>,
 }
 
@@ -226,6 +227,19 @@ impl crate::session::store::AsyncJobStorePort for AgentRuntimeTestStore {
                 )
             },
         )
+    }
+    async fn request_subagent_job_cancellation(
+        &self,
+        req: crate::session::reliability::RequestSubagentJobCancellation,
+    ) -> Result<crate::session::reliability::SubagentJobCancellationReceipt, crate::session::store::job::JobStoreError> {
+        RuntimeJobStorePort::request_subagent_job_cancellation(self, req).map_err(Into::into)
+    }
+
+    async fn subagent_job_cancellation_requested(
+        &self,
+        job_id: &str,
+    ) -> Result<bool, crate::session::store::job::JobStoreError> {
+        RuntimeJobStorePort::subagent_job_cancellation_requested(self, job_id).map_err(Into::into)
     }
     async fn reclaim_expired_runtime_job_leases(
         &self,
@@ -1105,6 +1119,36 @@ impl crate::session::reliability::RuntimeJobStorePort for AgentRuntimeTestStore 
             job.updated_at_ms = request.cancelled_at_ms;
         }
         Ok(())
+    }
+
+    fn request_subagent_job_cancellation(
+        &self,
+        request: crate::session::reliability::RequestSubagentJobCancellation,
+    ) -> Result<crate::session::reliability::SubagentJobCancellationReceipt, String> {
+        use crate::session::reliability::{SubagentJobCancellationReceipt, SUBAGENT_CANCEL_REASON};
+        let mut state = self.state()?;
+        let job = state.jobs.get(&request.job_id)
+            .filter(|job| job.session_id.as_deref() == Some(request.session_id.as_str())
+                && job.job_kind == SUBAGENT_RUN_JOB_KIND)
+            .ok_or("subagent Job is missing from the Session")?;
+        let receipt = SubagentJobCancellationReceipt::decide(
+            job.status.clone(),
+            state.subagent_cancel_requests.contains(&request.job_id),
+        );
+        if receipt.accepted {
+            state.subagent_cancel_requests.insert(request.job_id.clone());
+            if receipt.status == RuntimeJobStatus::Cancelled {
+                let job = state.jobs.get_mut(&request.job_id).expect("checked Job");
+                job.status = RuntimeJobStatus::Cancelled;
+                job.last_error = Some(SUBAGENT_CANCEL_REASON.into());
+                job.updated_at_ms = request.requested_at_ms;
+            }
+        }
+        Ok(receipt)
+    }
+
+    fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, String> {
+        Ok(self.state()?.subagent_cancel_requests.contains(job_id))
     }
 
     fn reclaim_expired_runtime_job_leases(&self, now_ms: i64) -> Result<usize, String> {

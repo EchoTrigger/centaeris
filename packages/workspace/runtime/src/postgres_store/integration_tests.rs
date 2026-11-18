@@ -1940,6 +1940,73 @@ fn postgres_same_worker_reclaim_fences_old_writes_and_result_transaction() {
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_subagent_cancellation_obeys_authoritative_completion_order() {
+    use centaeris_core::runtime::subagent::SUBAGENT_RUN_JOB_KIND;
+    use centaeris_core::session::reliability::{
+        RequestSubagentJobCancellation, SubagentJobCancellationReceipt, SUBAGENT_CANCEL_REASON,
+    };
+    use centaeris_core::session::store::UpsertExternalContextLinkAndCompleteJobRequest;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+
+    for (id, completed_first) in [("completed-first", true), ("cancel-requested-first", false)] {
+        let mut job = job(id, id);
+        job.job_kind = SUBAGENT_RUN_JOB_KIND.into();
+        job.status = RuntimeJobStatus::Running;
+        job.lease_owner = Some("active-claim".into());
+        job.lease_expires_at_ms = Some(200);
+        let session_id = job.session_id.clone().expect("fixture Session");
+        store.schedule_runtime_job(ScheduleRuntimeJobRequest { job }).unwrap();
+        let complete = || UpsertExternalContextLinkAndCompleteJobRequest {
+            object: None,
+            link: None,
+            complete_job: CompleteRuntimeJobRequest {
+                job_id: id.into(),
+                lease_owner: "active-claim".into(),
+                output_refs: vec!["original-result".into()],
+                completed_at_ms: 120,
+            },
+        };
+        assert_eq!(store.get_runtime_job(id).unwrap().unwrap().status, RuntimeJobStatus::Running);
+        if completed_first {
+            store.upsert_external_context_link_and_complete_job(complete()).unwrap();
+        }
+        let receipt = store.request_subagent_job_cancellation(RequestSubagentJobCancellation {
+            job_id: id.into(),
+            session_id,
+            requested_at_ms: 121,
+        }).unwrap();
+        let job = store.get_runtime_job(id).unwrap().unwrap();
+        if completed_first {
+            assert_eq!(receipt, SubagentJobCancellationReceipt {
+                accepted: false, status: RuntimeJobStatus::Succeeded
+            });
+            assert_eq!(job.output_refs, ["original-result"]);
+        } else {
+            assert_eq!(receipt, SubagentJobCancellationReceipt {
+                accepted: true, status: RuntimeJobStatus::Running
+            });
+            assert_eq!(job.lease_owner.as_deref(), Some("active-claim"));
+            assert!(store.upsert_external_context_link_and_complete_job(complete()).is_err());
+            store.cancel_runtime_job(CancelRuntimeJobRequest {
+                job_id: id.into(),
+                expected_lease_owner: Some("active-claim".into()),
+                expected_status: Some(RuntimeJobStatus::Running),
+                reason: SUBAGENT_CANCEL_REASON.into(),
+                cancelled_at_ms: 130,
+            }).unwrap();
+            let stopped = store.get_runtime_job(id).unwrap().unwrap();
+            assert_eq!(stopped.status, RuntimeJobStatus::Cancelled);
+            assert!(stopped.output_refs.is_empty());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_worker_cancel_checks_claim_but_user_cancel_targets_job() {
     let _guard = TEST_LOCK.lock().unwrap();
     let url = test_url();

@@ -1,19 +1,23 @@
 use super::*;
+use centaeris_core::runtime::contracts::{EventVisibility, RuntimeEvent};
+use centaeris_core::runtime::subagent::SUBAGENT_RUN_JOB_KIND;
 use centaeris_core::session::reliability::{
-    AcquireResourceClaimDisposition, AcquireResourceClaimRequest, AcquireResourceClaimResult,
+    subagent_cancel_request_id, AcquireResourceClaimDisposition, AcquireResourceClaimRequest,
+    AcquireResourceClaimResult,
     CancelRuntimeJobRequest, ClaimDueRuntimeJobsRequest, CompleteRuntimeJobRequest,
     CreateDeadLetterDisposition, CreateDeadLetterRequest, CreateDeadLetterResult, DeadLetterRecord,
     DeadLetterReplayPolicy, DeadLetterStatus, DeadLetterStorePort, DismissDeadLetterRequest,
     FailRuntimeJobRequest, ListDeadLettersRequest, ListRuntimeJobsRequest,
     MarkDeadLetterReplayedRequest, MarkDeadLetterReplayingRequest, ReleaseResourceClaimRequest,
     RenewRuntimeJobLeaseRequest, ReplayDeadLetterRequest, ReplayDeadLetterResult,
-    ResourceClaimRecord, ResourceClaimStorePort, RuntimeBackoffPolicy,
+    RequestSubagentJobCancellation, ResourceClaimRecord, ResourceClaimStorePort, RuntimeBackoffPolicy,
     RuntimeJobFailureDisposition, RuntimeJobLeaseReclaimPolicy, RuntimeJobOutboxPort,
     RuntimeJobOutboxPublishDisposition, RuntimeJobOutboxRecord, RuntimeJobRecord, RuntimeJobStatus,
     RuntimeJobStorePort, ScheduleRuntimeJobDisposition, ScheduleRuntimeJobRequest,
-    ScheduleRuntimeJobResult, StartRuntimeJobRequest, WakeRuntimeJobDisposition,
-    WakeRuntimeJobRequest, YieldRuntimeJobRequest, RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT,
-    RUNTIME_JOB_TERMINAL_EVENT,
+    ScheduleRuntimeJobResult, StartRuntimeJobRequest, SubagentJobCancellationReceipt,
+    WakeRuntimeJobDisposition, WakeRuntimeJobRequest, YieldRuntimeJobRequest,
+    RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT, RUNTIME_JOB_TERMINAL_EVENT, SUBAGENT_CANCEL_REASON,
+    SUBAGENT_CANCEL_REQUESTED_EVENT,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, OptionalExtension};
@@ -317,6 +321,17 @@ impl RuntimeJobStorePort for SqliteRuntimeStore {
 
     fn cancel_runtime_job(&self, req: CancelRuntimeJobRequest) -> Result<(), String> {
         self.with_conn(|conn| cancel_runtime_job_transaction_conn(conn, req, &mut |_| {}))
+    }
+
+    fn request_subagent_job_cancellation(
+        &self,
+        req: RequestSubagentJobCancellation,
+    ) -> Result<SubagentJobCancellationReceipt, String> {
+        self.with_conn(|conn| request_subagent_job_cancellation_conn(conn, req, &mut |_| {}))
+    }
+
+    fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, String> {
+        self.with_conn(|conn| subagent_job_cancellation_requested_conn(conn, job_id))
     }
 
     fn reclaim_expired_runtime_job_leases(
@@ -1285,6 +1300,7 @@ pub(super) fn complete_runtime_job_conn(
               AND lease_owner = ?5
               AND status IN ('leased', 'running')
               AND lease_expires_at_ms > ?3
+              AND NOT EXISTS (SELECT 1 FROM runtime_events WHERE event_id = ?6 AND event_type = ?7)
             ",
             params![
                 runtime_job_status_to_db(&RuntimeJobStatus::Succeeded),
@@ -1292,6 +1308,8 @@ pub(super) fn complete_runtime_job_conn(
                 req.completed_at_ms,
                 req.job_id.as_str(),
                 req.lease_owner.as_str(),
+                subagent_cancel_request_id(&req.job_id),
+                SUBAGENT_CANCEL_REQUESTED_EVENT,
             ],
         )
         .map_err(|err| format!("complete_runtime_job failed: {err}"))?;
@@ -1338,6 +1356,7 @@ pub(super) fn fail_runtime_job_conn(
               AND lease_owner = ?6
               AND status IN ('leased', 'running')
               AND lease_expires_at_ms > ?4
+              AND NOT EXISTS (SELECT 1 FROM runtime_events WHERE event_id = ?7 AND event_type = ?8)
             ",
             params![
                 runtime_job_status_to_db(&next_status),
@@ -1346,6 +1365,8 @@ pub(super) fn fail_runtime_job_conn(
                 req.failed_at_ms,
                 req.job_id.as_str(),
                 req.lease_owner.as_str(),
+                subagent_cancel_request_id(&req.job_id),
+                SUBAGENT_CANCEL_REQUESTED_EVENT,
             ],
         )
         .map_err(|err| format!("fail_runtime_job failed: {err}"))?;
@@ -1374,7 +1395,7 @@ pub(super) fn reclaim_expired_runtime_job_leases_conn(
     observe(TransactionEvent::Began);
     let result = (|| {
         let expired = {
-            let mut stmt = tx.prepare("SELECT job_id,session_id,lease_owner,lease_reclaim_count,status,last_error FROM runtime_jobs WHERE status IN ('leased','running') AND lease_expires_at_ms<=?1 ORDER BY lease_expires_at_ms,job_id LIMIT ?2")
+            let mut stmt = tx.prepare("SELECT job_id,session_id,lease_owner,lease_reclaim_count,status,last_error,job_kind FROM runtime_jobs WHERE status IN ('leased','running') AND lease_expires_at_ms<=?1 ORDER BY lease_expires_at_ms,job_id LIMIT ?2")
                     .map_err(|error| format!("select expired leases failed: {error}"))?;
             let rows = stmt
                 .query_map(
@@ -1387,6 +1408,7 @@ pub(super) fn reclaim_expired_runtime_job_leases_conn(
                             row.get::<_, i64>(3)?,
                             row.get::<_, String>(4)?,
                             row.get::<_, Option<String>>(5)?,
+                            row.get::<_, String>(6)?,
                         ))
                     },
                 )
@@ -1395,9 +1417,20 @@ pub(super) fn reclaim_expired_runtime_job_leases_conn(
                 .map_err(|error| format!("decode expired leases failed: {error}"))?
         };
         let policy = RuntimeJobLeaseReclaimPolicy::default();
-        for (job_id, session_id, lease_owner, previous_count, status, prior_error) in &expired {
+        for (job_id, session_id, lease_owner, previous_count, status, prior_error, job_kind) in &expired {
             let prior_status =
                 runtime_job_status_from_db(status).map_err(|error| error.to_string())?;
+            if job_kind == SUBAGENT_RUN_JOB_KIND
+                && subagent_job_cancellation_requested_conn(&tx, job_id)?
+            {
+                // A lost claim prevents replay but does not attest process exit.
+                tx.execute(
+                    "UPDATE runtime_jobs SET status='failed',updated_at_ms=?1,lease_owner=NULL,lease_expires_at_ms=NULL,heartbeat_at_ms=NULL,last_error=?2 WHERE job_id=?3",
+                    params![now_ms, centaeris_core::session::reliability::SUBAGENT_CANCEL_UNCONFIRMED, job_id],
+                ).map_err(|error| format!("fail expired subagent cancellation failed: {error}"))?;
+                upsert_runtime_job_outbox_event(&tx, job_id, RUNTIME_JOB_TERMINAL_EVENT)?;
+                continue;
+            }
             let decision = policy.decide(
                 job_id,
                 u32::try_from(*previous_count).map_err(|error| error.to_string())?,
@@ -1622,10 +1655,89 @@ pub(super) fn cancel_runtime_job_transaction_conn(
         tx,
         "commit cancel_runtime_job transaction failed",
         observe,
+        |tx| cancel_runtime_job_and_enqueue_terminal(tx, &req),
+    )
+}
+
+fn cancel_runtime_job_and_enqueue_terminal(
+    conn: &rusqlite::Connection,
+    req: &CancelRuntimeJobRequest,
+) -> Result<(), String> {
+    cancel_runtime_job_conn(conn, req)?;
+    upsert_runtime_job_outbox_event(conn, &req.job_id, RUNTIME_JOB_TERMINAL_EVENT)
+}
+
+pub(super) fn subagent_job_cancellation_requested_conn(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE event_id = ?1 AND event_type = ?2)",
+        params![
+            subagent_cancel_request_id(job_id),
+            SUBAGENT_CANCEL_REQUESTED_EVENT
+        ],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("read subagent job cancellation request failed: {error}"))
+}
+
+pub(super) fn request_subagent_job_cancellation_conn(
+    conn: &mut rusqlite::Connection,
+    req: RequestSubagentJobCancellation,
+    observe: &mut dyn FnMut(super::sqlite_transactions::TransactionEvent),
+) -> Result<SubagentJobCancellationReceipt, String> {
+    // Hold the write reservation while choosing between completion and cancellation.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| {
+            super::sqlite_transactions::observe_sqlite_error(observe, &error);
+            format!("begin subagent job cancellation request failed: {error}")
+        })?;
+    super::sqlite_transactions::commit_job_write(
+        tx,
+        "commit subagent job cancellation request failed",
+        observe,
         |tx| {
-            cancel_runtime_job_conn(tx, &req)?;
-            upsert_runtime_job_outbox_event(tx, req.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
-            Ok(())
+            let status = tx.query_row(
+                "SELECT status FROM runtime_jobs WHERE job_id = ?1 AND session_id = ?2 AND job_kind = ?3",
+                params![req.job_id, req.session_id, SUBAGENT_RUN_JOB_KIND],
+                |row| row.get::<_, String>(0),
+            ).optional().map_err(|error| format!("read subagent job to cancel failed: {error}"))?
+                .ok_or("subagent job not found in session")?;
+            let status = runtime_job_status_from_db(&status)?;
+            let already_requested = !status.is_terminal()
+                && subagent_job_cancellation_requested_conn(tx, &req.job_id)?;
+            let receipt = SubagentJobCancellationReceipt::decide(status, already_requested);
+            if !receipt.accepted {
+                return Ok(receipt);
+            }
+
+            super::sqlite_runtime::append_event_conn(
+                tx,
+                &RuntimeEvent {
+                    event_id: subagent_cancel_request_id(&req.job_id),
+                    session_id: req.session_id,
+                    task_id: Some(req.job_id.clone()),
+                    event_type: SUBAGENT_CANCEL_REQUESTED_EVENT.to_owned(),
+                    at_ms: req.requested_at_ms,
+                    visibility: EventVisibility::Internal,
+                    payload_json: serde_json::json!({"runtimeJobId": req.job_id}).to_string(),
+                },
+            )?;
+            if receipt.status == RuntimeJobStatus::Cancelled {
+                cancel_runtime_job_and_enqueue_terminal(
+                    tx,
+                    &CancelRuntimeJobRequest {
+                        expected_lease_owner: None,
+                        job_id: req.job_id,
+                        reason: SUBAGENT_CANCEL_REASON.to_owned(),
+                        cancelled_at_ms: req.requested_at_ms,
+                        expected_status: Some(RuntimeJobStatus::Queued),
+                    },
+                )?;
+            }
+            Ok(receipt)
         },
     )
 }

@@ -8,7 +8,8 @@ use crate::session::external_context::ExternalContextObject;
 use crate::session::reliability::{
     CancelRuntimeJobRequest, ClaimDueRuntimeJobsRequest, CompleteRuntimeJobRequest,
     FailRuntimeJobRequest, ListRuntimeJobsRequest, RenewRuntimeJobLeaseRequest, RuntimeJobRecord,
-    ScheduleRuntimeJobResult, StartRuntimeJobRequest,
+    RequestSubagentJobCancellation, ScheduleRuntimeJobResult, StartRuntimeJobRequest,
+    SubagentJobCancellationReceipt,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +157,11 @@ pub trait AsyncJobStorePort: Send + Sync {
     ) -> Result<(), JobStoreError>;
     async fn fail_runtime_job(&self, req: FailRuntimeJobRequest) -> Result<(), JobStoreError>;
     async fn cancel_runtime_job(&self, req: CancelRuntimeJobRequest) -> Result<(), JobStoreError>;
+    async fn request_subagent_job_cancellation(
+        &self,
+        req: RequestSubagentJobCancellation,
+    ) -> Result<SubagentJobCancellationReceipt, JobStoreError>;
+    async fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, JobStoreError>;
     async fn reclaim_expired_runtime_job_leases(
         &self,
         now_ms: TimestampMs,

@@ -1036,6 +1036,8 @@ where
     R: AsyncSubagentWorkerRunner,
     O: AsyncSubagentLifecycleObserver,
 {
+    use crate::session::reliability::SUBAGENT_CANCEL_REASON;
+
     let lease_owner = subagent_job_lease_owner(&claimed.job)?.to_string();
     if let Err(error) = store
         .start_runtime_job(StartRuntimeJobRequest {
@@ -1150,14 +1152,6 @@ where
             .await?;
         return Ok(result);
     }
-    observer
-        .on_subagent_start(build_subagent_start_hook_event(
-            &running_job,
-            &running_lifecycle,
-            &work_packet,
-            req.started_at_ms,
-        )?)
-        .await?;
     let lease_ms = claimed
         .job
         .lease_expires_at_ms
@@ -1175,40 +1169,52 @@ where
             )
         })?;
     let agent_run_started = Instant::now();
-    let mut heartbeat = tokio::time::interval(Duration::from_millis((lease_ms / 3).max(1)));
-    heartbeat.tick().await;
-    let mut run_future = runner.run_async(SubagentWorkerRunRequest {
-        job: running_job.clone(),
-        lifecycle: running_lifecycle.clone(),
-        work_packet: work_packet.clone(),
-    });
-    let outcome = loop {
-        tokio::select! {
-            outcome = &mut run_future => break outcome,
-            _ = heartbeat.tick() => {
-                let renewal = store.renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
-                    job_id: running_job.job_id.clone(),
-                    lease_owner: lease_owner.clone(),
-                    heartbeat_at_ms: req.started_at_ms.saturating_add(
-                        i64::try_from(agent_run_started.elapsed().as_millis()).unwrap_or(i64::MAX),
-                    ),
-                    lease_ms,
-                }).await;
-                if let Err(error) = renewal {
-                    settle_before_reconciliation(store, &error).await?;
-                    if cancelled_subagent_event_if_requested_async(
-                        store,
-                        running_job.job_id.as_str(),
-                        req.started_at_ms,
-                    )
-                    .await?
-                    .is_some()
-                    {
-                        break SubagentWorkerRunOutcome::Cancelled {
-                            reason: "subagent_cancelled".to_string(),
-                        };
+    let outcome = if store.subagent_job_cancellation_requested(&running_job.job_id).await? {
+        SubagentWorkerRunOutcome::Cancelled { reason: SUBAGENT_CANCEL_REASON.into() }
+    } else {
+        observer
+            .on_subagent_start(build_subagent_start_hook_event(
+                &running_job,
+                &running_lifecycle,
+                &work_packet,
+                req.started_at_ms,
+            )?)
+            .await?;
+        let mut heartbeat = tokio::time::interval(Duration::from_millis((lease_ms / 3).max(1)));
+        heartbeat.tick().await;
+        let mut run_future = runner.run_async(SubagentWorkerRunRequest {
+            job: running_job.clone(),
+            lifecycle: running_lifecycle.clone(),
+            work_packet: work_packet.clone(),
+        });
+        loop {
+            tokio::select! {
+                outcome = &mut run_future => break outcome,
+                _ = heartbeat.tick() => {
+                    let renewal = store.renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
+                        job_id: running_job.job_id.clone(),
+                        lease_owner: lease_owner.clone(),
+                        heartbeat_at_ms: req.started_at_ms.saturating_add(
+                            i64::try_from(agent_run_started.elapsed().as_millis()).unwrap_or(i64::MAX),
+                        ),
+                        lease_ms,
+                    }).await;
+                    if let Err(error) = renewal {
+                        settle_before_reconciliation(store, &error).await?;
+                        if cancelled_subagent_event_if_requested_async(
+                            store,
+                            running_job.job_id.as_str(),
+                            req.started_at_ms,
+                        )
+                        .await?
+                        .is_some()
+                        {
+                            break SubagentWorkerRunOutcome::Cancelled {
+                                reason: "subagent_cancelled".to_string(),
+                            };
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
                 }
             }
         }
@@ -1242,8 +1248,13 @@ where
         return Ok(result);
     }
 
-    let final_event = match outcome {
+    let outcome = match outcome {
         SubagentWorkerRunOutcome::StorageError { error } => return Err(error),
+        outcome => outcome,
+    };
+    let transition: Result<_, JobStoreError> = async {
+        match outcome {
+        SubagentWorkerRunOutcome::StorageError { error } => Err(error),
         SubagentWorkerRunOutcome::Succeeded { summary, .. } => {
             let result_ref =
                 runtime_external_context_keys::subagent_result_ref(running_job.job_id.as_str());
@@ -1297,23 +1308,23 @@ where
                     })?,
                 SubagentSchedulerEventKind::Succeeded,
                 SubagentLifecycleStatus::Succeeded,
-                Some(lease_owner),
+                Some(lease_owner.clone()),
                 "Subagent job completed.",
                 finished_at_ms,
-            )?
+            ).map_err(Into::into)
         }
         SubagentWorkerRunOutcome::Failed { error, retry } => {
             fail_subagent_run_job_async(
                 store,
                 FailSubagentRunJobRequest {
                     job_id: running_job.job_id.clone(),
-                    lease_owner,
+                    lease_owner: lease_owner.clone(),
                     failed_at_ms: finished_at_ms,
                     last_error: error,
                     retry,
                 },
             )
-            .await?
+            .await
         }
         SubagentWorkerRunOutcome::Cancelled { reason } => {
             cancel_subagent_run_job_with_lease_async(
@@ -1323,9 +1334,36 @@ where
                     reason,
                     cancelled_at_ms: finished_at_ms,
                 },
-                Some(lease_owner),
+                Some(lease_owner.clone()),
             )
-            .await?
+            .await
+        }
+        }
+    }.await;
+    let final_event = match transition {
+        Ok(event) => event,
+        Err(error) => {
+            // A request can beat a success/failure commit after the runner
+            // exits. The store fences that write; finalize with the live claim.
+            settle_before_reconciliation(store, &error).await?;
+            if !store.subagent_job_cancellation_requested(&running_job.job_id).await? {
+                return Err(error);
+            }
+            if let Some((_, event)) = cancelled_subagent_event_if_requested_async(
+                store, &running_job.job_id, finished_at_ms,
+            ).await? {
+                event
+            } else {
+                cancel_subagent_run_job_with_lease_async(
+                    store,
+                    CancelSubagentRunJobRequest {
+                        job_id: running_job.job_id.clone(),
+                        reason: SUBAGENT_CANCEL_REASON.into(),
+                        cancelled_at_ms: finished_at_ms,
+                    },
+                    Some(lease_owner),
+                ).await?
+            }
         }
     };
     let final_operation = match &final_event.kind {
@@ -1823,11 +1861,12 @@ async fn next_subagent_worker_batch_async<S: AsyncJobStorePort + ?Sized>(
             continue;
         }
         let job = &item.1.job;
-        let packet = load_subagent_work_packet_async(store, job).await?;
-        let packet = decode_work_packet_for_resource_claim(&packet.content_json)?;
+        let packet = load_subagent_work_packet_for_resource_claim(store, job).await?;
         let resource_claim = subagent_resource_claim_from_packet(job, &packet);
-        if subagent_resource_claim_can_join(&active_claims, &resource_claim)
-            && child_sessions.insert(packet.run_context.branch_id)
+        // Reserve the child's queue position even if a resource conflict
+        // postpones its first task. A later task may require fewer resources.
+        if child_sessions.insert(packet.run_context.branch_id)
+            && subagent_resource_claim_can_join(&active_claims, &resource_claim)
         {
             active_claims.push(resource_claim);
             batch.push(item);
@@ -1867,6 +1906,14 @@ pub async fn subagent_resource_claim_for_job_async<S: AsyncJobStorePort + ?Sized
     store: &S,
     job: &RuntimeJobRecord,
 ) -> Result<SubagentResourceClaim, JobStoreError> {
+    let packet = load_subagent_work_packet_for_resource_claim(store, job).await?;
+    Ok(subagent_resource_claim_from_packet(job, &packet))
+}
+
+async fn load_subagent_work_packet_for_resource_claim<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
+    job: &RuntimeJobRecord,
+) -> Result<SubAgentWorkPacket, JobStoreError> {
     let envelope = load_subagent_work_packet_async(store, job)
         .await
         .map_err(|error| {
@@ -1876,14 +1923,12 @@ pub async fn subagent_resource_claim_for_job_async<S: AsyncJobStorePort + ?Sized
             );
             error.with_message(message)
         })?;
-    let packet =
-        decode_work_packet_for_resource_claim(&envelope.content_json).map_err(|error| {
+    decode_work_packet_for_resource_claim(&envelope.content_json).map_err(|error| {
             format!(
                 "decode subagent resource claim failed: job_id={} ref_id={} error={error}",
                 job.job_id, envelope.ref_id
-            )
-        })?;
-    Ok(subagent_resource_claim_from_packet(job, &packet))
+            ).into()
+        })
 }
 
 fn decode_work_packet_for_resource_claim(value: &Value) -> Result<SubAgentWorkPacket, String> {
@@ -2579,6 +2624,17 @@ mod tests {
 
         fn cancel_runtime_job(&self, req: CancelRuntimeJobRequest) -> Result<(), String> {
             Err(format!("forced cancel failure: {}", req.job_id))
+        }
+
+        fn request_subagent_job_cancellation(
+            &self,
+            _req: crate::session::reliability::RequestSubagentJobCancellation,
+        ) -> Result<crate::session::reliability::SubagentJobCancellationReceipt, String> {
+            Err("unexpected request_subagent_job_cancellation".into())
+        }
+
+        fn subagent_job_cancellation_requested(&self, _job_id: &str) -> Result<bool, String> {
+            Err("unexpected subagent_job_cancellation_requested".into())
         }
 
         fn reclaim_expired_runtime_job_leases(

@@ -137,6 +137,10 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
                 &mut tx,
                 req.link.as_ref().map(|link| link.session_id.as_str()),
             )?;
+            super::reliability::ensure_no_subagent_job_cancellation(
+                &mut tx,
+                &req.complete_job.job_id,
+            )?;
             if let Some(object) = req.object.as_ref() {
                 upsert_object(&mut tx, object)?;
             }

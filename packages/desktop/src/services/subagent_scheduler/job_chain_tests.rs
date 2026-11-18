@@ -10,6 +10,21 @@ const TEST_NAME: &str =
     "subagent_scheduler::job_chain_tests::native_worker_terminal_delivery_survives_process_exit";
 const LATE_READ_TEST_NAME: &str =
     "subagent_scheduler::job_chain_tests::acknowledged_cancellation_rejects_late_read_before_durable_tool_admission";
+const INTERRUPTIBLE_BASH: &str = r#"
+pid=$$
+if [ -r "/proc/$$/winpid" ]; then pid=$(cat "/proc/$$/winpid"); fi
+printf '%s\n' "$pid" > bash-started.tmp
+mv bash-started.tmp bash-started.pid
+while [ ! -f release-bash ]; do sleep 0.05; done
+printf 'the shell survived cancellation\n' > bash-after-cancel
+"#;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MockWork {
+    Default,
+    LateRead,
+    InterruptibleBash,
+}
 
 fn child_name(row: &RuntimeJobRecord) -> &str {
     row.payload_ref
@@ -31,10 +46,10 @@ struct MockModel {
 
 impl MockModel {
     fn start() -> Self {
-        Self::start_with_late_read(false)
+        Self::start_with_work(MockWork::Default)
     }
 
-    fn start_with_late_read(late_read: bool) -> Self {
+    fn start_with_work(work: MockWork) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
@@ -110,7 +125,24 @@ impl MockModel {
                         .unwrap()
                         .iter()
                         .any(|message| message["role"] == "tool");
-                    let (delta, finish) = if late_read
+                    let (delta, finish) = if work == MockWork::InterruptibleBash
+                        && body.contains("bash-worker")
+                        && !body.contains("followup-worker")
+                        && !has_tool_result
+                    {
+                        let arguments = serde_json::json!({
+                            "command": INTERRUPTIBLE_BASH,
+                            "description": "Wait for the test release file",
+                            "timeout_ms": 30_000,
+                        });
+                        (
+                            serde_json::json!({"tool_calls":[{
+                                "index":0,"id":"interruptible-bash","type":"function",
+                                "function":{"name":"bash","arguments":arguments.to_string()}
+                            }]}),
+                            "tool_calls",
+                        )
+                    } else if work == MockWork::LateRead
                         && body.contains("held-worker")
                         && !has_tool_result
                     {
@@ -216,6 +248,22 @@ async fn queued_child(profile: &Profile, parent: &str, name: &str) -> RuntimeJob
     let mut payload = packet(parent, &child, &row, &cwd);
     payload["workPacket"]["run_context"]["agentRef"]["agentId"] = name.into();
     payload["workPacket"]["task_brief"]["objective"] = name.into();
+    if name == "bash-worker" {
+        let contract = centaeris_core::tool::list_tool_contracts()
+            .into_iter()
+            .find(|contract| contract.name == "bash")
+            .unwrap();
+        let work = &mut payload["workPacket"];
+        work["allowedTools"] = serde_json::json!(["bash"]);
+        work["delegatedToolContracts"] = serde_json::json!([{
+            "name": contract.name,
+            "providerId": contract.provider_id,
+            "contractDigest": contract.contract_digest().unwrap(),
+            "concurrencySafe": contract.concurrency_safe,
+        }]);
+        work["writablePathPrefixes"] = serde_json::json!([cwd]);
+        work["hot_view"]["state_kv"]["subagentResourceKey"] = "bash-cancellation-test".into();
+    }
     let mut work_object = object(&format!("packet:{name}"), payload.to_string());
     work_object.metadata = serde_json::json!({
         "runtimeJobId": row.job_id,
@@ -720,6 +768,205 @@ fn deleting_running_child_waits_for_real_worker_and_preserves_sibling() {
     });
 }
 
+#[cfg(unix)]
+fn bash_is_running(pid: u32) -> bool {
+    // SAFETY: signal zero only queries the fixture's reported child process.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn bash_is_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: the process handle is only queried, then closed. The out
+    // parameter points to an initialized u32 for the duration of the call.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(ERROR_INVALID_PARAMETER as i32),
+                "could not query the fixture's Bash process"
+            );
+            return false;
+        }
+        let mut code = 0;
+        let queried = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        assert_ne!(queried, 0, "query Bash exit code");
+        code == STILL_ACTIVE as u32
+    }
+}
+
+#[test]
+#[cfg_attr(windows, ignore = "requires CENTAERIS_TEST_EXECUTION_HELPER pointing to a built cet")]
+fn interrupting_subagent_waits_for_real_bash_exit_and_preserves_sibling() {
+    use centaeris_core::runtime::subagent::{build_subagent_run_job, SubagentRunJobRequest};
+    use centaeris_core::session::reliability::{
+        RequestSubagentJobCancellation, SubagentJobCancellationReceipt,
+    };
+    use std::time::Duration;
+
+    #[cfg(windows)]
+    assert!(std::env::var_os("CENTAERIS_TEST_EXECUTION_HELPER").is_some());
+
+    let _guard = message_log::test_env_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let profile = Profile::new();
+    let model = MockModel::start_with_work(MockWork::InterruptibleBash);
+    model.configure();
+    let bash = centaeris_agent::local_execution_host::resolve_bash_path(None).unwrap();
+    runtime_config::set(
+        serde_json::from_value(serde_json::json!({"bashPath": bash})).unwrap(),
+    )
+    .unwrap();
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let workspace = profile.root.join("workspace");
+        let parent = sessions::create(sessions::SessionCreateRequest {
+            title: None,
+            cwd: workspace.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        let running = queued_child(&profile, &parent.id, "bash-worker").await;
+        let sibling = queued_child(&profile, &parent.id, "success-worker").await;
+        let child_id = "session-bash-worker";
+        let writer = Arc::new(RuntimeServerClientHub::default()).broadcaster();
+        let batch_writer = writer.clone();
+        let parent_id = parent.id.clone();
+        let mut batch = tokio::spawn(async move {
+            run_parent_batch(&parent_id, batch_writer, &ShutdownJobs::default()).await
+        });
+        let started = workspace.join("bash-started.pid");
+        let pid: u32 = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match std::fs::read_to_string(&started) {
+                    Ok(contents) => return contents.trim().parse().unwrap(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("read worker Bash identity: {error}"),
+                }
+                if batch.is_finished() {
+                    let jobs = agent_runtime::native_job_store_handle().unwrap();
+                    let row = jobs.get_runtime_job(&running.job_id).await.unwrap().unwrap();
+                    let batch_result = (&mut batch).await;
+                    panic!(
+                        "the worker ended before launching Bash: batch={batch_result:?}, job={:?}, error={:?}",
+                        row.status, row.last_error
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the native Worker must launch a real Bash process");
+        assert!(bash_is_running(pid));
+
+        let followup = build_subagent_run_job(SubagentRunJobRequest {
+            session_id: parent.id.clone(),
+            parent_turn_id: "parent-turn".into(),
+            tool_call_id: "followup-worker".into(),
+            subagent_id: "bash-worker".into(),
+            work_packet_ref: "packet:followup-worker".into(),
+            checkpoint_id: None,
+            run_at_ms: 2,
+            created_at_ms: 2,
+            max_retries: 0,
+        });
+        let cwd = workspace.to_string_lossy();
+        let mut followup_packet = packet(&parent.id, child_id, &followup, &cwd);
+        followup_packet["workPacket"]["run_context"]["agentRef"]["agentId"] = "bash-worker".into();
+        followup_packet["workPacket"]["run_context"]["turnId"] = "followup-turn".into();
+        followup_packet["workPacket"]["task_brief"]["objective"] = "followup-worker".into();
+        let mut followup_object = object("packet:followup-worker", followup_packet.to_string());
+        followup_object.source_tool_name = "followup_task".into();
+        followup_object.metadata = serde_json::json!({
+            "runtimeJobId": followup.job_id,
+            "childSessionId": child_id,
+            "originWorkPacketRef": running.payload_ref,
+            "resultRef": centaeris_core::runtime::keys::external_context::subagent_result_ref(&followup.job_id)
+        });
+        RuntimeStoreTransactionPort::upsert_external_context_and_schedule_job(
+            &agent_runtime::agent_runtime_store_actor().unwrap(),
+            centaeris_core::session::store::UpsertExternalContextAndScheduleJobRequest {
+                object: followup_object,
+                job: followup.clone(),
+            },
+        ).unwrap();
+        message_log::append_agent_turn_queued(
+            child_id, "followup-turn", &followup.job_id, "followup-worker", 2,
+        ).unwrap();
+
+        let jobs = agent_runtime::native_job_store_handle().unwrap();
+        assert!(matches!(
+            jobs.get_runtime_job(&followup.job_id).await.unwrap().unwrap().status,
+            RuntimeJobStatus::Queued | RuntimeJobStatus::Leased
+        ), "a follow-up may be claimed, but must not run while its Agent's Bash is active");
+        assert_eq!(
+            jobs.request_subagent_job_cancellation(RequestSubagentJobCancellation {
+                session_id: parent.id.clone(),
+                job_id: running.job_id.clone(),
+                requested_at_ms: current_timestamp_ms(),
+            })
+            .await
+            .unwrap(),
+            SubagentJobCancellationReceipt {
+                accepted: true,
+                status: RuntimeJobStatus::Running,
+            },
+            "accepting cancellation must leave the active Job nonterminal"
+        );
+        let terminal = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let row = jobs.get_runtime_job(&running.job_id).await.unwrap().unwrap();
+                if row.status.is_terminal() {
+                    return row.status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the native worker must confirm cancellation");
+        assert_eq!(terminal, RuntimeJobStatus::Cancelled);
+        assert!(
+            !bash_is_running(pid),
+            "terminal cancellation must follow actual Bash shutdown"
+        );
+        std::fs::write(workspace.join("release-bash"), "").unwrap();
+        tokio::time::timeout(Duration::from_secs(15), batch)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        run_parent_batch(&parent.id, writer, &ShutdownJobs::default()).await.unwrap();
+        assert!(!workspace.join("bash-after-cancel").exists());
+        assert_eq!(
+            jobs.get_runtime_job(&sibling.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeJobStatus::Succeeded
+        );
+        assert_eq!(
+            jobs.get_runtime_job(&followup.job_id).await.unwrap().unwrap().status,
+            RuntimeJobStatus::Succeeded
+        );
+        assert_eq!(
+            message_log::project_agent_run(&running.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "cancelled"
+        );
+        assert!(jobs.pending_terminal_delivery(&running.job_id).await.unwrap().is_none());
+        agent_runtime::close_storage_owners().await.unwrap();
+    });
+}
+
 #[test]
 fn acknowledged_cancellation_rejects_late_read_before_durable_tool_admission() {
     if std::env::var_os("CENTAERIS_LATE_READ_TEST_CHILD").is_none() {
@@ -767,7 +1014,7 @@ fn acknowledged_cancellation_rejects_late_read_before_durable_tool_admission() {
         "A real readable cancellation probe.",
     )
     .unwrap();
-    let model = MockModel::start_with_late_read(true);
+    let model = MockModel::start_with_work(MockWork::LateRead);
     model.configure();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

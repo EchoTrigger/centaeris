@@ -4,7 +4,9 @@ use crate::runtime::keys::runtime_job as runtime_job_keys;
 use crate::runtime::subagent::{
     load_subagent_work_packet_async, subagent_id_from_job, SubagentWorkPacketEnvelope,
 };
-use crate::session::reliability::{CancelRuntimeJobRequest, ListRuntimeJobsRequest};
+use crate::session::reliability::{
+    ListRuntimeJobsRequest, RequestSubagentJobCancellation, SubagentJobCancellationReceipt,
+};
 use crate::session::store::job::JobStoreError;
 use crate::tool::AGENT_CONTROL_TOOL_NAMES;
 
@@ -696,26 +698,48 @@ impl<
                 "outputRef": agent_task_output_ref(&job, &binding),
             })),
             "interrupt_agent" => {
-                if !job.status.is_terminal() {
-                    self.job_store
-                        .cancel_runtime_job(CancelRuntimeJobRequest {
-                            expected_lease_owner: None,
-                            job_id: job.job_id.clone(),
-                            reason: "interrupted_by_parent_agent".to_string(),
-                            cancelled_at_ms: now_ms(),
-                            expected_status: None,
-                        })
-                        .await?;
-                }
-                let current = self.find_delegated_task(session_id, &job.job_id).await?;
+                let receipt = self.request_task_cancellation(session_id, &job.job_id).await?;
                 Ok(json!({
                     "agentId": binding.subagent_id,
                     "taskId": job.job_id,
-                    "cancelAccepted": !job.status.is_terminal() && current.status == RuntimeJobStatus::Cancelled,
-                    "status": current.status,
+                    "cancelAccepted": receipt.accepted,
+                    "status": receipt.status,
                 }))
             }
             _ => Err(format!("unsupported Agent control tool: {}", call.name).into()),
+        }
+    }
+
+    async fn request_task_cancellation(
+        &self,
+        session_id: &str,
+        job_id: &str,
+    ) -> Result<SubagentJobCancellationReceipt, JobStoreError> {
+        let result = self
+            .job_store
+            .request_subagent_job_cancellation(RequestSubagentJobCancellation {
+                job_id: job_id.to_owned(),
+                session_id: session_id.to_owned(),
+                requested_at_ms: now_ms(),
+            })
+            .await;
+        let error = match result {
+            Ok(receipt) => return Ok(receipt),
+            Err(error) if error.requires_settlement() || matches!(
+                error, JobStoreError::Storage { outcome: crate::session::store::job::JobWriteOutcome::Committed, .. }
+            ) => error,
+            Err(error) => return Err(error),
+        };
+        self.job_store.settle_job_operations().await?;
+        let accepted = self.job_store.subagent_job_cancellation_requested(job_id).await?;
+        let job = self.find_delegated_task(session_id, job_id).await?;
+        if accepted || job.status.is_terminal() {
+            Ok(SubagentJobCancellationReceipt {
+                accepted,
+                status: job.status,
+            })
+        } else {
+            Err(error)
         }
     }
 

@@ -1975,8 +1975,20 @@ pub(crate) fn build_agent_runtime(
         session_id: session_id.clone(),
         agent_run_id: execution_owner.clone(),
     });
+    use crate::local_execution_host::LocalExecutionHostRunner;
+    // Libtest does not dispatch the Windows execution helper entry point.
+    #[cfg(all(test, windows))]
+    let runner = match std::env::var_os("CENTAERIS_TEST_EXECUTION_HELPER") {
+        Some(executable) => LocalExecutionHostRunner::new_with_runtime_executable(
+            bash_path,
+            PathBuf::from(executable),
+        ),
+        None => LocalExecutionHostRunner::new(bash_path),
+    };
+    #[cfg(not(all(test, windows)))]
+    let runner = LocalExecutionHostRunner::new(bash_path);
     let local_runner = Arc::new(
-        crate::local_execution_host::LocalExecutionHostRunner::new(bash_path)
+        runner
             .and_then(|runner| runner.with_environment_overrides(command_environment))
             .map_err(|error| error.internal_debug_message())?,
     );

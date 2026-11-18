@@ -26,9 +26,9 @@ use crate::session::reliability::{
     FailRuntimeJobRequest, ListDeadLettersRequest, ListRuntimeJobsRequest,
     MarkDeadLetterReplayedRequest, MarkDeadLetterReplayingRequest, ReleaseResourceClaimRequest,
     RenewRuntimeJobLeaseRequest, ReplayDeadLetterRequest, ReplayDeadLetterResult,
-    ResourceClaimRecord, ResourceClaimStorePort, RuntimeJobRecord, RuntimeJobStorePort,
+    RequestSubagentJobCancellation, ResourceClaimRecord, ResourceClaimStorePort, RuntimeJobRecord, RuntimeJobStorePort,
     ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult, StartRuntimeJobRequest,
-    WakeRuntimeJobDisposition, WakeRuntimeJobRequest, YieldRuntimeJobRequest,
+    SubagentJobCancellationReceipt, WakeRuntimeJobDisposition, WakeRuntimeJobRequest, YieldRuntimeJobRequest,
 };
 use crate::session::transcript::{
     TranscriptPageReadRequestV1, TranscriptPageReadResultV1, TranscriptPatchReadRequestV1,
@@ -1132,6 +1132,18 @@ impl RuntimeJobStorePort for RuntimeStoreActor {
         self.send_blocking(|reply| RuntimeStoreActorCommand::CancelRuntimeJob { req, reply })
     }
 
+    fn request_subagent_job_cancellation(
+        &self,
+        req: RequestSubagentJobCancellation,
+    ) -> Result<SubagentJobCancellationReceipt, String> {
+        self.send_blocking(|reply| RuntimeStoreActorCommand::RequestSubagentJobCancellation { req, reply })
+    }
+
+    fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, String> {
+        let job_id = job_id.to_owned();
+        self.send_blocking(|reply| RuntimeStoreActorCommand::SubagentJobCancellationRequested { job_id, reply })
+    }
+
     fn reclaim_expired_runtime_job_leases(&self, now_ms: TimestampMs) -> Result<usize, String> {
         self.send_blocking(
             |reply| RuntimeStoreActorCommand::ReclaimExpiredRuntimeJobLeases { now_ms, reply },
@@ -1892,6 +1904,14 @@ enum RuntimeStoreActorCommand {
         req: CancelRuntimeJobRequest,
         reply: RuntimeStoreActorReply<()>,
     },
+    RequestSubagentJobCancellation {
+        req: RequestSubagentJobCancellation,
+        reply: RuntimeStoreActorReply<SubagentJobCancellationReceipt>,
+    },
+    SubagentJobCancellationRequested {
+        job_id: String,
+        reply: RuntimeStoreActorReply<bool>,
+    },
     ReclaimExpiredRuntimeJobLeases {
         now_ms: TimestampMs,
         reply: RuntimeStoreActorReply<usize>,
@@ -2079,6 +2099,8 @@ impl RuntimeStoreActorCommand {
             Self::CompleteRuntimeJob { .. } => "complete_runtime_job",
             Self::FailRuntimeJob { .. } => "fail_runtime_job",
             Self::CancelRuntimeJob { .. } => "cancel_runtime_job",
+            Self::RequestSubagentJobCancellation { .. } => "request_subagent_job_cancellation",
+            Self::SubagentJobCancellationRequested { .. } => "subagent_job_cancellation_requested",
             Self::ReclaimExpiredRuntimeJobLeases { .. } => "reclaim_expired_runtime_job_leases",
             Self::CreateDeadLetter { .. } => "create_dead_letter",
             Self::GetDeadLetter { .. } => "get_dead_letter",
@@ -2361,6 +2383,22 @@ async fn run_runtime_store_actor<S>(
                     reply.send(
                         run_store_operation(store.clone(), admission, move |store| {
                             store.cancel_runtime_job(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::RequestSubagentJobCancellation { req, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), admission, move |store| {
+                            store.request_subagent_job_cancellation(req)
+                        })
+                        .await,
+                    );
+                }
+                RuntimeStoreActorCommand::SubagentJobCancellationRequested { job_id, reply } => {
+                    reply.send(
+                        run_store_operation(store.clone(), admission, move |store| {
+                            store.subagent_job_cancellation_requested(&job_id)
                         })
                         .await,
                     );
@@ -2922,6 +2960,41 @@ impl super::AsyncJobStorePort for RuntimeStoreActor {
             .map_err(|error| {
                 super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Cancel, error)
             })
+    }
+    async fn request_subagent_job_cancellation(
+        &self,
+        req: RequestSubagentJobCancellation,
+    ) -> Result<SubagentJobCancellationReceipt, super::job::JobStoreError> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::RequestSubagentJobCancellation {
+                req,
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+        .map_err(|error| {
+            super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Cancel, error)
+        })
+    }
+
+    async fn subagent_job_cancellation_requested(
+        &self,
+        job_id: &str,
+    ) -> Result<bool, super::job::JobStoreError> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            RuntimeStoreActorCommand::SubagentJobCancellationRequested {
+                job_id: job_id.to_owned(),
+                reply: RuntimeStoreActorReply::Async(reply),
+            },
+            receiver,
+        )
+        .await
+        .map_err(|error| {
+            super::job::JobStoreError::unconfirmed(super::job::JobStoreOperation::Read, error)
+        })
     }
     async fn reclaim_expired_runtime_job_leases(
         &self,
