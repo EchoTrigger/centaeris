@@ -234,6 +234,7 @@ fn occurrence(plan: &Plan, id: String, at: i64, status: &str) -> Run {
 }
 pub(crate) fn manage(request: Request) -> Result<Value, String> {
     let _guard = LOCK.lock().map_err(|_| "schedule lock poisoned")?;
+    let _cross_process = crate::local_host::lock_profile_file("schedules", false)?;
     let path = root();
     let mut store = storage::load_request(&path, &request)?;
     let now = Utc::now().timestamp_millis();
@@ -484,6 +485,7 @@ fn tick(writer: &EventWriter) -> Result<(), String> {
 }
 fn tick_with_clock(writer: &EventWriter, now: impl Fn() -> i64) -> Result<(), String> {
     let _guard = LOCK.lock().map_err(|_| "schedule lock poisoned")?;
+    let _cross_process = crate::local_host::lock_profile_file("schedules", false)?;
     let path = root();
     let mut store = storage::load_work(&path, now())?;
     let mut saved = serde_json::to_vec(&store).map_err(|e| e.to_string())?;

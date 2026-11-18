@@ -2,7 +2,7 @@ use super::*;
 use crate::tool_projection::{tool_outcome, ToolOutcome};
 use ratatui::style::Color;
 
-fn tool_header(tool: &ToolTranscriptLine) -> Line<'static> {
+pub(super) fn tool_header(tool: &ToolTranscriptLine) -> (Line<'static>, usize) {
     // Descriptions remain in the projection; the transcript heading shows the actual command.
     let title = if tool.action_kind == ToolActionKind::Command {
         if let Some(command) = tool.command.as_deref() {
@@ -16,32 +16,100 @@ fn tool_header(tool: &ToolTranscriptLine) -> Line<'static> {
     } else {
         stable_tool_title(tool)
     };
-    let color = if tool.running {
-        theme().muted
-    } else if tool.interrupted {
-        Color::Yellow
+    let failed = !tool.running
+        && !tool.interrupted
+        && matches!(
+            tool_outcome(&tool.result_states),
+            ToolOutcome::Failed | ToolOutcome::Denied
+        );
+    let mut spans = vec![Span::raw("  ")];
+    let (verb, body) = if let Some(body) = title.strip_prefix("Failed to run ") {
+        ("Failed to run", body)
     } else {
-        match tool_outcome(&tool.result_states) {
-            ToolOutcome::Succeeded => Color::Green,
-            ToolOutcome::Failed | ToolOutcome::Denied => Color::Red,
-            ToolOutcome::Aborted => Color::Yellow,
-        }
+        title.split_once(' ').unwrap_or((&title, ""))
     };
-    let mut spans = vec![Span::styled("● ", Style::default().fg(color))];
-    let (verb, body) = title.split_once(' ').unwrap_or((&title, ""));
+    let mut indent = 2;
     spans.push(Span::styled(
         verb.to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(if failed { Color::Red } else { theme().muted })
+            .add_modifier(Modifier::BOLD),
     ));
     if !body.is_empty() {
         spans.push(Span::raw(" "));
         if tool.action_kind == ToolActionKind::Command {
+            indent += verb.len() + 1;
             spans.extend(command_spans(body));
         } else {
             spans.push(Span::raw(body.to_string()));
         }
     }
-    Line::from(spans)
+    (Line::from(spans), indent)
+}
+
+pub(super) fn bash_header(tool: &ToolTranscriptLine, width: u16, expanded: bool) -> Line<'static> {
+    let (verb, color) = if tool.running {
+        ("Running", theme().muted)
+    } else if tool.interrupted {
+        ("Stopped", theme().muted)
+    } else {
+        match tool_outcome(&tool.result_states) {
+            ToolOutcome::Succeeded => ("Ran", theme().muted),
+            ToolOutcome::Failed => ("Failed", Color::Red),
+            ToolOutcome::Denied => ("Denied", Color::Red),
+            ToolOutcome::Aborted => ("Stopped", theme().muted),
+        }
+    };
+    let subject = if tool.description_title {
+        let subject = tool.subject.trim();
+        subject
+            .split_once(' ')
+            .filter(|(word, _)| {
+                ["run", "running", "ran"]
+                    .iter()
+                    .any(|verb| word.eq_ignore_ascii_case(verb))
+            })
+            .map_or(subject, |(_, remaining)| remaining.trim())
+    } else {
+        &tool.subject
+    };
+    let subject = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    let subject = if subject.is_empty() {
+        tool.command
+            .as_deref()
+            .unwrap_or("Bash")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        subject
+    };
+    let status = tool
+        .exit_code
+        .filter(|code| *code != 0)
+        .map_or_else(String::new, |code| format!(" (exit {code})"));
+    let marker = if expanded { "⌄ " } else { "› " };
+    let width = usize::from(width.saturating_sub(1));
+    let chrome = 2 + verb.len() + 1 + status.len();
+    let style = Style::default().fg(color);
+    if width <= chrome {
+        let label = format!("{marker}{verb}");
+        let label_width = width.saturating_sub(status.len());
+        return Line::styled(
+            format!(
+                "{}{}",
+                fit_middle_columns(&label, label_width),
+                fit_middle_columns(&status, width)
+            ),
+            style,
+        );
+    }
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(theme().muted)),
+        Span::styled(format!("{verb} "), style),
+        Span::raw(fit_middle_columns(&subject, width - chrome)),
+        Span::styled(status, style),
+    ])
 }
 
 // Conservative lexical accents shared by PowerShell and POSIX commands. This is
@@ -90,24 +158,6 @@ fn command_spans(command: &str) -> Vec<Span<'static>> {
         ));
     }
     spans
-}
-
-pub(super) fn tool_lines(tool: &ToolTranscriptLine, width: u16) -> Vec<Line<'static>> {
-    let mut header = tool_header(tool);
-    let marker = header.spans.remove(0);
-    let mut lines =
-        hard_wrap_input_lines(vec![header], usize::from(width.saturating_sub(2).max(1)));
-    for (index, line) in lines.iter_mut().enumerate() {
-        line.spans.insert(
-            0,
-            if index == 0 {
-                marker.clone()
-            } else {
-                Span::raw("  ")
-            },
-        );
-    }
-    lines
 }
 
 #[cfg(test)]

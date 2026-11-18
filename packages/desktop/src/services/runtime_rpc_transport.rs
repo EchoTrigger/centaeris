@@ -127,6 +127,7 @@ struct ConnectedClient {
 }
 
 pub(crate) struct RuntimeServerClientHub {
+    session_writers: Option<crate::local_host::SessionWriters>,
     model_http: Mutex<Option<reqwest::Client>>,
     clients: Mutex<HashMap<u64, ConnectedClient>>,
     next_client_id: AtomicU64,
@@ -144,6 +145,7 @@ pub(crate) struct RuntimeServerClientHub {
 impl Default for RuntimeServerClientHub {
     fn default() -> Self {
         Self {
+            session_writers: None,
             model_http: Mutex::new(None),
             clients: Mutex::new(HashMap::new()),
             next_client_id: AtomicU64::new(0),
@@ -161,6 +163,15 @@ impl Default for RuntimeServerClientHub {
 }
 
 impl RuntimeServerClientHub {
+    pub(crate) fn with_session_writers(
+        session_writers: Option<crate::local_host::SessionWriters>,
+    ) -> Self {
+        Self {
+            session_writers,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn model_http_client(&self) -> Result<reqwest::Client, String> {
         self.model_http_client_with(crate::http_transport::build_model_http_client)
     }
@@ -670,6 +681,10 @@ impl RuntimeServerClientHub {
 
 /// Keeps an accepted host action visible to service shutdown after its client
 /// disconnects. The request owner holds it until the awaited action completes.
+pub(crate) struct SessionWritePermit {
+    _file: Option<Arc<std::fs::File>>,
+}
+
 pub(crate) struct RuntimeActionPermit {
     hub: Arc<RuntimeServerClientHub>,
 }
@@ -689,6 +704,64 @@ pub(crate) struct EventWriter {
 }
 
 impl EventWriter {
+    pub(crate) fn uses_session_writers(&self) -> bool {
+        self.hub.session_writers.is_some()
+    }
+
+    pub(crate) fn owned_sessions(&self) -> Result<Option<Vec<String>>, String> {
+        self.hub
+            .session_writers
+            .as_ref()
+            .map(crate::local_host::SessionWriters::owned_roots)
+            .transpose()
+    }
+
+    pub(crate) fn pin_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionWritePermit>, String> {
+        match &self.hub.session_writers {
+            Some(writers) => Ok(writers.pin(session_id)?.map(|file| SessionWritePermit {
+                _file: Some(file),
+            })),
+            None => Ok(Some(SessionWritePermit { _file: None })),
+        }
+    }
+
+    pub(crate) fn owns_session(&self, session_id: &str) -> Result<bool, String> {
+        Ok(self.pin_session(session_id)?.is_some())
+    }
+
+    pub(crate) fn claim_session_writer(&self, session_id: &str) -> Result<bool, String> {
+        match &self.hub.session_writers {
+            Some(writers) => writers.try_claim(session_id),
+            None => Ok(true),
+        }
+    }
+
+    pub(crate) fn require_session_writer(&self, session_id: &str) -> Result<SessionWritePermit, String> {
+        if self.claim_session_writer(session_id)? {
+            if let Some(permit) = self.pin_session(session_id)? {
+                return Ok(permit);
+            }
+        }
+        Err(format!("Session {session_id} is open in another window"))
+    }
+
+    pub(crate) fn release_session_writer(&self, session_id: &str) -> Result<(), String> {
+        if let Some(writers) = &self.hub.session_writers {
+            if self.hub.agent_runs.active_agent_runs()?.is_empty()
+                && self.hub.agent_runs.background_work_count() == 0
+                && self.hub.active_action_count() == 0
+                && !crate::process_sessions::manager().has_active()
+                && !crate::process_sessions::manager().has_pending_notifications()
+            {
+                writers.release(session_id)?;
+            }
+        }
+        Ok(())
+    }
+
     /// All connections and background runs use their owning service's budgets.
     /// Subagents pass the parent Session here to share its tool capacity.
     pub(crate) fn tool_concurrency_for_session(

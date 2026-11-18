@@ -97,7 +97,10 @@ pub(crate) fn handle_request(
             })
         }
         RuntimeHostCommand::SessionActivate => {
-            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let payload: sessions::SessionActivateRequest =
+                runtime_bridge::deserialize_request(request.payload)?;
+            let _writer = event_writer.require_session_writer(&payload.session_id)
+                .map_err(|error| RuntimeHostError::new("session_failed", error))?;
             let response = sessions::activate(payload)
                 .map_err(|error| RuntimeHostError::new("session_failed", error))?;
             serde_json::to_value(response).map_err(|error| {
@@ -113,7 +116,10 @@ pub(crate) fn handle_request(
             })
         }
         RuntimeHostCommand::SessionUpdate => {
-            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let payload: sessions::SessionUpdateRequest =
+                runtime_bridge::deserialize_request(request.payload)?;
+            let _writer = event_writer.require_session_writer(&payload.session_id)
+                .map_err(|error| RuntimeHostError::new("session_failed", error))?;
             let response = sessions::update(payload)
                 .map_err(|error| RuntimeHostError::new("session_failed", error))?;
             serde_json::to_value(response).map_err(|error| {

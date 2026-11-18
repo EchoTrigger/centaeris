@@ -39,7 +39,8 @@ arboard = "=3.6.1"
 axum = { version = "=0.8.9", default-features = false }
 base64 = "=0.22.1"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
-crossterm = "=0.28.1"
+# Pins the Windows surrogate key-up fix from crossterm-rs/crossterm#1073.
+crossterm = { version = "=0.29.0", git = "https://github.com/crossterm-rs/crossterm", rev = "954acceea63028799cd9657b266a5647418e55d3", default-features = false, features = ["bracketed-paste", "events", "windows"] }
 fs2 = "=0.4.3"
 futures = "=0.3.32"
 getrandom = "=0.4.3"

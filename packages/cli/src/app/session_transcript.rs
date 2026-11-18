@@ -7,6 +7,34 @@ pub(super) fn load_session_history(
     ensure_runtime(app)?;
     attach_session_viewer(app, session.id.as_str())?;
     let active_agent_runs = active_agent_runs(app, session.id.as_str())?;
+    let transcript_paging = load_transcript_snapshot(app, session)?;
+    let transcript = transcript_paging.materialize_history(!active_agent_runs.is_empty());
+    let replay_items = replay_active_agent_run_live_snapshots(app, &active_agent_runs)?;
+    Ok(SessionRestore {
+        transcript,
+        transcript_paging,
+        active_agent_runs,
+        replay_items,
+    })
+}
+
+pub(super) fn load_read_only_session_history(
+    app: &mut App,
+    session: &TuiSession,
+) -> Result<SessionRestore, String> {
+    let transcript_paging = load_transcript_snapshot(app, session)?;
+    Ok(SessionRestore {
+        transcript: transcript_paging.materialize_history(false),
+        transcript_paging,
+        active_agent_runs: Vec::new(),
+        replay_items: Vec::new(),
+    })
+}
+
+fn load_transcript_snapshot(
+    app: &mut App,
+    session: &TuiSession,
+) -> Result<TranscriptPagingState, String> {
     let page = {
         let runtime = app
             .runtime
@@ -25,15 +53,7 @@ pub(super) fn load_session_history(
             || thread::sleep(TRANSCRIPT_PROJECTION_POLL_INTERVAL),
         )?
     };
-    let transcript_paging = TranscriptPagingState::open(page)?;
-    let transcript = transcript_paging.materialize_history(!active_agent_runs.is_empty());
-    let replay_items = replay_active_agent_run_live_snapshots(app, &active_agent_runs)?;
-    Ok(SessionRestore {
-        transcript,
-        transcript_paging,
-        active_agent_runs,
-        replay_items,
-    })
+    TranscriptPagingState::open(page)
 }
 
 pub(super) fn load_older_transcript_page(app: &mut App) -> Result<bool, String> {
@@ -81,26 +101,6 @@ pub(super) fn load_older_transcript_page(app: &mut App) -> Result<bool, String> 
     Ok(true)
 }
 
-pub(super) fn release_loaded_transcript_history(app: &mut App) -> usize {
-    let previous_rows = build_cached_transcript_view(app, app.render_width).total_rows;
-    let previous_scroll = app.transcript_scroll;
-    let removed = app
-        .transcript_paging
-        .as_mut()
-        .map_or(0, TranscriptPagingState::release_loaded_history);
-    if removed == 0 {
-        return 0;
-    }
-    sync_materialized_transcript_history(app);
-    app.inline_images.clear();
-    app.inline_image_cache_order.clear();
-    app.inline_image_cache_bytes = 0;
-    app.inline_image_errors.clear();
-    let next_rows = build_cached_transcript_view(app, app.render_width).total_rows;
-    app.transcript_scroll = previous_scroll.saturating_sub(previous_rows.saturating_sub(next_rows));
-    removed
-}
-
 pub(super) fn refresh_transcript_patches(app: &mut App) -> Result<bool, String> {
     let Some(mut paging_state) = app.transcript_paging.take() else {
         return Ok(false);
@@ -142,6 +142,26 @@ pub(super) fn sync_materialized_transcript_history(app: &mut App) {
         return;
     };
     let mut transcript = paging_state.materialize_history(live_overlay_active);
+    // History pages contain tool summaries but omit execution image references.
+    let images_by_tool: HashMap<_, _> = app
+        .transcript
+        .iter()
+        .filter_map(|line| match line.content() {
+            TranscriptLine::Tool(tool) if !tool.images.is_empty() => {
+                Some((tool.key.as_str(), &tool.images))
+            }
+            _ => None,
+        })
+        .collect();
+    if !images_by_tool.is_empty() {
+        for line in &mut transcript {
+            if let TranscriptLine::Tool(tool) = line.content_mut() {
+                if let Some(images) = images_by_tool.get(tool.key.as_str()) {
+                    tool.images.clone_from(images);
+                }
+            }
+        }
+    }
     app.transcript_history_len = transcript.len();
     if live_overlay_active {
         app.assistant_stream_start =
@@ -277,7 +297,7 @@ pub(super) fn restore_active_agent_runs(app: &mut App, active_agent_runs: Vec<Ac
     app.active_tool_label = None;
     app.tool_protocol_error = false;
     app.process_state = RuntimeDisplayState::Idle;
-    app.runtime_easter_egg = None;
+    app.status_easter_egg = StatusEasterEgg::Used;
 
     let Some(first) = active_agent_runs.first() else {
         return;

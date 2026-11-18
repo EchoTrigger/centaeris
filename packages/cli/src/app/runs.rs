@@ -8,18 +8,34 @@ pub(super) enum RunState {
     WaitingInput,
     Completed,
     Failed,
+    Cancelled,
     Interrupted,
 }
 
 impl RunState {
-    pub(super) fn from_source(source: &str) -> Self {
+    pub(super) fn from_source(source: &str, reason_type: Option<&str>) -> Self {
         match source {
             "agent_run_completed" => Self::Completed,
             "agent_run_failed" => Self::Failed,
-            "agent_run_interrupted" => Self::Interrupted,
+            "agent_run_interrupted" => Self::interrupted(reason_type),
             // A historical start is not evidence that a run is still active.
             _ => Self::Unknown,
         }
+    }
+
+    pub(super) fn interrupted(reason_type: Option<&str>) -> Self {
+        if reason_type == Some("cancelled") {
+            Self::Cancelled
+        } else {
+            Self::Interrupted
+        }
+    }
+
+    pub(super) fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
     }
 }
 
@@ -85,13 +101,10 @@ pub(super) fn process_visible(app: &App, run_id: &str) -> bool {
         .is_none_or(|(state, _)| *state != RunState::Completed)
 }
 
-/// Preserve source order. Completed execution details become a structural line;
-/// stage summaries and final answers remain visible without disclosure controls.
+/// Preserve stage summaries, images and final answers while hiding completed execution detail.
 pub(super) fn visible_transcript(app: &App) -> Vec<TranscriptLine> {
     let states = states(app);
     let mut visible = Vec::new();
-    let mut separated = HashSet::new();
-    let mut last_hidden: Option<&str> = None;
     for item in &app.transcript {
         match item {
             TranscriptLine::RunItem {
@@ -105,24 +118,13 @@ pub(super) fn visible_transcript(app: &App) -> Vec<TranscriptLine> {
                 let completed = states
                     .get(run_id.as_str())
                     .is_some_and(|(state, _)| *state == RunState::Completed);
-                let execution = matches!(
-                    line.content(),
-                    TranscriptLine::Tool(_)
-                        | TranscriptLine::Subagent(_)
-                        | TranscriptLine::LiveAssistant { .. }
-                );
-                if completed && !final_answer && execution {
-                    if last_hidden != Some(run_id) {
-                        visible.push(TranscriptLine::ProcessEnd {
-                            key: format!("run:{run_id}"),
-                            label: String::new(),
-                        });
-                        separated.insert(run_id.as_str());
-                    }
-                    last_hidden = Some(run_id);
-                } else {
+                let execution = match line.content() {
+                    TranscriptLine::Tool(tool) => !tool.is_bash && tool.images.is_empty(),
+                    TranscriptLine::Subagent(_) | TranscriptLine::LiveAssistant { .. } => true,
+                    _ => false,
+                };
+                if !completed || *final_answer || !execution {
                     visible.push(line.content().clone());
-                    last_hidden = None;
                 }
             }
             TranscriptLine::RunBoundary {
@@ -130,12 +132,6 @@ pub(super) fn visible_transcript(app: &App) -> Vec<TranscriptLine> {
                 state,
                 reason,
             } => match state {
-                RunState::Completed if separated.insert(run_id.as_str()) => {
-                    visible.push(TranscriptLine::ProcessEnd {
-                        key: format!("run:{run_id}"),
-                        label: String::new(),
-                    })
-                }
                 RunState::Failed | RunState::Interrupted => {
                     visible.push(TranscriptLine::RunFailure {
                         key: format!("run:{run_id}"),
@@ -147,24 +143,24 @@ pub(super) fn visible_transcript(app: &App) -> Vec<TranscriptLine> {
             TranscriptLine::Reasoning { .. } => {}
             _ => {
                 visible.push(item.clone());
-                last_hidden = None;
             }
         }
     }
-    for run_id in active_agent_run_ids(app) {
-        let state = states
-            .get(run_id.as_str())
-            .map(|(state, _)| *state)
-            .unwrap_or(RunState::Running);
-        let label = match state {
-            RunState::Running => "Working…",
-            RunState::Waiting => "Waiting",
-            RunState::WaitingInput => "Waiting for input",
+    let active = active_agent_run_ids(app);
+    let primary = app
+        .active_agent_run_id
+        .as_deref()
+        .or_else(|| active.first().map(String::as_str));
+    for run_id in active.iter().filter(|id| Some(id.as_str()) != primary) {
+        let label = match states.get(run_id.as_str()).map(|(state, _)| *state) {
+            Some(RunState::Waiting) => "Waiting",
+            Some(RunState::WaitingInput) => "Waiting for input",
+            Some(RunState::Running) => "Working…",
             _ => continue,
         };
-        visible.push(TranscriptLine::ProcessEnd {
+        visible.push(TranscriptLine::RunActivity {
             key: format!("status:{run_id}"),
-            label: label.into(),
+            label,
         });
     }
     visible

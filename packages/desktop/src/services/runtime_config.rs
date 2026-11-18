@@ -197,6 +197,7 @@ pub(crate) struct SelectableModelResponse {
     pub(crate) model_max_output_tokens: Option<u32>,
     pub(crate) model_thinking_mode: Option<String>,
     pub(crate) model_thinking_modes: Vec<String>,
+    pub(crate) preferred_thinking_mode: Option<String>,
     pub(crate) model_api: Option<CustomModelProviderApi>,
 }
 
@@ -212,6 +213,7 @@ pub(crate) struct ModelCatalogItemResponse {
     pub(crate) model_max_output_tokens: Option<u32>,
     pub(crate) model_thinking_mode: Option<String>,
     pub(crate) model_thinking_modes: Vec<String>,
+    pub(crate) preferred_thinking_mode: Option<String>,
     pub(crate) supports_vision: bool,
     pub(crate) built_in: bool,
     pub(crate) model_api: Option<CustomModelProviderApi>,
@@ -398,10 +400,13 @@ fn set_unlocked(
     Ok(into_response(record, &state, &secrets))
 }
 
-fn runtime_config_store_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    RUNTIME_CONFIG_STORE_LOCK
+type RuntimeConfigStoreGuard = (Option<std::fs::File>, std::sync::MutexGuard<'static, ()>);
+
+fn runtime_config_store_guard() -> Result<RuntimeConfigStoreGuard, String> {
+    let guard = RUNTIME_CONFIG_STORE_LOCK
         .lock()
-        .map_err(|_| "runtime config store lock poisoned".to_string())
+        .map_err(|_| "runtime config store lock poisoned".to_string())?;
+    Ok((crate::local_host::lock_profile_file("runtime-config", false)?, guard))
 }
 
 fn apply_model_request(
@@ -653,6 +658,7 @@ fn into_response(
             model_max_output_tokens: item.model_max_output_tokens,
             model_thinking_mode: item.model_thinking_mode.clone(),
             model_thinking_modes: item.model_thinking_modes.clone(),
+            preferred_thinking_mode: item.preferred_thinking_mode.clone(),
             model_api: item.model_api,
         })
         .collect::<Vec<_>>();
@@ -801,6 +807,7 @@ fn model_catalog(state: &PersistedRuntimeConfigState) -> Vec<ModelCatalogItemRes
             model_max_output_tokens: resolved.as_ref().ok().map(|item| item.max_output_tokens),
             model_thinking_mode: configured.model_thinking_mode.clone(),
             model_thinking_modes: Vec::new(),
+            preferred_thinking_mode: None,
             supports_vision: configured.supports_vision,
             built_in: false,
             model_api: resolved
@@ -810,6 +817,15 @@ fn model_catalog(state: &PersistedRuntimeConfigState) -> Vec<ModelCatalogItemRes
             diagnostic,
         })
     }));
+    for item in &mut catalog {
+        item.preferred_thinking_mode = state
+            .thinking_mode_preferences
+            .iter()
+            .find(|preference| {
+                preference.provider_id == item.provider_id && preference.model == item.model
+            })
+            .map(|preference| preference.mode.clone());
+    }
     catalog
 }
 
@@ -831,6 +847,7 @@ fn model_catalog_item_from_profile(profile: BuiltInModelProfile) -> ModelCatalog
         model_max_output_tokens: Some(profile.max_output_tokens),
         model_thinking_mode: profile.thinking_mode,
         model_thinking_modes: profile.thinking_modes,
+        preferred_thinking_mode: None,
         supports_vision: profile.supports_vision,
         built_in: true,
         model_api: profile.api_override,
@@ -1844,6 +1861,34 @@ mod tests {
             Some("high")
         );
         effort(&mut state, "xhigh");
+        let response =
+            serde_json::to_value(into_response(default_record(&state), &state, &secrets)).unwrap();
+        let inactive = response["selectableModels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["providerId"] == "google.default" && item["model"] == "gemini-4-argon"
+            })
+            .unwrap();
+        assert_eq!(
+            inactive["modelThinkingMode"], "high",
+            "catalog default keeps its existing meaning"
+        );
+        assert_eq!(inactive["preferredThinkingMode"], "low");
+        let provider = response["modelProviders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["providerId"] == "google.default")
+            .unwrap();
+        let catalog_item = provider["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["model"] == "gemini-4-argon")
+            .unwrap();
+        assert_eq!(catalog_item["preferredThinkingMode"], "low");
         select(&mut state, "google.default", "gemini-4-argon");
         assert_eq!(
             default_record(&state).model_thinking_mode.as_deref(),

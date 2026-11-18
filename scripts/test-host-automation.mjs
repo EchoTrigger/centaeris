@@ -40,12 +40,9 @@ try{
  const spec={name:'inspection',cwd:root,prompt:'Inspect this local fixture.',cron:'0 9 * * *',at:null,timezone:'Asia/Taipei',model:{providerId:'custom.scheduler',model:'mock',thinkingMode:null}};
  const creation={action:'create',operationId:'create-inspection',spec};
  const cli=path.join(repo,'target/debug',process.platform==='win32'?'cet.exe':'cet');
- const cliOptions={cwd:root,encoding:'utf8',env:{...process.env,PATH:bin+path.delimiter+process.env.PATH,CENTAERIS_DESKTOP_DATA_DIR:profile,CENTAERIS_RUNTIME_EXE:path.join(repo,'target/debug',process.platform==='win32'?'centaeris-runtime.exe':'centaeris-runtime')}};
+ const cliOptions={cwd:root,encoding:'utf8',env:{...process.env,PATH:bin+path.delimiter+process.env.PATH}};
  assert(execFileSync(cli,['ssh','connect','fixture-host'],cliOptions).includes('fixture-host'));
  const [plan,replay]=await Promise.all([manage(c,creation),manage(other,creation)]);assert.equal(plan.id,replay.id);
- const cliList=JSON.parse(execFileSync(cli,['schedule','list'],cliOptions));assert.equal(cliList.schedules[0].id,plan.id);
- const specFile=path.join(root,'schedule spec.json');await fs.writeFile(specFile,JSON.stringify(spec));
- assert.equal(JSON.parse(execFileSync(cli,['schedule','create',specFile,'create-inspection'],cliOptions)).id,plan.id);
  await assert.rejects(manage(c,{...creation,spec:{...spec,prompt:'changed'}}),/conflict/);
  await assert.rejects(manage(c,{action:'list',unknown:true}),/unknown|invalid/i);
  await assert.rejects(manage(c,{action:'update',scheduleId:plan.id,expectedRevision:99,spec}),/revision conflict/);

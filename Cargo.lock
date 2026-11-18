@@ -461,16 +461,17 @@ dependencies = [
  "centaeris-agent",
  "centaeris-core",
  "centaeris-desktop-services",
- "crossterm",
+ "crossterm 0.29.0",
  "getrandom 0.4.3",
  "image",
+ "pulldown-cmark",
  "ratatui",
  "ratatui-image",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "shell-words",
  "tokio",
+ "unicode-segmentation",
  "unicode-width 0.2.0",
 ]
 
@@ -659,6 +660,21 @@ dependencies = [
  "mio",
  "parking_lot",
  "rustix 0.38.44",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm"
+version = "0.29.0"
+source = "git+https://github.com/crossterm-rs/crossterm?rev=954acceea63028799cd9657b266a5647418e55d3#954acceea63028799cd9657b266a5647418e55d3"
+dependencies = [
+ "bitflags 2.13.1",
+ "crossterm_winapi",
+ "mio",
+ "parking_lot",
+ "rustix 1.1.4",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -2363,7 +2379,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cassowary",
  "compact_str",
- "crossterm",
+ "crossterm 0.28.1",
  "indoc",
  "instability",
  "itertools",

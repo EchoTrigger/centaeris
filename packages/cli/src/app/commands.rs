@@ -6,56 +6,28 @@ pub(super) struct SlashCommand {
 
 pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
+        name: "/model",
+        description: "Choose model and reasoning effort",
+    },
+    SlashCommand {
+        name: "/effort",
+        description: "Choose reasoning effort for the current model",
+    },
+    SlashCommand {
+        name: "/resume",
+        description: "Browse and manage sessions",
+    },
+    SlashCommand {
         name: "/new",
         description: "Start a new session",
     },
     SlashCommand {
-        name: "/resume",
-        description: "Resume a workspace session",
-    },
-    SlashCommand {
-        name: "/model",
-        description: "Configure or switch the model",
-    },
-    SlashCommand {
-        name: "/effort",
-        description: "Show or set reasoning effort",
-    },
-    SlashCommand {
-        name: "/state",
-        description: "Show current runtime state",
+        name: "/clear",
+        description: "Start a new session",
     },
     SlashCommand {
         name: "/stop",
         description: "Stop the running task",
-    },
-    SlashCommand {
-        name: "/process",
-        description: "List, start, read or stop background processes",
-    },
-    SlashCommand {
-        name: "/ssh",
-        description: "Execute a remote command using system OpenSSH",
-    },
-    SlashCommand {
-        name: "/schedule",
-        description: "Manage local schedules and background scheduling",
-    },
-    SlashCommand {
-        name: "/plugins",
-        description: "List or manage plugins",
-    },
-    SlashCommand {
-        name: "/mcp",
-        description: "View and configure MCP servers",
-    },
-    SlashCommand {
-        name: "/clear",
-        description: "Clear the terminal",
-    },
-    SlashCommand {
-        name: "/trim-history",
-        description: "Release loaded history and return to latest",
     },
     SlashCommand {
         name: "/help",
@@ -74,10 +46,6 @@ pub(super) fn slash_command_name(input: &str) -> Option<&str> {
     let first_line = input.lines().next().unwrap_or_default();
     let command = first_line.split_whitespace().next().unwrap_or(first_line);
     Some(command)
-}
-
-pub(super) fn command_exists(name: &str) -> bool {
-    SLASH_COMMANDS.iter().any(|command| command.name == name)
 }
 
 pub(super) fn selected_matching_command(
@@ -106,6 +74,9 @@ pub(super) fn command_completion_suffix(input: &str, selected_command: usize) ->
 }
 
 pub(super) fn matching_commands(input: &str) -> Vec<SlashCommand> {
+    if input.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
     let query = input
         .split_whitespace()
         .next()

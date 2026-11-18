@@ -17,6 +17,8 @@ pub(crate) struct ToolProjection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ToolTranscriptLine {
     pub(crate) key: String,
+    pub(crate) is_bash: bool,
+    pub(crate) exit_code: Option<i64>,
     pub(crate) action_kind: ToolActionKind,
     pub(crate) subject: String,
     pub(crate) full_text: Option<String>,
@@ -44,6 +46,7 @@ struct ToolCall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ToolResult {
     readable_range: Option<(u64, u64)>,
+    exit_code: Option<i64>,
     duration_ms: Option<u64>,
     call_id: String,
     result_state: ToolResultState,
@@ -326,6 +329,16 @@ impl ToolProjection {
         !self.open_calls.is_empty()
     }
 
+    pub(crate) fn active_description(&self) -> Option<&str> {
+        self.open_calls
+            .last()?
+            .description
+            .as_deref()?
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+    }
+
     pub(crate) fn active_label(&self) -> Option<String> {
         self.open_calls.last().map(|call| {
             tool_action_kind(call.tool_name.as_str())
@@ -454,6 +467,8 @@ pub(crate) fn transcript_page_tool_line(
     };
     ToolTranscriptLine {
         full_text: None,
+        is_bash: tool_name == "bash",
+        exit_code: None,
         readable_range: None,
         duration_ms: None,
         key: format!("tool_call:{call_id}"),
@@ -643,6 +658,9 @@ fn decode_tool_result(event: &Value, payload: &Value) -> Result<ToolResult, Stri
         });
     Ok(ToolResult {
         readable_range,
+        exit_code: payload
+            .pointer("/operations/0/exitCode")
+            .and_then(Value::as_i64),
         duration_ms: payload.get("latencyMs").and_then(Value::as_u64),
         call_id,
         result_state,
@@ -893,6 +911,8 @@ fn running_call_line(call: &ToolCall) -> ToolTranscriptLine {
     let action_kind = tool_action_kind(call.tool_name.as_str());
     ToolTranscriptLine {
         full_text: None,
+        is_bash: call.tool_name == "bash",
+        exit_code: None,
         readable_range: None,
         duration_ms: None,
         key: format!("tool_call:{}", call.call_id),
@@ -946,6 +966,8 @@ fn seal_call(call: ToolCall, result: Option<ToolResult>) -> ToolTranscriptLine {
         .map(|result| result.images.clone())
         .unwrap_or_default();
     ToolTranscriptLine {
+        is_bash: call.tool_name == "bash",
+        exit_code: result.as_ref().and_then(|result| result.exit_code),
         readable_range: result.as_ref().and_then(|r| r.readable_range),
         duration_ms: result.as_ref().and_then(|r| r.duration_ms),
         full_text: result

@@ -2,6 +2,8 @@ use super::*;
 use centaeris_core::session::transcript::{
     TranscriptContentRangeV1, TranscriptContentRefV1, TRANSCRIPT_PROJECTION_VERSION_V1,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 const PAGE_BYTES: usize = 16 * 1024;
 pub(super) const PREVIEW_ROWS: usize = 6;
 
@@ -15,6 +17,7 @@ pub(super) struct OutputPreview {
     error: Option<String>,
     run_error: bool,
     assistant_answer: bool,
+    expanded_bash: bool,
 }
 
 const CACHE_ENTRIES: usize = 32;
@@ -49,7 +52,11 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             break;
         }
         let tool = app.transcript.iter().find_map(|line| match line.content() {
-            TranscriptLine::Tool(tool) if &tool.key == key && tool.full_text.is_none() => {
+            TranscriptLine::Tool(tool)
+                if &tool.key == key
+                    && tool.full_text.is_none()
+                    && (!tool.is_bash || app.expanded_bash_tools.contains(key)) =>
+            {
                 Some(tool)
             }
             _ => None,
@@ -103,8 +110,12 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             error: None,
             run_error: run_error.is_some(),
             assistant_answer: assistant_answer.is_some(),
+            expanded_bash: false,
         });
         detail.identity = Some((session.clone(), generation.clone(), reference.clone()));
+        if detail.expanded_bash {
+            detail.content.clear();
+        }
         if detail.assistant_answer
             && reference.byte_length.parse::<u64>().is_ok_and(|bytes| {
                 bytes > centaeris_core::session::visualization::MAX_ANSWER_BYTES as u64
@@ -141,6 +152,7 @@ fn inline_preview(tool: &ToolTranscriptLine) -> OutputPreview {
         error: None,
         run_error: false,
         assistant_answer: false,
+        expanded_bash: tool.is_bash,
     };
     if let Some(text) = &tool.full_text {
         let start = detail
@@ -221,12 +233,16 @@ fn accept_page(detail: &mut OutputPreview, value: Value) -> Result<(), String> {
     {
         return Err("Answer exceeds the display byte limit".into());
     }
-    if detail.run_error || detail.assistant_answer {
+    if detail.run_error || detail.assistant_answer || detail.expanded_bash {
         detail.content.push_str(&page.content);
     } else {
         detail.content = page.content;
     }
-    detail.has_more = page.has_more;
+    detail.has_more = page.has_more
+        && (!detail.expanded_bash
+            || detail
+                .readable_range
+                .is_none_or(|(_, length)| (detail.content.len() as u64) < length));
     Ok(())
 }
 pub(super) fn poll(app: &mut App) -> bool {
@@ -284,7 +300,7 @@ pub(super) fn poll(app: &mut App) -> bool {
         .filter(|detail| detail.pending.is_some())
         .count();
     for detail in app.output_preview.values_mut().filter(|detail| {
-        (detail.run_error || detail.assistant_answer)
+        (detail.run_error || detail.assistant_answer || detail.expanded_bash)
             && detail.pending.is_none()
             && detail.has_more
             && detail.error.is_none()
@@ -295,7 +311,10 @@ pub(super) fn poll(app: &mut App) -> bool {
         let Some((session, generation, reference)) = &detail.identity else {
             continue;
         };
-        detail.requested = detail.content.len().to_string();
+        let start = detail.readable_range.map_or(0, |range| range.0);
+        detail.requested = start
+            .saturating_add(detail.content.len() as u64)
+            .to_string();
         let result = app.runtime.as_mut().ok_or_else(|| "Runtime is unavailable".to_string()).and_then(|runtime| runtime.request_async("transcript/content-range", json!({"request": {
             "schema":"transcript.content.range.read.v1", "sessionId":session,
             "projectionVersion":TRANSCRIPT_PROJECTION_VERSION_V1, "projectionGeneration":generation,
@@ -370,13 +389,13 @@ pub(super) fn preview_lines(
     let detail = app.output_preview.get(&tool.key).unwrap_or(&inline);
     if detail.pending.is_some() {
         return vec![Line::styled(
-            "  └ Loading…",
+            "  │ Loading…",
             Style::default().fg(theme().muted),
         )];
     }
     if let Some(error) = &detail.error {
         return vec![Line::styled(
-            format!("  └ Cannot read output: {error}"),
+            format!("  │ Cannot read output: {error}"),
             Style::default().fg(theme().muted),
         )];
     }
@@ -390,51 +409,70 @@ pub(super) fn preview_lines(
         .content
         .get(..available)
         .unwrap_or("Invalid output body range");
-    let usable = usize::from(width.saturating_sub(4).max(1));
-    let mut rows = Vec::new();
-    let mut row = String::new();
-    let mut used = 0;
-    for ch in body.chars() {
-        if ch == '\n' {
-            rows.push(std::mem::take(&mut row));
-            used = 0;
-        } else {
-            let size = character_width(ch);
-            if used > 0 && used + size > usable {
-                rows.push(std::mem::take(&mut row));
-                used = 0;
+    let usable = usize::from(width.saturating_sub(5).max(2));
+    let mut rows = 1;
+    let mut columns = 0;
+    let mut end = 0;
+    for (byte, grapheme) in body.grapheme_indices(true) {
+        let newline = matches!(grapheme, "\n" | "\r\n");
+        let cells = UnicodeWidthStr::width(grapheme);
+        if newline || (columns > 0 && columns + cells > usable) {
+            if rows == PREVIEW_ROWS {
+                break;
             }
-            row.push(ch);
-            used += size;
+            rows += 1;
+            columns = 0;
         }
-        if rows.len() > PREVIEW_ROWS {
-            break;
+        if !newline {
+            columns += cells;
         }
-    }
-    if !row.is_empty() {
-        rows.push(row);
+        end = byte + grapheme.len();
     }
     let more_content = detail.has_more
         && detail.readable_range.is_none_or(|(offset, len)| {
             start + (detail.content.len() as u64) < offset.saturating_add(len)
         });
-    let omitted = rows.len() > PREVIEW_ROWS || more_content;
-    rows.truncate(PREVIEW_ROWS);
-    if omitted {
-        rows.push("…".into());
+    let omitted = !body[end..].trim_matches(['\r', '\n']).is_empty() || more_content;
+    body[..end]
+        .lines()
+        .chain(omitted.then_some("…"))
+        .map(|text| Line::styled(format!("  │ {text}"), Style::default().fg(theme().muted)))
+        .collect()
+}
+
+pub(super) fn bash_output_lines(app: &App, tool: &ToolTranscriptLine) -> Vec<Line<'static>> {
+    let style = Style::default().fg(theme().muted);
+    let referenced = tool.full_text.is_none()
+        && app
+            .transcript_paging
+            .as_ref()
+            .is_some_and(|state| state.tool_output_reference(&tool.key).is_some());
+    let fallback = if referenced {
+        None
+    } else {
+        empty_tool_result_detail(tool)
+    };
+    let inline = tool
+        .full_text
+        .as_deref()
+        .or(fallback.as_deref())
+        .unwrap_or_default();
+    let detail = app.output_preview.get(&tool.key);
+    let remote_text = detail.map(|detail| detail.content.as_str());
+    let mut body = remote_text.unwrap_or(inline);
+    if let Some((start, length)) = tool.readable_range {
+        let start = if remote_text.is_some() {
+            0
+        } else {
+            start as usize
+        };
+        let end = start.saturating_add(length as usize).min(body.len());
+        body = body.get(start..end).unwrap_or_default();
     }
-    rows.into_iter()
-        .enumerate()
-        .map(|(index, text)| {
-            Line::styled(
-                if text.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!("{}{}", if index == 0 { "  └ " } else { "    " }, text)
-                },
-                Style::default().fg(theme().muted),
-            )
-        })
+    let error = detail.and_then(|detail| detail.error.as_ref());
+    body.lines()
+        .map(|text| Line::styled(format!("  │ {text}"), style))
+        .chain(error.map(|error| Line::styled(format!("  │ Cannot read output: {error}"), style)))
         .collect()
 }
 #[cfg(test)]
@@ -461,6 +499,7 @@ mod tests {
             error: None,
             run_error: false,
             assistant_answer: false,
+            expanded_bash: false,
         };
         let page = json!({"schema":"transcript.content.range.v1","sessionId":"s","projectionVersion":TRANSCRIPT_PROJECTION_VERSION_V1,
             "projectionGeneration":"g","refId":"r","revision":"1","byteLength":"4","startOffset":"0","endOffset":"3","content":"中","hasMore":true});

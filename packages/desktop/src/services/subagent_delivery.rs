@@ -1,6 +1,6 @@
 //! Accepted terminal work is delivered from the durable outbox, independently
 //! of a particular Worker/batch response. Failed items do not stop their siblings.
-use crate::runtime_rpc_transport::EventWriter;
+use crate::runtime_rpc_transport::{EventWriter, SessionWritePermit};
 use crate::{agent_runtime, message_log, sessions, subagent_scheduler};
 use centaeris_core::runtime::persist_subagent_result_projection_from_scheduler_events_async;
 use centaeris_core::runtime::subagent::{
@@ -70,7 +70,7 @@ pub(crate) async fn reconcile_terminal_jobs(writer: &EventWriter) -> Result<(), 
         scan.after = Some((record.job_id.clone(), record.event_type.clone()));
         let delivered = deliver_terminal_job(writer, &record.job_id).await;
         match delivered {
-            Ok(()) => {
+            Ok(Some(_session_writer)) => {
                 checkpoint(DeliveryPoint::BeforeAcknowledgement, &record.job_id);
                 if let Err(error) = jobs
                     .acknowledge_terminal_delivery(
@@ -82,6 +82,7 @@ pub(crate) async fn reconcile_terminal_jobs(writer: &EventWriter) -> Result<(), 
                     errors.push(error.diagnostic_message());
                 }
             }
+            Ok(None) => {}
             Err(error) => errors.push(error),
         }
     }
@@ -96,7 +97,10 @@ pub(crate) async fn reconcile_terminal_jobs(writer: &EventWriter) -> Result<(), 
     }
 }
 
-async fn deliver_terminal_job(writer: &EventWriter, job_id: &str) -> Result<(), String> {
+async fn deliver_terminal_job(
+    writer: &EventWriter,
+    job_id: &str,
+) -> Result<Option<SessionWritePermit>, String> {
     deliver_terminal_job_in_scope(writer, job_id, None).await
 }
 
@@ -113,7 +117,11 @@ pub(crate) async fn finish_child_delivery_before_deletion(
         .await
         .map_err(|error| error.diagnostic_message())?
     {
-        deliver_terminal_job_in_scope(writer, job_id, Some(child)).await?;
+        let Some(_session_writer) =
+            deliver_terminal_job_in_scope(writer, job_id, Some(child)).await?
+        else {
+            return Err(format!("terminal delivery parent is not owned: {job_id}"));
+        };
         jobs.acknowledge_terminal_delivery(
             record,
             centaeris_core::runtime::contracts::current_timestamp_ms(),
@@ -128,7 +136,7 @@ async fn deliver_terminal_job_in_scope(
     writer: &EventWriter,
     job_id: &str,
     deleting_child: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<SessionWritePermit>, String> {
     let jobs = agent_runtime::native_job_store_handle()?;
     let job = jobs
         .get_runtime_job(job_id)
@@ -142,6 +150,9 @@ async fn deliver_terminal_job_in_scope(
         .session_id
         .as_deref()
         .ok_or("terminal delivery parent missing")?;
+    let Some(session_writer) = writer.pin_session(parent)? else {
+        return Ok(None);
+    };
     let _work = writer.begin_background_work(parent)?;
     let native = sessions::listed_children_for_job(parent, job_id)?;
     let [child] = native.as_slice() else {
@@ -208,7 +219,7 @@ async fn deliver_terminal_job_in_scope(
             centaeris_core::runtime::TurnUpdate::RuntimeEvent { event: bridge },
         )?;
     }
-    Ok(())
+    Ok(Some(session_writer))
 }
 
 #[cfg(test)]

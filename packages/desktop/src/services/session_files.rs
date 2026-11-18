@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-#[cfg(test)]
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,7 +6,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::message_log;
 use centaeris_core::session::{
-    reduce_events, SessionManifestV1, SessionMetadataV1, SessionRecordType,
+    fork::SessionFork, reduce_events, SessionManifestV1, SessionMetadataV1, SessionRecordType,
 };
 use serde::{Deserialize, Serialize};
 
@@ -162,6 +161,40 @@ impl SessionFiles {
         message_log::create_session_document(path.as_path(), manifest, metadata)
             .map_err(message_log::CreateSessionDocumentError::into_string)?;
         self.load_path(path.as_path())
+    }
+
+    pub(crate) fn create_fork(
+        &self,
+        source: &SessionFileItem,
+        fork: &SessionFork,
+        now_ms: i64,
+    ) -> Result<SessionFileItem, String> {
+        validate_positive_timestamp(now_ms)?;
+        let cwd = normalize_cwd(Path::new(&source.cwd))?;
+        let _guard = lock_session_files()?;
+        let items = self.load_all()?;
+        let session_id = random_session_id()?;
+        let relative_path = session_log_relative_path(&session_id, now_ms)?;
+        let path = self.path_from_relative(&relative_path)?;
+        let metadata = SessionMetadataV1 {
+            record_id: format!("session:{session_id}:meta:1"),
+            title: source.title.clone(),
+            cwd,
+            session_kind: "main".to_string(),
+            parent_session_id: None,
+            runtime_job_id: None,
+            sort_order: Some(next_sort_order(&items, false)),
+            is_pinned: false,
+            is_unread: false,
+        };
+        let history = fork.rebase(&session_id)?;
+        let manifest = SessionManifestV1::new(
+            session_id,
+            now_ms,
+            centaeris_core::runtime::CORE_PROTOCOL_VERSION,
+        )
+        .map_err(|error| error.to_string())?;
+        message_log::fork::publish(self, &path, manifest, metadata, history)
     }
 
     pub fn create_agent_session(
@@ -801,7 +834,6 @@ fn validate_positive_timestamp(value: i64) -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
 fn random_session_id() -> Result<String, String> {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes)

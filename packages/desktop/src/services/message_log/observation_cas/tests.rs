@@ -30,6 +30,36 @@ fn observation_reference(value: &Value) -> ObservationReference {
 }
 
 #[test]
+fn observation_manifest_preserves_content_kind_binding_for_core_input_uptake() {
+    let directory = TestDirectory::new();
+    let log_path = directory.0.join("session-kind-binding.jsonl");
+    fs::write(&log_path, "{}\n").unwrap();
+    let content =
+        observation_content(&json!({"kind": "input_uptake", "inputIds": ["supplement-1"]}))
+            .unwrap();
+    let content_dir = content_directory(&log_path, "session-kind-binding").unwrap();
+    ensure_content_directory(&content_dir).unwrap();
+    install_content(&content_dir, &content).unwrap();
+    let manifest = build_manifest(
+        None,
+        &[],
+        &[ObservationReference {
+            kind: "system_prompt".into(),
+            digest: content.digest,
+        }],
+    )
+    .unwrap();
+    install_manifest(&content_dir, &manifest).unwrap();
+    let mut wires = vec![json!({
+        "type": "model_request_started", "sessionId": "session-kind-binding",
+        "payload": {"observations": {"manifestDigest": manifest.digest}},
+    })];
+    assert!(hydrate_wires(&log_path, "session-kind-binding", &mut wires)
+        .unwrap_err()
+        .contains("content kind conflict"));
+}
+
+#[test]
 #[ignore = "performance/release gate"]
 fn observation_manifest_growth_is_linear_with_early_changes_through_4095_observations() {
     let directory = TestDirectory::new();

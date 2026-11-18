@@ -171,10 +171,10 @@ isolation backends. Hosts report whether policy is enforced and explicit error
 categories. The [ExecutionHost contract](ExecutionHostContract.md) records the
 current native local Host and the macOS Runtime CI results.
 
-Process shutdown is owned by the Host and Runtime lifecycle. AgentRuns belong
-to the Runtime service and survive the last local client disconnecting. Explicit
-cancel and service shutdown use Core interruption semantics; idle shutdown
-waits until active runs and background jobs have finished.
+Process shutdown follows the runtime lifecycle. Desktop AgentRuns belong to
+the Runtime service and survive the last client disconnecting. CLI AgentRuns
+belong to the `cet` process, which drains its runtime on exit. Explicit cancel
+and shutdown use Core interruption semantics.
 
 Local background commands use the same Runtime-owned process service for Desktop,
 TUI and the native `process_*` dynamic tools. The Agent adapter persists admission

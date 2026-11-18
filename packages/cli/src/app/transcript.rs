@@ -12,13 +12,13 @@ pub(super) enum TranscriptLine {
         state: super::runs::RunState,
         reason: String,
     },
-    ProcessEnd {
-        key: String,
-        label: String,
-    },
     RunFailure {
         key: String,
         reason: String,
+    },
+    RunActivity {
+        key: String,
+        label: &'static str,
     },
     User(String),
     Summary(String),

@@ -32,11 +32,13 @@ For TUI, extract `centaeris-windows-x64.zip` and run:
 
 The first release is a pre-release: `scripts/install-tui.ps1 -Release v0.1.0`
 can select it explicitly once published; the default `latest` selects stable
-releases only. Desktop and TUI use the same local Runtime and user data root,
-normally `%USERPROFILE%\.centaeris`.
+releases only. Desktop and the TUI default to the same user data root,
+`%USERPROFILE%\.centaeris`. The TUI runtime lives inside `cet.exe`. Multiple
+CLI windows can share the directory with one writer per session. Desktop and
+the raw `rpc` mode need exclusive access to their data directory.
 
 To replace an installed Desktop, finish active tasks and exit Desktop using
-its tray menu. Close TUI clients if they use the Runtime in that installation.
+its tray menu.
 Then run the new installer. Setup refuses to replace an occupied Runtime.
 Uninstalling keeps existing sessions, settings, credentials and workspace files.
 Updates are downloaded manually; automatic updates are not enabled.
@@ -94,8 +96,8 @@ Build the standalone TUI archive:
 ```
 
 The archive is written to
-`packages/cli/dist/centaeris-windows-x64.zip`. It contains `cet.exe`, the
-matching native `centaeris-runtime.exe`, license material, and a file manifest
+`packages/cli/dist/centaeris-windows-x64.zip`. It contains `cet.exe`,
+license material, and a file manifest
 verified by the installer.
 
 After an official GitHub Release exists, `scripts/install-tui.ps1` can install a

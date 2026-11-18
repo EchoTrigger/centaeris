@@ -58,7 +58,6 @@ mod workspaces;
 use centaeris_agent::{local_execution_host, openssh};
 pub mod rpc_client;
 pub use local_host::LocalAgentHost;
-pub use rpc_client::run_rpc_stdio;
 
 /// Dispatches the execution helper before an entry point opens its profile.
 /// The entry point exits with the returned code after a helper invocation.

@@ -11,29 +11,16 @@ credentials agent and known-host policy. No credentials are copied into Centaeri
 
 ```text
 cet ssh connect dev
-cet ssh exec dev "uname -a"
 ```
 
 `connect` inherits the native terminal, before TUI raw mode starts. OpenSSH handles
 interactive login and host-key prompts. It does not open an embedded terminal.
-`exec` creates a local Session in the current directory and starts a managed
-background SSH process, printing its Session and process identities as JSON.
-Open that Session in Desktop Task or TUI to inspect output and stop the process.
-
-Inside an existing TUI Session:
-
-```text
-/ssh dev uname -a
-/process list
-/process output <processSessionId>
-/process stop <processSessionId>
-```
 
 Desktop and TUI Agents receive `ssh_start` with `destination`, `command` and
 optional `timeout_ms` (zero/omitted means no deadline) and optional
 `connect_timeout_seconds`; completion and output use the existing `process_list`,
 `process_read` and `process_stop` tools. Agent starts receive automatic completion
-notifications; direct user CLI/TUI starts remain user-managed processes.
+notifications.
 
 The Host method `ssh_start` takes `sessionId`, `serviceInstanceId`, `operationId`,
 `destination`, `command`, and `timeoutMs` inside the usual `request` envelope.
@@ -70,7 +57,6 @@ clarified rather than guessed. Service enablement affects all enabled plans;
 the Agent should inspect existing plans when the service was stopped.
 
 Listing, changing, pausing and deleting plans are also conversational actions.
-The CLI below is a development/diagnostic surface, not a required user workflow.
 
 Plans, immutable occurrence specifications and history are stored atomically in
 the active profile's `runtime/schedules.sqlite3` (private schema version 1).
@@ -79,26 +65,12 @@ The previous `schedules.json` is imported once in a transaction, with an exact
 is stored there. It is a Host-owned store, not an automatically executed project
 file. Unknown schema versions and fields fail loudly.
 
-```text
-cet schedule create "C:/work/daily-review.json" review-plan-1
-cet schedule list [cursor]
-cet schedule service start
-cet schedule history <scheduleId> [cursor]
-cet schedule run <scheduleId> manual-review-1
-cet schedule pause <scheduleId>
-cet schedule resume <scheduleId>
-cet schedule update <scheduleId> <revision> "C:/work/daily-review.json"
-cet schedule delete <scheduleId>
-cet schedule service stop
-```
-
-In the TUI, replace `cet schedule` with `/schedule`; quote file paths containing
-spaces. Results use a scrollable panel. `operationId` arguments for create and
+`operationId` arguments for create and
 manual run are caller-selected stable identities: repeat the same identity only
 to reconcile that same operation. Updates require the revision returned by list
 or create. A conflict requires reading the plan again.
 
-A UTF-8 specification file has this shape (substitute a configured provider,
+The schedule specification has this shape (substitute a configured provider,
 model, supported effort and existing absolute directory):
 
 ```json
@@ -169,7 +141,7 @@ no separate scheduling form or remote-connection screen.
   plan identities stay on disk for history and deduplication. `list` and `history`
   return up to 50 rows by default (maximum 100), with `nextCursor`; pass that as
   `cursor` to continue in the same scope. History is newest first. Desktop offers
-  Load more; Agent and diagnostic CLI callers can request subsequent pages.
+  Load more, and Agents can request subsequent pages.
 
 ## Validation
 

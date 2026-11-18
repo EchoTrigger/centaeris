@@ -607,6 +607,7 @@ export type SelectableModel = {
   modelMaxOutputTokens?: number | null;
   modelThinkingMode?: string | null;
   modelThinkingModes: ModelThinkingMode[];
+  preferredThinkingMode?: string | null;
   modelApi?: ModelWireApi | null;
 };
 
@@ -620,6 +621,7 @@ export type ModelCatalogItem = {
   modelMaxOutputTokens?: number | null;
   modelThinkingMode?: string | null;
   modelThinkingModes: ModelThinkingMode[];
+  preferredThinkingMode?: string | null;
   supportsVision: boolean;
   builtIn: boolean;
   modelApi?: ModelWireApi | null;

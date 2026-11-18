@@ -201,6 +201,7 @@ pub(crate) fn create_command(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| SessionCreateCommandError::failed("session/new operation lock poisoned"))?;
+    let _receipt_lock = crate::local_host::lock_profile_file("session-create", false)?;
     let (title, cwd, request_digest) = canonical_session_create_request(&request)?;
     if let Some(receipt) =
         operation_receipts::read(SESSION_CREATE_METHOD, request.operation_id.as_str())?
@@ -299,6 +300,7 @@ fn delete_with_session_gates(
     if session_id.is_empty() {
         return Err("sessionId is required".to_string());
     }
+    let _writer = event_writer.require_session_writer(session_id)?;
     let process_manager = crate::process_sessions::manager();
     let _process_deletion = process_manager
         .deletion_gate
@@ -416,6 +418,7 @@ pub(crate) async fn delete_async(
     use centaeris_core::session::reliability::{ListRuntimeJobsRequest, RuntimeJobStatus};
     use centaeris_core::session::store::AsyncJobStorePort;
     let root = request.session_id.trim().to_string();
+    let _writer = writer.require_session_writer(&root)?;
     let bound_job = agent_runtime_binding(&root)?;
     let parent = writer.begin_session_deletion(std::slice::from_ref(&root))?;
     let initial_writer = writer.clone();

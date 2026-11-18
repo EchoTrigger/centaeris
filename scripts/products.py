@@ -36,8 +36,7 @@ def build_commands(product, release=False):
     rust = {"core": "centaeris-core", "runtime": "centaeris-desktop-services", "tui": "centaeris-tui",
             "runtime-server": "runtime_server", "hosted-execution": "hosted_execution"}
     if product in rust:
-        names = ["centaeris-desktop-services", rust[product]] if product == "tui" else [rust[product]]
-        return [["cargo", "build", "--locked", "-p", name, *(["--release"] if release else [])] for name in names]
+        return [["cargo", "build", "--locked", "-p", rust[product], *(["--release"] if release else [])]]
     if product == "desktop":
         return [["pwsh", "-NoProfile", "-File", "scripts/build-desktop.ps1"]]
     if product == "web":

@@ -23,7 +23,6 @@ class ProductEntryTests(unittest.TestCase):
             ["cargo", "build", "--locked", "-p", "centaeris-desktop-services"],
         ])
         self.assertEqual(self.plan("tui"), [
-            ["cargo", "build", "--locked", "-p", "centaeris-desktop-services"],
             ["cargo", "build", "--locked", "-p", "centaeris-tui"],
         ])
 

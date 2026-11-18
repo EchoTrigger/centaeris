@@ -56,7 +56,7 @@ use centaeris_core::tool::{DynamicToolRegistry, ModelToolChoice};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -911,7 +911,14 @@ pub(crate) fn input(
     event_writer: EventWriter,
     request: AgentInputRequest,
 ) -> Result<AgentInputResponse, AgentInputCommandError> {
-    input_with_model(event_writer, request, None)
+    input_with_origin(event_writer, request, None, true)
+}
+
+pub(crate) fn input_from_process_completion(
+    event_writer: EventWriter,
+    request: AgentInputRequest,
+) -> Result<AgentInputResponse, AgentInputCommandError> {
+    input_with_origin(event_writer, request, None, false)
 }
 
 pub(crate) fn input_with_model(
@@ -919,7 +926,17 @@ pub(crate) fn input_with_model(
     request: AgentInputRequest,
     scheduled_model: Option<crate::schedules::ModelSelection>,
 ) -> Result<AgentInputResponse, AgentInputCommandError> {
+    input_with_origin(event_writer, request, scheduled_model, false)
+}
+
+fn input_with_origin(
+    event_writer: EventWriter,
+    request: AgentInputRequest,
+    scheduled_model: Option<crate::schedules::ModelSelection>,
+    external_user_prompt: bool,
+) -> Result<AgentInputResponse, AgentInputCommandError> {
     let session_id = normalize_session_id(request.session_id.as_deref());
+    let _session_writer = event_writer.require_session_writer(&session_id)?;
     let message = required_string(request.message.as_str(), "message")?;
     let rewrite_last_user_input = rewrite_last_user_input_from_request(&request)?;
     if rewrite_last_user_input.is_some() && !request.attachments.is_empty() {
@@ -972,6 +989,7 @@ pub(crate) fn input_with_model(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| AgentInputCommandError::failed("session/prompt operation lock poisoned"))?;
+    let _receipt_lock = crate::local_host::lock_profile_file("prompt-receipts", false)?;
     if let Some(receipt) =
         operation_receipts::read(SESSION_PROMPT_METHOD, request.operation_id.as_str())?
     {
@@ -1004,8 +1022,7 @@ pub(crate) fn input_with_model(
         );
     }
     let response = expected_response;
-    operation_receipts::write(
-        SESSION_PROMPT_METHOD,
+    operation_receipts::write_prompt(
         request.operation_id.as_str(),
         request_digest,
         serde_json::to_value(&response).map_err(|error| {
@@ -1013,6 +1030,7 @@ pub(crate) fn input_with_model(
                 "serialize session/prompt receipt result failed: {error}"
             ))
         })?,
+        external_user_prompt,
     )?;
     start_agent_input_from_receipt(
         event_writer,
@@ -1400,6 +1418,7 @@ fn resolve_agent_runtime_from_binding(
 }
 
 fn start_agent_run(mut request: StartAgentRunRequest) -> Result<StartedAgentRun, String> {
+    let session_writer = request.event_writer.require_session_writer(&request.session_id)?;
     let agent_runtime = resolve_agent_runtime(request.session_id.as_str())?;
     let started_at_ms = current_timestamp_ms();
     let turn_id = request
@@ -1409,7 +1428,7 @@ fn start_agent_run(mut request: StartAgentRunRequest) -> Result<StartedAgentRun,
     let started_turn_id = turn_id.clone();
     let agent_run_id = request.requested_agent_run_id.clone().unwrap_or_else(|| {
         let sequence = AGENT_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("agent-run-{started_at_ms}-{sequence}")
+        format!("agent-run-{started_at_ms}-{}-{sequence}", std::process::id())
     });
     let started_agent_run_id = agent_run_id.clone();
     let handle = tokio::runtime::Handle::try_current()
@@ -1498,6 +1517,7 @@ fn start_agent_run(mut request: StartAgentRunRequest) -> Result<StartedAgentRun,
         })?;
     }
     handle.spawn(async move {
+        let _session_writer = session_writer;
         let _active_agent_run_registration = active_agent_run_registration;
         let event_writer_for_error = request.event_writer.clone();
         let session_id_for_error = request.session_id.clone();
@@ -2851,6 +2871,14 @@ fn persist_interrupted_live_text(
 }
 
 pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
+    recover_live_text(None)
+}
+
+pub(crate) fn recover_live_text_for_sessions(sessions: &HashSet<String>) -> Result<(), String> {
+    recover_live_text(Some(sessions))
+}
+
+fn recover_live_text(sessions: Option<&HashSet<String>>) -> Result<(), String> {
     let (recovered_journals, diagnostics) = LiveTextJournal::recover_isolated(
         user_data_layout::runtime_live_text_journal_dir_path().as_path(),
     )?;
@@ -2864,6 +2892,9 @@ pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
         );
     }
     for recovered in recovered_journals {
+        if sessions.is_some_and(|ids| !ids.contains(&recovered.key.session_id)) {
+            continue;
+        }
         let agent_run_id = recovered.key.agent_run_id.clone();
         let recovery = (|| {
             let agent_run = message_log::project_agent_run(recovered.key.agent_run_id.as_str())?
@@ -2984,7 +3015,16 @@ pub(crate) fn recover_unsealed_live_text_journals() -> Result<(), String> {
             );
         }
     }
-    for agent_run in crate::session_catalog::runs(None, None, true)?
+    let runs = if let Some(sessions) = sessions {
+        let mut runs = Vec::new();
+        for session_id in sessions {
+            runs.extend(crate::session_catalog::runs(Some(session_id), None, true)?);
+        }
+        runs
+    } else {
+        crate::session_catalog::runs(None, None, true)?
+    };
+    for agent_run in runs
         .into_iter()
         .filter(|agent_run| matches!(agent_run.status.as_str(), "running" | "stalled"))
     {

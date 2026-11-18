@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+mod session_writers;
+pub(crate) use session_writers::SessionWriters;
+
 /// The existing local profile's Agent host, embedded in the caller's Tokio runtime.
 /// Owns profile configuration, storage, recovery and background work. RPC
 /// listeners have their own entry point over the same host lifecycle.
@@ -21,11 +24,23 @@ pub struct LocalAgentHost {
 }
 
 impl LocalAgentHost {
+    pub(crate) fn clients(&self) -> &Arc<RuntimeServerClientHub> {
+        &self.clients
+    }
+
     /// Starts the profile-scoped host. Its single-writer lock remains held for
     /// the process lifetime, including after shutdown. Requires Tokio.
     pub async fn start() -> Result<Self, RuntimeHostError> {
+        Self::start_with_session_writers(false).await
+    }
+
+    pub(crate) async fn start_for_cli() -> Result<Self, RuntimeHostError> {
+        Self::start_with_session_writers(true).await
+    }
+
+    async fn start_with_session_writers(session_writers: bool) -> Result<Self, RuntimeHostError> {
         let (ready, receiver) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(run(Some(ready), |clients| async move {
+        let task = tokio::spawn(run_inner(session_writers, Some(ready), |clients| async move {
             clients.service_shutdown_requested().await;
             Ok(())
         }));
@@ -73,6 +88,22 @@ pub(crate) struct RuntimeServerSingleton {
 // Blocking Host operations may outlive a cooperative shutdown. The profile
 // writer lock remains held until the embedding process exits.
 static PROCESS_SINGLETON: OnceLock<RuntimeServerSingleton> = OnceLock::new();
+static SHARED_PROFILE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn lock_profile_file(name: &str, read_only: bool) -> Result<Option<File>, String> {
+    let Some(profile) = SHARED_PROFILE_ROOT.get() else {
+        return Ok(None);
+    };
+    let path = profile.join("runtime").join(format!("{name}.lock"));
+    let file = session_writers::open_lock(&path)?;
+    let result = if read_only {
+        FileExt::lock_shared(&file)
+    } else {
+        FileExt::lock_exclusive(&file)
+    };
+    result.map_err(|error| format!("Lock {} failed: {error}", path.display()))?;
+    Ok(Some(file))
+}
 
 pub(crate) fn writer_lock_path(data_root: &Path) -> Result<PathBuf, RuntimeHostError> {
     let profile_id = crate::user_data_layout::profile_identity_for(data_root)
@@ -94,17 +125,38 @@ where
     F: FnOnce(Arc<RuntimeServerClientHub>) -> Fut,
     Fut: std::future::Future<Output = Result<(), RuntimeHostError>>,
 {
+    run_inner(false, ready, serve).await
+}
+
+async fn run_inner<F, Fut>(
+    session_writers: bool,
+    ready: Option<tokio::sync::oneshot::Sender<Arc<RuntimeServerClientHub>>>,
+    serve: F,
+) -> Result<(), RuntimeHostError>
+where
+    F: FnOnce(Arc<RuntimeServerClientHub>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), RuntimeHostError>>,
+{
     crate::user_data_layout::ensure_runtime_endpoint_layout()
         .map_err(|error| RuntimeHostError::new("runtime_endpoint_layout_init_failed", error))?;
     let data_root = crate::user_data_layout::desktop_data_root_dir();
-    let singleton = RuntimeServerSingleton::acquire(writer_lock_path(&data_root)?.as_path())?;
+    let profile_lock = writer_lock_path(&data_root)?;
+    let singleton = RuntimeServerSingleton::acquire_profile(&profile_lock, session_writers)?;
     PROCESS_SINGLETON.set(singleton).map_err(|_| {
         RuntimeHostError::new(
             "runtime_server_already_running",
             "Runtime Server already initialized in this process",
         )
     })?;
-    let result = run_with_business_owners(ready, serve).await;
+    let writers = if session_writers {
+        SHARED_PROFILE_ROOT.set(data_root.clone()).map_err(|_| {
+            RuntimeHostError::new("runtime_server_already_running", "CLI profile is already initialized")
+        })?;
+        Some(SessionWriters::new(&data_root))
+    } else {
+        None
+    };
+    let result = run_with_business_owners(writers, ready, serve).await;
     #[cfg(feature = "native-job-store")]
     let result = {
         let closed = tokio::time::timeout(
@@ -123,6 +175,7 @@ where
 }
 
 async fn run_with_business_owners<F, Fut>(
+    writers: Option<SessionWriters>,
     ready: Option<tokio::sync::oneshot::Sender<Arc<RuntimeServerClientHub>>>,
     serve: F,
 ) -> Result<(), RuntimeHostError>
@@ -130,27 +183,33 @@ where
     F: FnOnce(Arc<RuntimeServerClientHub>) -> Fut,
     Fut: std::future::Future<Output = Result<(), RuntimeHostError>>,
 {
-    crate::user_data_layout::ensure_user_data_layout()
-        .map_err(|error| RuntimeHostError::new("user_data_layout_init_failed", error))?;
-    crate::system_skills_deployment::deploy();
-    agent_runtime::agent_runtime_store_actor()
-        .map_err(|error| RuntimeHostError::new("runtime_server_store_init_failed", error))?;
-    agent_runtime::recover_unsealed_live_text_journals().map_err(|error| {
-        RuntimeHostError::new("runtime_server_live_text_recovery_failed", error)
-    })?;
-    subagent_scheduler::reconcile_stopped_jobs()
-        .await
-        .map_err(|error| RuntimeHostError::new("runtime_server_job_recovery_failed", error))?;
-    #[cfg(feature = "native-job-store")]
     {
-        let startup = Arc::new(RuntimeServerClientHub::default());
-        if let Err(error) =
-            crate::subagent_delivery::reconcile_terminal_jobs(&startup.broadcaster()).await
+        let _initialization = lock_profile_file("initialize", false)
+            .map_err(RuntimeHostError::transport)?;
+        crate::user_data_layout::ensure_user_data_layout()
+            .map_err(|error| RuntimeHostError::new("user_data_layout_init_failed", error))?;
+        crate::system_skills_deployment::deploy();
+        agent_runtime::agent_runtime_store_actor()
+            .map_err(|error| RuntimeHostError::new("runtime_server_store_init_failed", error))?;
+    }
+    if writers.is_none() {
+        agent_runtime::recover_unsealed_live_text_journals().map_err(|error| {
+            RuntimeHostError::new("runtime_server_live_text_recovery_failed", error)
+        })?;
+        subagent_scheduler::reconcile_stopped_jobs()
+            .await
+            .map_err(|error| RuntimeHostError::new("runtime_server_job_recovery_failed", error))?;
+        #[cfg(feature = "native-job-store")]
         {
-            eprintln!("centaeris startup terminal recovery has pending failures: {error}");
+            let startup = Arc::new(RuntimeServerClientHub::default());
+            if let Err(error) =
+                crate::subagent_delivery::reconcile_terminal_jobs(&startup.broadcaster()).await
+            {
+                eprintln!("centaeris startup terminal recovery has pending failures: {error}");
+            }
         }
     }
-    let clients = Arc::new(RuntimeServerClientHub::default());
+    let clients = Arc::new(RuntimeServerClientHub::with_session_writers(writers));
     let shutdown_jobs = Arc::new(subagent_scheduler::ShutdownJobs::default());
     let schedule_worker = tokio::spawn(crate::schedules::run_worker(Arc::clone(&clients)));
     let process_worker = tokio::spawn(crate::process_agent::run_worker(Arc::clone(&clients)));
@@ -206,10 +265,11 @@ where
             )),
         },
     );
-    let processes = tokio::task::spawn_blocking(|| {
+    let shutdown_writer = clients.broadcaster();
+    let processes = tokio::task::spawn_blocking(move || {
         crate::terminal_sessions::manager().shutdown()?;
         crate::process_sessions::manager().shutdown()?;
-        crate::process_agent::flush_completions()
+        crate::process_agent::flush_owned_completions(&shutdown_writer)
     })
     .await
     .map_err(|error| RuntimeHostError::transport(error.to_string()))
@@ -221,7 +281,7 @@ where
 }
 
 pub(crate) async fn drain_service_shutdown(
-    clients: &RuntimeServerClientHub,
+    clients: &Arc<RuntimeServerClientHub>,
     background_worker: &tokio::task::JoinHandle<()>,
     shutdown_jobs: &subagent_scheduler::ShutdownJobs,
     drain: Duration,
@@ -250,7 +310,7 @@ pub(crate) async fn drain_service_shutdown(
             RuntimeHostError::new("runtime_server_shutdown_failed", error.to_string())
         })?
         .map_err(|error| RuntimeHostError::new("runtime_server_shutdown_failed", error))?;
-        subagent_scheduler::stop_pending_jobs(shutdown_jobs)
+        subagent_scheduler::stop_pending_jobs_for_owner(shutdown_jobs, &clients.broadcaster())
             .await
             .map_err(|error| RuntimeHostError::new("runtime_server_shutdown_failed", error))?;
         wait_for_runtime_work(clients, background_worker).await
@@ -276,19 +336,23 @@ pub(crate) async fn drain_service_shutdown(
 }
 
 async fn wait_for_runtime_work(
-    clients: &RuntimeServerClientHub,
+    clients: &Arc<RuntimeServerClientHub>,
     background_worker: &tokio::task::JoinHandle<()>,
 ) -> Result<(), RuntimeHostError> {
     loop {
         let store = agent_runtime::agent_runtime_job_store()
             .map_err(|error| RuntimeHostError::new("runtime_server_shutdown_failed", error))?;
-        let jobs = store
-            .list_runtime_jobs(ListRuntimeJobsRequest {
+        let roots = clients.broadcaster().owned_sessions().map_err(RuntimeHostError::transport)?;
+        let job_scopes = roots.map_or_else(|| vec![None], |ids| ids.into_iter().map(Some).collect());
+        let mut has_jobs = false;
+        for session_id in job_scopes {
+            let jobs = store.list_runtime_jobs(ListRuntimeJobsRequest {
                 statuses: vec![
                     RuntimeJobStatus::Queued,
                     RuntimeJobStatus::Leased,
                     RuntimeJobStatus::Running,
                 ],
+                session_id,
                 limit: 1,
                 ..Default::default()
             })
@@ -296,9 +360,14 @@ async fn wait_for_runtime_work(
             .map_err(|error| {
                 RuntimeHostError::new("runtime_server_shutdown_failed", error.diagnostic_message())
             })?;
+            if !jobs.is_empty() {
+                has_jobs = true;
+                break;
+            }
+        }
         if clients.active_agent_runs()?.is_empty()
             && clients.active_action_count() == 0
-            && jobs.is_empty()
+            && !has_jobs
             && background_worker.is_finished()
             && !crate::terminal_sessions::manager().has_active()
             && !crate::process_sessions::manager().has_active()
@@ -311,7 +380,12 @@ async fn wait_for_runtime_work(
 }
 
 impl RuntimeServerSingleton {
+    #[cfg(test)]
     pub(crate) fn acquire(lock_path: &Path) -> Result<Self, RuntimeHostError> {
+        Self::acquire_profile(lock_path, false)
+    }
+
+    fn acquire_profile(lock_path: &Path, shared: bool) -> Result<Self, RuntimeHostError> {
         let parent = lock_path.parent().ok_or_else(|| {
             RuntimeHostError::new(
                 "runtime_server_lock_invalid",
@@ -342,7 +416,12 @@ impl RuntimeServerSingleton {
                     ),
                 )
             })?;
-        file.try_lock_exclusive().map_err(|error| {
+        let result = if shared {
+            FileExt::try_lock_shared(&file)
+        } else {
+            FileExt::try_lock_exclusive(&file)
+        };
+        result.map_err(|error| {
             RuntimeHostError::new(
                 "runtime_server_already_running",
                 format!(

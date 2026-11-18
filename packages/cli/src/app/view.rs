@@ -1,18 +1,25 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use ratatui::widgets::{Block, BorderType, Borders};
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 
-pub(super) const STATE_PAGE_HEIGHT: u16 = 9;
-pub(super) const COMMAND_NAME_WIDTH: usize = 14;
+pub(super) const COMMAND_NAME_WIDTH: usize = 16;
+const SHORT_TERMINAL_ROWS: u16 = 18;
+const USER_PROMPT_PREFIX: &str = "  ❯ ";
+const USER_PROMPT_CONTINUATION: &str = "    ";
+const PROMPT_TEXT_COLUMN: u16 = USER_PROMPT_CONTINUATION.len() as u16;
 
 pub(super) struct TranscriptView {
     pub(super) lines: Vec<Line<'static>>,
     line_start_rows: Vec<u64>,
     pub(super) source_rows: Vec<(String, u64)>,
+    bash_block_rows: Vec<(String, Range<u64>)>,
     pub(super) images: Vec<TranscriptImagePlacement>,
     pub(super) total_rows: u64,
+    pub(super) layout: Arc<text_layout::TextLayout>,
 }
 
 pub(super) struct TranscriptImagePlacement {
@@ -78,6 +85,11 @@ fn restore_reading_row(
     old_width: u16,
     width: u16,
 ) -> u64 {
+    if old.layout.text == new.layout.text {
+        let offset = old.layout.offset_at(scroll as usize, 0);
+        let preceding_rows = (old.layout.position(offset).0 as u64).saturating_sub(scroll);
+        return (new.layout.position(offset).0 as u64).saturating_sub(preceding_rows);
+    }
     let index = old
         .line_start_rows
         .partition_point(|row| *row <= scroll)
@@ -135,19 +147,25 @@ fn restore_reading_row(
 }
 
 pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &TranscriptView) {
+    mouse::prepare_frame(app);
+    render_content(frame, app, transcript_view);
+    mouse::decorate(frame, app);
+}
+
+fn render_content(frame: &mut Frame, app: &mut App, transcript_view: &TranscriptView) {
     let area = frame.area();
     app.input_area = None;
     app.panel_area = None;
     app.transcript_area = None;
     app.image_preview_area = None;
-    app.transcript_rows.clear();
+    app.transcript_viewport = None;
     app.model_provider_hit_regions.clear();
     app.model_list_area = None;
     app.model_list_offset = 0;
-    app.session_workspace_hit_regions.clear();
-    app.session_list_area = None;
-    app.session_list_offset = 0;
-    app.session_action_area = None;
+    if app.session_picker.is_some() {
+        session_picker::render(frame, area, app);
+        return;
+    }
     if area.width < 32 || area.height < 10 {
         let paragraph =
             Paragraph::new("Terminal too small.").style(Style::default().fg(theme().muted));
@@ -156,44 +174,12 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &Transcr
         return;
     }
 
-    if app.process_panel.is_some() {
-        process_ui::render(frame, app);
-        return;
-    }
-    if app.session_picker_open {
-        render_session_picker(frame, area, app);
-        return;
-    }
-
     if app.model_panel.is_some() {
         render_model_panel(frame, area, app);
         return;
     }
-
-    if app.show_state {
-        let input_rows = input_row_count(app, area.width);
-        let panel_rows = panel_height(
-            app,
-            area.height
-                .saturating_sub(STATE_PAGE_HEIGHT + input_rows + 1),
-        );
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(STATE_PAGE_HEIGHT),
-                Constraint::Length(input_rows),
-                Constraint::Length(panel_rows),
-                Constraint::Length(1),
-            ])
-            .split(area);
-        render_state_page(frame, chunks[0], app);
-        render_input(frame, chunks[1], app);
-        if panel_rows > 0 {
-            app.panel_area = Some(chunks[2]);
-            render_panel(frame, chunks[2], app);
-        }
-        render_status(frame, chunks[3], app);
-        render_image_preview(frame, app, chunks[0]);
+    if app.read_only_session.is_some() {
+        render_read_only_session(frame, area, app, transcript_view);
         return;
     }
 
@@ -201,64 +187,107 @@ pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &Transcr
         || app.tool_projection.has_open_calls()
         || app.active_tool_label.is_some()
         || !app.assistant_buffer.trim().is_empty();
-    let status_rows = u16::from(has_active_agent_run(app));
-    let input_rows = input_row_count(app, area.width);
-    let panel_rows = panel_height(
-        app,
-        area.height.saturating_sub(status_rows + input_rows + 1),
+    let status_rows = u16::from(
+        has_active_agent_run(app)
+            || app.pending_question.is_some()
+            || app.process_state == RuntimeDisplayState::ConnectionLost,
     );
-    let panel_above_input =
-        app.command_panel_open() || app.home_risk_panel.is_some() || app.mcp_panel.is_some();
-    let constraints = if panel_above_input {
-        [
-            Constraint::Min(1),
-            Constraint::Length(status_rows),
-            Constraint::Length(panel_rows),
-            Constraint::Length(input_rows),
-            Constraint::Length(1),
-        ]
+    // One row each for the workspace, transcript and shortcuts, plus two composer borders.
+    let available = area.height.saturating_sub(status_rows + 5);
+    let input_rows = input_row_count(app, area.width).min(available);
+    let panel_space = if app.home_risk_panel.is_some() || app.pending_question.is_some() {
+        available.saturating_sub(1)
     } else {
-        [
-            Constraint::Min(1),
-            Constraint::Length(status_rows),
-            Constraint::Length(input_rows),
-            Constraint::Length(panel_rows),
-            Constraint::Length(1),
-        ]
+        available.saturating_sub(input_rows)
     };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
-    if has_timeline {
-        render_transcript(frame, chunks[0], app, transcript_view);
+    let panel_rows = panel_height(app, panel_space).min(panel_space);
+    let input_rows = input_rows.min(available.saturating_sub(panel_rows));
+    let input_gap = u16::from(
+        area.height > SHORT_TERMINAL_ROWS
+            && available > input_rows
+            && has_timeline
+            && status_rows == 0
+            && panel_rows == 0,
+    );
+    let panel_above_input = app.command_panel_open() || app.home_risk_panel.is_some();
+    let (above_rows, below_rows) = if panel_above_input {
+        (panel_rows, 0)
     } else {
-        render_welcome(frame, chunks[0]);
+        (0, panel_rows)
+    };
+    let [header, history, status, above_input, _, input, below_input, shortcuts] =
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(status_rows),
+            Constraint::Length(above_rows),
+            Constraint::Length(input_gap),
+            Constraint::Length(input_rows + 2),
+            Constraint::Length(below_rows),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+    render_workspace_header(frame, header, app);
+    if has_timeline {
+        render_transcript(frame, history, app, transcript_view);
+    } else {
+        render_welcome(frame, history);
         app.transcript_scroll = 0;
         app.transcript_max_scroll = 0;
         app.transcript_selection = None;
     }
     if status_rows > 0 {
-        render_status_indicator(frame, chunks[1], app);
+        render_status_indicator(frame, status, app);
     }
-    let (panel_area, input_area) = if panel_above_input {
-        (chunks[2], chunks[3])
-    } else {
-        (chunks[3], chunks[2])
-    };
     if panel_rows > 0 {
+        let panel_area = if panel_above_input {
+            above_input
+        } else {
+            below_input
+        };
         app.panel_area = Some(panel_area);
         render_panel(frame, panel_area, app);
     }
-    render_input(frame, input_area, app);
-    render_status(frame, chunks[4], app);
-    render_image_preview(frame, app, chunks[0]);
+    render_input(frame, input, app);
+    render_shortcuts(frame, shortcuts, app);
+    render_image_preview(frame, app, history);
+}
+
+fn render_read_only_session(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    transcript_view: &TranscriptView,
+) {
+    let notice_rows = u16::from(app.message.is_some());
+    let [history, notice, hints, error, status] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(notice_rows),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    render_transcript(frame, history, app, transcript_view);
+    frame.render_widget(
+        Paragraph::new("Session open in another window").style(Style::default().fg(theme().accent)),
+        notice,
+    );
+    frame.render_widget(
+        Paragraph::new("R Retry · F Fork").style(Style::default().fg(theme().muted)),
+        hints,
+    );
+    if let Some(message) = app.message.as_deref() {
+        frame.render_widget(Paragraph::new(message), error);
+    }
+    render_status(frame, status, app);
+    render_image_preview(frame, app, history);
 }
 
 fn render_image_preview(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.image_preview.is_none() {
+    let Some(preview) = app.image_preview.as_mut() else {
         return;
-    }
+    };
     frame.render_widget(Clear, area);
     let available = Rect::new(
         area.x.saturating_add(1),
@@ -266,13 +295,19 @@ fn render_image_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
+    let preview = match preview {
+        ImagePreview::Details(details) => {
+            app.image_preview_area = Some(render_image_details(frame, available, details));
+            return;
+        }
+        ImagePreview::Pixels(preview) => preview,
+    };
     let image_bounds = Rect::new(
         available.x,
         available.y,
         available.width,
         available.height.saturating_sub(1),
     );
-    let preview = app.image_preview.as_mut().expect("preview was checked");
     if preview.requested_bounds != image_bounds {
         preview.requested_bounds = image_bounds;
         request_image_preview_render(preview);
@@ -319,7 +354,9 @@ fn render_image_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         content.width,
         1,
     );
-    let zoom = if preview.view.zoom_steps == 0 {
+    let zoom = if preview.protocol.is_none() {
+        "Loading preview…".to_string()
+    } else if preview.view.zoom_steps == 0 {
         "Fit".to_string()
     } else {
         format!(
@@ -342,10 +379,58 @@ fn render_image_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn render_image_details(frame: &mut Frame, area: Rect, details: &ImagePreviewDetails) -> Rect {
+    let width = area.width.min(72);
+    let height = area.height.min(4);
+    let content = Rect::new(
+        area.x.saturating_add((area.width - width) / 2),
+        area.y.saturating_add((area.height - height) / 2),
+        width,
+        height,
+    );
+    let path = fit_middle_columns(
+        details.path.to_string_lossy().as_ref(),
+        width.saturating_sub(6) as usize,
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("Image information · Esc to close"),
+            Line::from(format!(
+                "{} × {} · {}",
+                details.width, details.height, details.mime_type
+            )),
+            Line::from(format!("Size: {} bytes", details.byte_len)),
+            Line::from(format!("Path: {path}")),
+        ])
+        .style(Style::default().fg(theme().muted)),
+        content,
+    );
+    content
+}
+
+fn composer_layout(app: &App, width: u16) -> text_layout::TextLayout {
+    if app.secret_input_active() {
+        return text_layout::TextLayout::plain(&input_for_display(app, &app.input), width);
+    }
+    let images = app
+        .draft_image_attachments
+        .iter()
+        .map(|image| image.start..image.end)
+        .collect::<Vec<_>>();
+    text_layout::TextLayout::composer(&app.input, width, &images)
+}
+
 pub(super) fn input_row_count(app: &App, width: u16) -> u16 {
-    let usable = (width.saturating_sub(2)).max(1) as usize;
-    let (last_row, _) = cursor_position_in_wrapped(app.input.as_str(), usable);
-    u16::try_from(last_row.saturating_add(1)).unwrap_or(u16::MAX)
+    let layout = composer_layout(app, composer_text_width(width));
+    let caret = layout
+        .caret(input_display_offset(app, clamped_cursor(app)))
+        .0
+        + 1;
+    layout.height().max(caret).clamp(1, 10) as u16
+}
+
+fn composer_text_width(width: u16) -> u16 {
+    width.saturating_sub(PROMPT_TEXT_COLUMN + 1).max(1)
 }
 
 pub(super) fn panel_height(app: &App, max_height: u16) -> u16 {
@@ -360,25 +445,15 @@ pub(super) fn panel_height(app: &App, max_height: u16) -> u16 {
             .unwrap_or(0);
         return (rows + 4).min(max_height);
     }
-    if let Some(panel) = app.mcp_panel.as_ref() {
-        let notice = u16::from(panel.notice.is_some());
-        let rows = if panel.configuring.is_some() {
-            4 + notice
-        } else {
-            panel.servers.len() as u16 + 1 + notice
-        };
-        return rows.min(max_height).max(1);
-    }
     if app.command_panel_open() {
-        let rows = matching_commands(app.input.as_str()).len() as u16;
+        let rows = matching_commands(&app.input).len() as u16;
         return rows.min(max_height).max(1);
     }
-    if app.message.is_some() {
+    if app.message.is_some() || app.secret_input_active() {
         let rows = app
             .message
             .as_deref()
-            .map(|message| message.lines().count() as u16)
-            .unwrap_or(0);
+            .map_or(1, |message| message.lines().count() as u16);
         return rows.min(max_height).max(1);
     }
     0
@@ -400,13 +475,30 @@ pub(super) fn render_transcript(
     }
     output_preview::prepare_visible(app, transcript_view, area.height);
     let window = transcript_render_window(transcript_view, app.transcript_scroll, area.height);
+    app.transcript_viewport = Some(area);
+    let content = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    for (offset, line) in window
+        .lines
+        .iter()
+        .skip(window.local_scroll.into())
+        .take(area.height.into())
+        .enumerate()
+    {
+        if line.style.bg == theme().user_prompt().bg {
+            frame.buffer_mut().set_style(
+                Rect::new(content.x, content.y + offset as u16, content.width, 1),
+                theme().user_prompt(),
+            );
+        }
+    }
     frame.render_widget(
-        Paragraph::new(window.lines)
-            .scroll((window.local_scroll, 0))
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(window.lines).scroll((window.local_scroll, 0)),
+        content,
     );
-    let mut selectable_area = area;
+    let mut selectable_area = content;
     if !app.transcript_follow_bottom && app.transcript_max_scroll > 0 {
         let hint_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
         frame.render_widget(
@@ -420,12 +512,14 @@ pub(super) fn render_transcript(
         selectable_area.height = selectable_area.height.saturating_sub(1);
     }
     app.transcript_area = (selectable_area.height > 0).then_some(selectable_area);
-    app.transcript_rows = rendered_text_rows(frame.buffer_mut(), selectable_area);
-    render_transcript_selection(
-        frame.buffer_mut(),
-        selectable_area,
-        app.transcript_selection,
+    mouse::set_bash_blocks(app, selectable_area, &transcript_view.bash_block_rows);
+    mouse::set_text_layout(
+        app,
+        Arc::clone(&transcript_view.layout),
+        app.transcript_scroll as usize,
     );
+    mouse::render_bash_selection(frame, app);
+    render_transcript_selection(frame.buffer_mut(), selectable_area, app);
     render_inline_images(frame, selectable_area, app, transcript_view);
 }
 
@@ -509,101 +603,52 @@ pub(super) fn transcript_render_window(
     }
 }
 
-pub(super) fn rendered_text_rows(buffer: &Buffer, area: Rect) -> Vec<RenderedTextRow> {
-    use unicode_width::UnicodeWidthStr;
-
-    (0..area.height)
-        .map(|row| {
-            let mut text = String::new();
-            let mut byte_at_column = vec![0; area.width as usize + 1];
-            let mut column = 0usize;
-            while column < area.width as usize {
-                byte_at_column[column] = text.len();
-                let symbol = buffer
-                    .cell(Position::new(
-                        area.x.saturating_add(column as u16),
-                        area.y.saturating_add(row),
-                    ))
-                    .map(|cell| cell.symbol())
-                    .unwrap_or(" ");
-                let before = text.len();
-                text.push_str(symbol);
-                let after = text.len();
-                let width = UnicodeWidthStr::width(symbol)
-                    .max(1)
-                    .min(area.width as usize - column);
-                for offset in 1..=width {
-                    byte_at_column[column + offset] =
-                        if offset * 2 < width { before } else { after };
-                }
-                column += width;
-            }
-            let content_len = text.trim_end().len();
-            text.truncate(content_len);
-            for byte in &mut byte_at_column {
-                *byte = (*byte).min(content_len);
-            }
-            RenderedTextRow {
-                text,
-                byte_at_column,
-            }
-        })
-        .collect()
-}
-
-fn render_transcript_selection(buffer: &mut Buffer, area: Rect, selection: Option<TextSelection>) {
-    let Some(selection) = selection else {
+pub(super) fn render_transcript_selection(buffer: &mut Buffer, area: Rect, app: &App) {
+    let (Some(layout), Some(selection)) = (app.text_layout.as_ref(), app.transcript_selection)
+    else {
         return;
     };
-    let (start, end) = if selection.anchor <= selection.head {
-        (selection.anchor, selection.head)
-    } else {
-        (selection.head, selection.anchor)
-    };
-    for row in start.row..=end.row.min(area.height.saturating_sub(1)) {
-        let from = if row == start.row { start.column } else { 0 };
-        let to = if row == end.row {
-            end.column
-        } else {
-            area.width
+    paint_selection(buffer, area, layout, app.text_scroll, selection);
+}
+
+fn paint_selection(
+    buffer: &mut Buffer,
+    area: Rect,
+    layout: &text_layout::TextLayout,
+    scroll: usize,
+    selection: TextSelection,
+) {
+    for (row, columns) in layout.selected_cells(selection) {
+        let Some(row) = row
+            .checked_sub(scroll)
+            .filter(|row| *row < area.height as usize)
+        else {
+            continue;
         };
-        for column in from.min(area.width)..to.min(area.width) {
-            if let Some(cell) = buffer.cell_mut(Position::new(
-                area.x.saturating_add(column),
-                area.y.saturating_add(row),
-            )) {
+        for column in columns.start.min(area.width as usize)..columns.end.min(area.width as usize) {
+            if let Some(cell) = buffer.cell_mut((area.x + column as u16, area.y + row as u16)) {
                 cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
             }
         }
     }
 }
 
-/// Render one assistant message, marking only its first nonempty line.
+/// Align assistant text with the command and user-message text.
 pub(super) fn render_summary_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     let projected = centaeris_core::session::visualization::project_markdown(text, true);
     let mut markdown =
         render_markdown_lines(projected.trim_start(), width.saturating_sub(2), false).0;
-    indent_assistant_lines(&mut markdown, true, width);
+    indent_assistant_lines(&mut markdown);
     markdown
 }
 
-pub(super) fn indent_assistant_lines(
-    markdown: &mut Vec<Line<'static>>,
-    mut first: bool,
-    width: u16,
-) {
-    *markdown = hard_wrap_input_lines(
-        std::mem::take(markdown),
-        usize::from(width.saturating_sub(2).max(1)),
-    );
+fn indent_assistant_lines(markdown: &mut [Line<'static>]) {
     for line in markdown.iter_mut().filter(|line| {
         line.spans
             .iter()
             .any(|span| !span.content.as_ref().is_empty())
     }) {
-        line.spans
-            .insert(0, Span::raw(if first { "● " } else { "  " }));
-        first = false;
+        line.spans.insert(0, Span::raw("  "));
     }
 }
 
@@ -624,6 +669,7 @@ pub(super) fn materialize_assistant_prefix(app: &mut App) -> bool {
             end = end.min(block.start);
         }
     }
+    end = markdown_table::stable_prefix(&app.assistant_buffer, end);
     if end <= app.assistant_emitted_bytes {
         return false;
     }
@@ -700,16 +746,7 @@ pub(super) fn build_assistant_live_lines(app: &App, width: u16) -> Vec<Line<'sta
         width.saturating_sub(2),
         app.assistant_tail_in_code_block,
     );
-    let prior = render_markdown_lines(
-        &app.assistant_buffer[..app.assistant_emitted_bytes],
-        width.saturating_sub(2),
-        false,
-    )
-    .0;
-    let first = !prior
-        .iter()
-        .any(|line| line.spans.iter().any(|span| !span.content.is_empty()));
-    indent_assistant_lines(&mut lines, first, width);
+    indent_assistant_lines(&mut lines);
     lines
 }
 
@@ -717,34 +754,63 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
     let transcript = runs::visible_transcript(app);
     let mut lines = Vec::new();
     let mut source_line_indices = Vec::new();
+    let mut bash_block_indices = Vec::new();
     let mut image_line_indices = Vec::new();
+    let mut hanging_indents = Vec::new();
+    let mut decorations = Vec::new();
+    let mut spacing = Vec::new();
     let mut cursor = 0;
     while cursor < transcript.len() {
         let item = &transcript[cursor];
         match item {
             TranscriptLine::Tool(tool) => {
+                let expanded = tool.is_bash && app.expanded_bash_tools.contains(&tool.key);
+                let adjacent_collapsed_bash = tool.is_bash
+                    && !expanded
+                    && tool.images.is_empty()
+                    && cursor > 0
+                    && matches!(
+                        &transcript[cursor - 1],
+                        TranscriptLine::Tool(previous)
+                            if previous.is_bash && previous.images.is_empty()
+                                && !app.expanded_bash_tools.contains(&previous.key)
+                    );
+                if !adjacent_collapsed_bash {
+                    space_transcript_blocks(&lines, &mut spacing);
+                }
+                let first_line = lines.len();
                 source_line_indices.push((tool.key.clone(), lines.len()));
-                lines.extend(super::presentation::tool_lines(tool, width));
-                lines.extend(output_preview::preview_lines(app, tool, width));
+                if tool.is_bash {
+                    decorations.push((lines.len(), "› ".len()));
+                    lines.push(presentation::bash_header(tool, width, expanded));
+                    if expanded {
+                        if let Some(command) = &tool.command {
+                            lines.extend(command.lines().enumerate().map(|(index, text)| {
+                                Line::styled(
+                                    format!("{}{text}", if index == 0 { "  $ " } else { "    " }),
+                                    Style::default().fg(theme().muted),
+                                )
+                            }));
+                        }
+                        lines.extend(output_preview::bash_output_lines(app, tool));
+                    }
+                    bash_block_indices.push((tool.key.clone(), first_line..lines.len()));
+                } else {
+                    let (header, indent) = presentation::tool_header(tool);
+                    hanging_indents.push((lines.len(), indent));
+                    lines.push(header);
+                    lines.extend(output_preview::preview_lines(app, tool, width));
+                }
                 for image in &tool.images {
                     image_line_indices.push((image.key.clone(), lines.len()));
                     push_inline_image_lines(&mut lines, image.path.as_str(), width);
                 }
-                lines.push(Line::from(""));
-            }
-            TranscriptLine::ProcessEnd { key, label } => {
-                source_line_indices.push((key.clone(), lines.len()));
-                let text = if label.is_empty() {
-                    format!(
-                        "  └{}",
-                        "─".repeat(usize::from(width.saturating_sub(3).min(60)))
-                    )
-                } else {
-                    format!("  └ {label}")
-                };
-                lines.push(Line::styled(text, Style::default().fg(theme().muted)));
+                if tool.images.is_empty() && (!tool.is_bash || expanded) {
+                    lines.push(Line::default());
+                }
             }
             TranscriptLine::ReferencedAnswer { key } => {
+                space_transcript_blocks(&lines, &mut spacing);
                 source_line_indices.push((key.clone(), lines.len()));
                 let loaded = output_preview::assistant_answer_text(app, key);
                 lines.extend(render_summary_lines(
@@ -754,6 +820,7 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
                 lines.push(Line::from(""));
             }
             TranscriptLine::RunFailure { key, reason } => {
+                space_transcript_blocks(&lines, &mut spacing);
                 source_line_indices.push((key.clone(), lines.len()));
                 let loaded = output_preview::run_error_text(app, key);
                 lines.extend(run_failure_lines(
@@ -761,20 +828,41 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
                     width,
                 ));
             }
+            TranscriptLine::RunActivity { key, label } => {
+                source_line_indices.push((key.clone(), lines.len()));
+                lines.push(Line::styled(
+                    format!("  · {label}"),
+                    Style::default().fg(theme().muted),
+                ));
+            }
+            TranscriptLine::User(text) => {
+                space_transcript_blocks(&lines, &mut spacing);
+                for (line, prefix_bytes) in user_prompt_lines(text) {
+                    decorations.push((lines.len(), prefix_bytes));
+                    hanging_indents.push((lines.len(), usize::from(PROMPT_TEXT_COLUMN)));
+                    lines.push(line);
+                }
+                lines.push(Line::default());
+            }
             _ => {
                 let end = transcript[cursor..]
                     .iter()
                     .position(|item| {
                         matches!(
                             item,
-                            TranscriptLine::Tool(_)
-                                | TranscriptLine::ProcessEnd { .. }
+                            TranscriptLine::User(_)
+                                | TranscriptLine::Tool(_)
                                 | TranscriptLine::RunFailure { .. }
+                                | TranscriptLine::RunActivity { .. }
                                 | TranscriptLine::ReferencedAnswer { .. }
                         )
                     })
                     .map_or(transcript.len(), |offset| cursor + offset);
-                lines.extend(transcript_to_lines(&transcript[cursor..end], width));
+                let block = transcript_to_lines(&transcript[cursor..end], width);
+                if !block.is_empty() && !matches!(item, TranscriptLine::Supplement(_)) {
+                    space_transcript_blocks(&lines, &mut spacing);
+                }
+                lines.extend(block);
                 cursor = end;
                 continue;
             }
@@ -787,45 +875,79 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
             .as_deref()
             .is_none_or(|id| runs::process_visible(app, id))
     {
-        lines.extend(build_assistant_live_lines(app, width));
+        let live = build_assistant_live_lines(app, width);
+        let continues_assistant = matches!(
+            transcript.last(),
+            Some(TranscriptLine::LiveAssistant {
+                separator: false,
+                ..
+            })
+        );
+        if !live.is_empty() && !continues_assistant {
+            space_transcript_blocks(&lines, &mut spacing);
+        }
+        lines.extend(live);
     }
 
-    let mut source_rows = Vec::with_capacity(source_line_indices.len());
-    let mut images = Vec::with_capacity(image_line_indices.len());
-    let mut line_start_rows = Vec::with_capacity(lines.len());
-    let mut total_rows = 0u64;
-    let mut next_source = 0;
-    let mut next_image = 0;
-    for (line_index, line) in lines.iter().enumerate() {
-        line_start_rows.push(total_rows);
-        while source_line_indices
-            .get(next_source)
-            .is_some_and(|(_, index)| *index == line_index)
-        {
-            source_rows.push((source_line_indices[next_source].0.clone(), total_rows));
-            next_source += 1;
-        }
-        while image_line_indices
-            .get(next_image)
-            .is_some_and(|(_, index)| *index == line_index)
-        {
-            images.push(TranscriptImagePlacement {
-                key: image_line_indices[next_image].0.clone(),
-                row: total_rows,
-            });
-            next_image += 1;
-        }
-        total_rows = total_rows.saturating_add(u64::from(paragraph_line_count(
-            std::slice::from_ref(line),
-            width,
-        )));
-    }
-    TranscriptView {
+    let mut byte = 0;
+    let mut decorated = decorations.iter().peekable();
+    let starts = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let start = byte;
+            let prefix = decorated
+                .next_if(|(line_index, _)| *line_index == index)
+                .map_or(0, |(_, bytes)| *bytes);
+            byte += line.to_string().len() + 1 - prefix;
+            start
+        })
+        .collect::<Vec<_>>();
+    let layout = Arc::new(text_layout::TextLayout::transcript(
         lines,
-        line_start_rows,
+        width.saturating_sub(1),
+        &hanging_indents,
+        &decorations,
+        &spacing,
+    ));
+    let source_rows = source_line_indices
+        .into_iter()
+        .map(|(key, index)| (key, layout.position(starts[index]).0 as u64))
+        .collect();
+    let total_rows = layout.height() as u64;
+    let bash_block_rows = bash_block_indices
+        .into_iter()
+        .map(|(key, indices)| {
+            let start = layout.position(starts[indices.start]).0 as u64;
+            // End on the last command/output row, before any spacer for the next block.
+            let last_byte = starts
+                .get(indices.end)
+                .map_or(layout.text.len(), |start| start - 1);
+            let end = layout.position(last_byte).0 as u64 + 1;
+            (key, start..end)
+        })
+        .collect();
+    let images = image_line_indices
+        .into_iter()
+        .map(|(key, index)| TranscriptImagePlacement {
+            key,
+            row: layout.position(starts[index]).0 as u64,
+        })
+        .collect();
+    TranscriptView {
+        lines: layout.lines.clone(),
+        line_start_rows: (0..total_rows).collect(),
         source_rows,
+        bash_block_rows,
         images,
         total_rows,
+        layout,
+    }
+}
+
+fn space_transcript_blocks(lines: &[Line<'_>], spacing: &mut Vec<usize>) {
+    if lines.last().is_some_and(|line| line.width() > 0) {
+        spacing.push(lines.len());
     }
 }
 
@@ -834,7 +956,7 @@ fn push_inline_image_lines(lines: &mut Vec<Line<'static>>, path: &str, width: u1
     lines.push(Line::from(vec![
         Span::styled("  Path: ", Style::default().fg(theme().muted)),
         Span::styled(
-            fit_middle_columns(path, width.saturating_sub(8) as usize),
+            fit_middle_columns(path, width.saturating_sub(9) as usize),
             Style::default().fg(theme().muted),
         ),
     ]));
@@ -852,13 +974,23 @@ pub(super) fn render_markdown_lines(
 ) -> (Vec<Line<'static>>, bool) {
     let mut lines = Vec::new();
     let mut code = in_code_block;
-    for raw_line in text.lines() {
+    let mut tables = markdown_table::tables(text, in_code_block)
+        .into_iter()
+        .peekable();
+    let mut offset = 0;
+    let mut table_end = 0;
+    for raw_line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += raw_line.len();
+        if start < table_end {
+            continue;
+        }
         let trimmed = raw_line.trim_end();
         if let Some(fence) = code_fence(trimmed) {
             code = !code;
-            if let Some(info) = fence {
+            if let (true, Some(info)) = (code, fence) {
                 lines.push(Line::from(Span::styled(
-                    format!("```{info}"),
+                    format!("  {info}"),
                     Style::default().fg(theme().muted),
                 )));
             }
@@ -866,12 +998,26 @@ pub(super) fn render_markdown_lines(
         }
         if code {
             lines.push(Line::from(Span::styled(
-                trimmed.to_string(),
+                format!("  {trimmed}"),
                 Style::default().bg(theme().code_bg),
             )));
             continue;
         }
-        if let Some(heading) = trimmed.strip_prefix("# ") {
+        if tables
+            .peek()
+            .is_some_and(|table| (start..offset).contains(&table.range.start))
+        {
+            let table = tables.next().expect("table starting on this line");
+            table_end = table.range.end;
+            lines.extend(table.render(width.saturating_sub(1)));
+            continue;
+        }
+        let heading_level = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+        if let Some(heading) = (1..=6)
+            .contains(&heading_level)
+            .then(|| trimmed[heading_level..].strip_prefix(' '))
+            .flatten()
+        {
             lines.push(Line::from(vec![Span::styled(
                 heading.to_string(),
                 Style::default()
@@ -884,12 +1030,12 @@ pub(super) fn render_markdown_lines(
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
         {
-            let mut inline = render_inline_markdown(item, width);
+            let mut inline = render_inline_markdown(item);
             inline.insert(0, Span::styled("• ", Style::default().fg(theme().accent)));
             lines.push(Line::from(inline));
             continue;
         }
-        lines.push(Line::from(render_inline_markdown(trimmed, width)));
+        lines.push(Line::from(render_inline_markdown(trimmed)));
     }
     (lines, code)
 }
@@ -903,11 +1049,10 @@ pub(super) fn code_fence(raw: &str) -> Option<Option<&str>> {
 }
 
 /// 行内渲染：`code` 带背景色，**粗体** 加 BOLD。
-pub(super) fn render_inline_markdown(text: &str, width: u16) -> Vec<Span<'static>> {
+pub(super) fn render_inline_markdown(text: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = text;
     let mut plain = String::new();
-    let max_width = width.saturating_sub(2) as usize;
     while !rest.is_empty() {
         if let Some(bold_end) = rest.find("**") {
             let (before, after_open) = rest.split_at(bold_end);
@@ -918,10 +1063,9 @@ pub(super) fn render_inline_markdown(text: &str, width: u16) -> Vec<Span<'static
                     plain.push_str(before);
                 }
                 flush_plain_span(&mut spans, &mut plain);
-                let bold_text = fit_inline(bold, max_width);
-                if !bold_text.is_empty() {
+                if !bold.is_empty() {
                     spans.push(Span::styled(
-                        bold_text.to_string(),
+                        bold.to_string(),
                         Style::default().add_modifier(Modifier::BOLD),
                     ));
                 }
@@ -938,10 +1082,9 @@ pub(super) fn render_inline_markdown(text: &str, width: u16) -> Vec<Span<'static
                     plain.push_str(before);
                 }
                 flush_plain_span(&mut spans, &mut plain);
-                let code_text = fit_inline(code, max_width);
-                if !code_text.is_empty() {
+                if !code.is_empty() {
                     spans.push(Span::styled(
-                        code_text.to_string(),
+                        code.to_string(),
                         Style::default().fg(theme().inline_code_fg),
                     ));
                 }
@@ -964,18 +1107,6 @@ pub(super) fn flush_plain_span(spans: &mut Vec<Span<'static>>, plain: &mut Strin
         return;
     }
     spans.push(Span::raw(std::mem::take(plain)));
-}
-
-pub(super) fn fit_inline(text: &str, max_width: usize) -> &str {
-    if text.chars().count() <= max_width {
-        return text;
-    }
-    let cut = text
-        .char_indices()
-        .nth(max_width.saturating_sub(1))
-        .map(|(index, _)| index)
-        .unwrap_or(text.len());
-    &text[..cut]
 }
 
 pub(super) fn render_welcome(frame: &mut Frame, area: Rect) {
@@ -1001,252 +1132,160 @@ pub(super) fn welcome_line() -> Line<'static> {
     ])
 }
 
-pub(super) fn render_state_page(frame: &mut Frame, area: Rect, app: &App) {
-    frame.render_widget(Paragraph::new(state_lines(app, area.width as usize)), area);
-}
-
-pub(super) fn state_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    let value_width = width.saturating_sub(13).max(1);
-    let runtime = if app.runtime.is_some() {
-        "connected"
-    } else if matches!(
-        app.pending_model_request.as_ref(),
-        Some(PendingModelRequest::Connecting { .. })
-    ) {
-        "connecting"
+pub(super) fn input_display_offset(app: &App, byte: usize) -> usize {
+    if app.secret_input_active() {
+        app.input[..byte].graphemes(true).count() * '•'.len_utf8()
     } else {
-        "not connected"
-    };
-    let model = app.model_display.as_deref().unwrap_or("<not configured>");
-    let effort = app.model_effort.as_deref().unwrap_or("—");
-    let provider = app.model_provider_id.as_deref().unwrap_or("—");
-    let session = app
-        .active_session
-        .as_ref()
-        .map(|session| format!("{} · {}", session.title, session.id))
-        .unwrap_or_else(|| "none".to_string());
-    let context = app
-        .context_usage
-        .as_ref()
-        .map(
-            |usage| match (usage.used_tokens, usage.max_context_tokens) {
-                (Some(used), Some(max)) => match usage.used_percentage {
-                    Some(percentage) => format!("{used} / {max} tokens · {percentage}%"),
-                    None => format!("{used} / {max} tokens"),
-                },
-                _ => usage
-                    .used_percentage
-                    .map(|percentage| format!("{percentage}%"))
-                    .unwrap_or_else(|| "unavailable".to_string()),
-            },
-        )
-        .unwrap_or_else(|| "unavailable".to_string());
-
-    vec![
-        Line::from(vec![
-            Span::styled("/state", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(" · current runtime", Style::default().fg(theme().muted)),
-        ]),
-        Line::from(""),
-        state_row("RUNTIME", runtime),
-        state_row("MODEL", fit_middle(model, value_width)),
-        state_row("EFFORT", effort),
-        state_row("PROVIDER", fit_middle(provider, value_width)),
-        state_row("SESSION", fit_middle(session.as_str(), value_width)),
-        state_row("CONTEXT", fit_middle(context.as_str(), value_width)),
-        state_row(
-            "WORKSPACE",
-            fit_middle(app.workspace_root.as_str(), value_width),
-        ),
-    ]
+        byte
+    }
 }
 
-fn state_row(label: &'static str, value: impl Into<String>) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<11} "), Style::default().fg(theme().muted)),
-        Span::raw(value.into()),
-    ])
+pub(super) fn input_source_offset(app: &App, byte: usize) -> usize {
+    if app.secret_input_active() {
+        app.input
+            .grapheme_indices(true)
+            .nth(byte / '•'.len_utf8())
+            .map_or(app.input.len(), |(byte, _)| byte)
+    } else {
+        byte.min(app.input.len())
+    }
 }
 
 pub(super) fn render_input(frame: &mut Frame, area: Rect, app: &mut App) {
-    let placeholder = if let Some(prompt) = app.model_credential_prompt.as_ref() {
-        Some(format!("API key for {}", prompt.provider_name))
-    } else if let Some(server) = app
-        .mcp_panel
-        .as_ref()
-        .and_then(|panel| panel.configuring.and_then(|index| panel.servers.get(index)))
-    {
-        Some(format!("API key for {}", server.server_id))
-    } else if app.pending_esc_stop {
-        Some("Press Esc again to stop the AgentRun.".to_string())
-    } else if app.pending_question.is_some() {
-        Some("Answer the pending question".to_string())
-    } else {
-        None
-    };
-    let content_area = Rect::new(
-        area.x.saturating_add(2),
-        area.y,
-        area.width.saturating_sub(2),
-        area.height,
-    );
-    let selection = input_selection_range(app);
-    let body = if app.input.is_empty() {
-        vec![Line::from(
-            placeholder
-                .map(|placeholder| Span::styled(placeholder, Style::default().fg(theme().muted)))
-                .unwrap_or_else(|| Span::raw("")),
-        )]
-    } else {
-        let display = input_for_display(app, app.input.as_str());
-        let display_selection = selection.as_ref().map(|range| {
-            if app.secret_input_active() {
-                let bullet_bytes = '•'.len_utf8();
-                let start = app.input[..range.start].chars().count() * bullet_bytes;
-                let end = app.input[..range.end].chars().count() * bullet_bytes;
-                start..end
-            } else {
-                range.clone()
-            }
-        });
-        let ghost = if app.pending_question.is_some() || app.secret_input_active() {
-            None
-        } else {
-            command_completion_suffix(app.input.as_str(), app.selected_command)
-        };
-        let mut input_lines = input_lines_with_selection(display.as_str(), display_selection);
-        if let Some(ghost) = ghost.filter(|_| input_lines.len() == 1 && selection.is_none()) {
-            if let Some(last) = input_lines.last_mut() {
-                last.spans.push(Span::styled(
-                    ghost,
-                    Style::default()
-                        .fg(theme().ghost)
-                        .add_modifier(Modifier::DIM),
-                ));
-            }
+    let focused = app.mouse_state.input_focused && mouse::editor_enabled(app);
+    let border = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme().composer_border(focused));
+    let inner = border.inner(area);
+    frame.render_widget(border, area);
+    let title_width = area.width.saturating_sub(4);
+    if area.height >= 2 && title_width > 0 {
+        let title = status_line(app, title_width.into());
+        if !title.spans.is_empty() {
+            let title_area = Rect::new(area.x + 2, area.bottom() - 1, title_width, 1);
+            frame.render_widget(
+                Paragraph::new(title).alignment(Alignment::Right),
+                title_area,
+            );
         }
-        hard_wrap_input_lines(input_lines, content_area.width.max(1) as usize)
-    };
-    app.input_area = Some(content_area);
-    frame.render_widget(
-        Paragraph::new(vec![Line::from("│"); area.height as usize]).style(
-            Style::default()
-                .fg(theme().accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect::new(area.x, area.y, 1, area.height),
-    );
-    frame.render_widget(Paragraph::new(body), content_area);
-
-    let cursor = clamped_cursor(app);
-    let usable = content_area.width.max(1) as usize;
-    let masked_before;
-    let before = if app.secret_input_active() {
-        masked_before = input_for_display(app, &app.input[..cursor]);
-        masked_before.as_str()
-    } else {
-        &app.input[..cursor]
-    };
-    let (row, column) = cursor_position_in_wrapped(before, usable);
-    let cursor_x = content_area.x.saturating_add(column as u16);
-    let cursor_y = content_area.y.saturating_add(row as u16);
-    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
-}
-
-pub(super) fn input_lines_with_selection(
-    input: &str,
-    selection: Option<Range<usize>>,
-) -> Vec<Line<'static>> {
-    let mut line_start = 0usize;
-    input
-        .split('\n')
-        .map(|line| {
-            let line_end = line_start + line.len();
-            let spans = if let Some(selection) = selection.as_ref() {
-                let start = selection.start.clamp(line_start, line_end) - line_start;
-                let end = selection.end.clamp(line_start, line_end) - line_start;
-                let mut spans = Vec::new();
-                if start > 0 {
-                    spans.push(Span::raw(line[..start].to_string()));
-                }
-                if start < end {
-                    spans.push(Span::styled(
-                        line[start..end].to_string(),
-                        Style::default().add_modifier(Modifier::REVERSED),
-                    ));
-                }
-                if end < line.len() {
-                    spans.push(Span::raw(line[end..].to_string()));
-                }
-                spans
-            } else {
-                vec![Span::raw(line.to_string())]
-            };
-            line_start = line_end.saturating_add(1);
-            Line::from(spans)
-        })
-        .collect()
-}
-
-pub(super) fn hard_wrap_input_lines(
-    lines: Vec<Line<'static>>,
-    usable: usize,
-) -> Vec<Line<'static>> {
-    let usable = usable.max(1);
-    let mut wrapped = Vec::new();
-    for line in lines {
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let mut used = 0usize;
-        for span in line.spans {
-            for character in span.content.chars() {
-                let width = character_width(character);
-                if used + width > usable {
-                    wrapped.push(Line::from(std::mem::take(&mut spans)));
-                    used = 0;
-                }
-                if let Some(last) = spans.last_mut().filter(|last| last.style == span.style) {
-                    last.content.to_mut().push(character);
-                } else {
-                    spans.push(Span::styled(character.to_string(), span.style));
-                }
-                used += width;
-            }
-        }
-        wrapped.push(Line::from(spans));
     }
-    wrapped
+    let content = Rect::new(
+        area.x.saturating_add(PROMPT_TEXT_COLUMN),
+        inner.y,
+        composer_text_width(area.width),
+        inner.height,
+    );
+    let mut layout = composer_layout(app, content.width);
+    let mut text_area = content;
+    if layout.height().max(
+        layout
+            .caret(input_display_offset(app, clamped_cursor(app)))
+            .0
+            + 1,
+    ) > content.height as usize
+    {
+        text_area.width = text_area.width.saturating_sub(1);
+        layout = composer_layout(app, text_area.width);
+    }
+    let (row, column) = layout.caret(input_display_offset(app, clamped_cursor(app)));
+    if !app.input_scroll_override {
+        if row < app.input_scroll {
+            app.input_scroll = row;
+        } else if row >= app.input_scroll + text_area.height as usize {
+            app.input_scroll = row
+                .saturating_add(1)
+                .saturating_sub(text_area.height as usize);
+        }
+    }
+    let maximum = layout
+        .height()
+        .max(row + 1)
+        .saturating_sub(text_area.height as usize);
+    app.input_scroll = app.input_scroll.min(maximum);
+    frame.render_widget(
+        Paragraph::new(&USER_PROMPT_PREFIX[1..]).style(theme().composer_border(focused)),
+        Rect::new(inner.x, inner.y, PROMPT_TEXT_COLUMN - 1, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(
+            layout
+                .lines
+                .iter()
+                .skip(app.input_scroll)
+                .take(text_area.height as usize)
+                .cloned()
+                .collect::<Vec<_>>(),
+        ),
+        text_area,
+    );
+    if let Some(range) = input_selection_range(app) {
+        paint_selection(
+            frame.buffer_mut(),
+            text_area,
+            &layout,
+            app.input_scroll,
+            TextSelection {
+                anchor: input_display_offset(app, range.start),
+                head: input_display_offset(app, range.end),
+            },
+        );
+    }
+    if app.input.is_empty() {
+        let placeholder = if let Some(prompt) = app.model_credential_prompt.as_ref() {
+            Some(format!("API key for {}", prompt.provider_name))
+        } else if app.secret_input_active() {
+            Some("API key (masked)".into())
+        } else if app.pending_question.is_some() {
+            Some("Answer the pending question".into())
+        } else {
+            None
+        };
+        if let Some(placeholder) = placeholder {
+            frame.render_widget(
+                Paragraph::new(placeholder).style(Style::default().fg(theme().muted)),
+                text_area,
+            );
+        }
+    }
+    if let Some(y) = row
+        .checked_sub(app.input_scroll)
+        .filter(|row| *row < text_area.height as usize)
+    {
+        let x = text_area
+            .x
+            .saturating_add(column as u16)
+            .min(text_area.right().saturating_sub(1));
+        let y = text_area.y + y as u16;
+        if !app.secret_input_active()
+            && app.pending_question.is_none()
+            && input_selection_range(app).is_none()
+        {
+            if let Some(ghost) = command_completion_suffix(&app.input, app.selected_command) {
+                frame.render_widget(
+                    Paragraph::new(ghost).style(
+                        Style::default()
+                            .fg(theme().ghost)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                    Rect::new(x, y, text_area.right().saturating_sub(x), 1),
+                );
+            }
+        }
+        if mouse::editor_enabled(app) {
+            frame.set_cursor_position((x, y));
+        }
+    }
+    app.input_area = Some(text_area);
+    app.input_layout = Some(layout);
 }
 
 pub(super) fn input_for_display(app: &App, input: &str) -> String {
     if app.secret_input_active() {
-        "•".repeat(input.chars().count())
+        "•".repeat(input.graphemes(true).count())
     } else {
         input.to_string()
     }
-}
-
-pub(super) fn cursor_position_in_wrapped(before: &str, usable: usize) -> (usize, usize) {
-    let usable = usable.max(1);
-    let mut row = 0usize;
-    let mut column = 0usize;
-    let lines: Vec<&str> = before.split('\n').collect();
-    for (index, line) in lines.iter().enumerate() {
-        let mut used = 0usize;
-        for character in line.chars() {
-            let width = character_width(character);
-            if used + width > usable {
-                row += 1;
-                used = 0;
-            }
-            used += width;
-        }
-        if index + 1 == lines.len() {
-            column = used;
-        } else {
-            row += 1;
-        }
-    }
-    (row, column)
 }
 
 pub(super) fn character_width(character: char) -> usize {
@@ -1264,19 +1303,22 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    if app.mcp_panel.is_some() {
-        render_mcp_panel(frame, area, app);
-        return;
-    }
-
     if app.command_panel_open() {
         render_command_panel(frame, area, app);
         return;
     }
 
-    if let Some(message) = app.message.as_deref() {
+    let message = app.message.clone().or_else(|| {
+        app.model_credential_prompt.as_ref().map(|prompt| {
+            format!(
+                "Enter the API key for {} · Esc to cancel",
+                prompt.provider_name
+            )
+        })
+    });
+    if let Some(message) = message {
         frame.render_widget(
-            Paragraph::new(message.to_string())
+            Paragraph::new(message)
                 .style(Style::default().fg(theme().muted))
                 .wrap(Wrap { trim: true }),
             area,
@@ -1310,6 +1352,7 @@ pub(super) fn render_home_risk_panel(frame: &mut Frame, area: Rect, app: &App) {
     for (index, workspace) in panel.workspaces.iter().enumerate() {
         items.push(
             ListItem::new(Line::from(vec![
+                picker_view::marker(index == selected),
                 Span::styled(
                     format!("{:<24}", fit_middle(workspace.name.as_str(), 24)),
                     Style::default().fg(theme().accent),
@@ -1323,20 +1366,22 @@ pub(super) fn render_home_risk_panel(frame: &mut Frame, area: Rect, app: &App) {
                 ),
             ]))
             .style(if index == selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme().selected_row()
             } else {
                 Style::default()
             }),
         );
     }
     items.push(
-        ListItem::new(Line::from("Continue in the home directory")).style(
-            if selected == panel.workspaces.len() {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default().fg(theme().muted)
-            },
-        ),
+        ListItem::new(Line::from(vec![
+            picker_view::marker(selected == panel.workspaces.len()),
+            Span::raw("Continue in the home directory"),
+        ]))
+        .style(if selected == panel.workspaces.len() {
+            theme().selected_row()
+        } else {
+            Style::default().fg(theme().muted)
+        }),
     );
     if let Some(notice) = panel.notice.as_deref() {
         items.push(ListItem::new(Line::from(Span::styled(
@@ -1353,113 +1398,13 @@ pub(super) fn render_home_risk_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(List::new(items), panel_area);
 }
 
-pub(super) fn render_mcp_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(panel) = app.mcp_panel.as_ref() else {
-        return;
-    };
-    let panel_area = Rect {
-        x: area.x.saturating_add(2),
-        y: area.y,
-        width: area.width.saturating_sub(2).min(94),
-        height: area.height,
-    };
-    let mut items = Vec::new();
-    if let Some(index) = panel.configuring {
-        let Some(server) = panel.servers.get(index) else {
-            return;
-        };
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled("← MCP  ", Style::default().fg(theme().muted)),
-            Span::styled(
-                server.server_id.clone(),
-                Style::default()
-                    .fg(theme().accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])));
-        items.push(ListItem::new(Line::from(Span::styled(
-            fit_middle(server.endpoint.as_deref().unwrap_or("fixed endpoint"), 88),
-            Style::default().fg(theme().timestamp),
-        ))));
-        items.push(ListItem::new(Line::from(Span::styled(
-            "Enter API key below; input is masked.",
-            Style::default().fg(theme().muted),
-        ))));
-        items.push(ListItem::new(Line::from(Span::styled(
-            "Enter Save & test · Esc Back",
-            Style::default().fg(theme().ghost),
-        ))));
-    } else {
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                "MCP",
-                Style::default()
-                    .fg(theme().accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {} servers · ↑↓ Enter · Esc", panel.servers.len()),
-                Style::default().fg(theme().muted),
-            ),
-        ])));
-        for (index, server) in panel.servers.iter().enumerate() {
-            let selected = index == panel.selected.min(panel.servers.len().saturating_sub(1));
-            let actionable = server.configurable
-                && !matches!(
-                    server.status,
-                    TuiMcpServerStatus::Disabled | TuiMcpServerStatus::Unsupported
-                );
-            let status = match server.status {
-                TuiMcpServerStatus::Ready if server.configurable && server.configured => {
-                    "configured"
-                }
-                TuiMcpServerStatus::Ready => "managed",
-                TuiMcpServerStatus::NeedsConfiguration => "configure",
-                TuiMcpServerStatus::Disabled => "plugin disabled",
-                TuiMcpServerStatus::Unsupported => "unsupported",
-            };
-            let transport = match server.transport {
-                TuiMcpTransport::Stdio => "stdio",
-                TuiMcpTransport::StreamableHttp => "http",
-            };
-            let lock = if actionable { "" } else { "lock · " };
-            let plugin = if server.plugin_enabled {
-                server.plugin_display_name.as_str()
-            } else {
-                server.plugin_name.as_str()
-            };
-            let line = Line::from(vec![
-                Span::styled(
-                    fit_middle(server.server_id.as_str(), 34),
-                    if actionable {
-                        Style::default().fg(theme().accent)
-                    } else {
-                        Style::default().fg(theme().muted)
-                    },
-                ),
-                Span::styled(
-                    format!(
-                        "  {plugin} · {} tools · {transport}  {lock}{status}",
-                        server.tool_names.len()
-                    ),
-                    Style::default().fg(theme().timestamp),
-                ),
-            ]);
-            items.push(ListItem::new(line).style(if selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            }));
-        }
+pub(super) fn command_panel_area(area: Rect) -> Rect {
+    let inset = PROMPT_TEXT_COLUMN - 2;
+    Rect {
+        x: area.x.saturating_add(inset),
+        width: area.width.saturating_sub(inset).min(76),
+        ..area
     }
-    if let Some(notice) = panel.notice.as_deref() {
-        items.push(ListItem::new(Line::from(Span::styled(
-            notice.to_string(),
-            Style::default().fg(theme().muted),
-        ))));
-    }
-    frame.render_widget(Clear, area);
-    frame.render_widget(List::new(items), panel_area);
 }
 
 pub(super) fn render_command_panel(frame: &mut Frame, area: Rect, app: &App) {
@@ -1469,12 +1414,7 @@ pub(super) fn render_command_panel(frame: &mut Frame, area: Rect, app: &App) {
 
     let commands = matching_commands(app.input.as_str());
     let height = (commands.len() as u16).min(area.height).max(1);
-    let panel_area = Rect {
-        x: area.x.saturating_add(2),
-        y: area.y,
-        width: area.width.saturating_sub(2).min(76),
-        height,
-    };
+    let panel_area = command_panel_area(Rect { height, ..area });
     let items = if commands.is_empty() {
         vec![ListItem::new(Line::from(vec![
             Span::styled("unknown", Style::default().fg(theme().muted)),
@@ -1488,7 +1428,7 @@ pub(super) fn render_command_panel(frame: &mut Frame, area: Rect, app: &App) {
             .map(|(index, command)| {
                 ListItem::new(command_preview_line(command, index == selected)).style(
                     if index == selected {
-                        Style::default().add_modifier(Modifier::REVERSED)
+                        theme().selected_row()
                     } else {
                         Style::default()
                     },
@@ -1517,8 +1457,9 @@ pub(super) fn command_preview_line(
         Style::default().fg(theme().accent)
     };
     Line::from(vec![
+        picker_view::marker(selected),
         Span::styled(
-            format!("{:<width$}", command.name, width = COMMAND_NAME_WIDTH),
+            format!("{:<width$}", command.name, width = COMMAND_NAME_WIDTH - 2),
             name_style,
         ),
         Span::raw(command.description),
@@ -1559,7 +1500,12 @@ pub(super) fn render_question_panel(frame: &mut Frame, area: Rect, app: &App) {
         )])),
     ];
     if !question.options.is_empty() {
-        for option in &question.options {
+        for option in question
+            .options
+            .iter()
+            .skip(app.mouse_state.question_scroll)
+            .take(panel_area.height.saturating_sub(3) as usize)
+        {
             items.push(ListItem::new(Line::from(vec![Span::styled(
                 fit_middle(
                     option.as_str(),
@@ -1582,14 +1528,20 @@ pub(super) fn render_question_panel(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
-    frame.render_widget(Clear, area);
+    let content = picker_view::content(frame, area);
     app.panel_area = Some(area);
-    let content = Rect::new(
-        area.x.saturating_add(2),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(4),
-        area.height.saturating_sub(2),
-    );
+    let is_effort = app
+        .model_panel
+        .as_ref()
+        .is_some_and(|panel| panel.stage != model_picker::Stage::Models);
+    let title = if is_effort {
+        format!(
+            "Pick reasoning effort · {}",
+            model_picker::selected_model(app).map_or("", |model| model.display_name.as_str())
+        )
+    } else {
+        "Models".into()
+    };
     let notice_rows = u16::from(app.message.is_some());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1602,12 +1554,10 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         ])
         .split(content);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "Models",
-            Style::default().add_modifier(Modifier::BOLD),
-        ))),
+    picker_view::title(
+        frame,
         Rect::new(chunks[0].x, chunks[0].y, chunks[0].width, 1),
+        title,
     );
 
     let panel = app.model_panel.as_ref().expect("model panel was checked");
@@ -1646,20 +1596,29 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         ),
     );
 
+    frame.render_widget(
+        Paragraph::new(format!("Filter: {}", panel.query))
+            .style(Style::default().fg(theme().muted)),
+        Rect::new(chunks[0].x, chunks[0].y + 2, chunks[0].width, 1),
+    );
     let selected_provider = panel
         .selected_provider
         .min(panel.providers.len().saturating_sub(1));
-    let tab_labels = panel
-        .providers
-        .iter()
-        .map(|provider| {
-            if provider.configured {
-                provider.name.clone()
-            } else {
-                format!("{} (setup)", provider.name)
-            }
-        })
-        .collect::<Vec<_>>();
+    let tab_labels = if is_effort {
+        Vec::new()
+    } else {
+        panel
+            .providers
+            .iter()
+            .map(|provider| {
+                if provider.configured {
+                    provider.name.clone()
+                } else {
+                    format!("{} (setup)", provider.name)
+                }
+            })
+            .collect::<Vec<_>>()
+    };
     let tab_widths = tab_labels
         .iter()
         .map(|label| label.chars().map(character_width).sum::<usize>())
@@ -1667,6 +1626,7 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
     let available_width = chunks[0].width as usize;
     let mut first_tab = 0usize;
     while first_tab < selected_provider
+        && selected_provider < tab_widths.len()
         && tab_widths[first_tab..=selected_provider]
             .iter()
             .sum::<usize>()
@@ -1689,7 +1649,7 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         let provider = &panel.providers[index];
         let style = if index == selected_provider {
-            Style::default().add_modifier(Modifier::REVERSED)
+            theme().selected_row()
         } else if provider.configured {
             Style::default()
         } else {
@@ -1721,8 +1681,14 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
             chunks[2],
         );
         frame.render_widget(
-            Paragraph::new("Tab provider · ↑↓ select · Enter choose · Esc back")
-                .style(Style::default().fg(theme().muted)),
+            Paragraph::new(if app.pending_model_request.is_some() {
+                "Applying…"
+            } else if is_effort {
+                "Type to filter · ↑↓ select · Enter apply · Esc back"
+            } else {
+                "Type to filter · Tab provider · ↑↓ select · Enter next · Esc back"
+            })
+            .style(Style::default().fg(theme().muted)),
             chunks[4],
         );
         return;
@@ -1741,70 +1707,34 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         chunks[1],
     );
 
-    let selected_model = panel
-        .selected_model
-        .min(provider.models.len().saturating_sub(1));
-    let items = if provider.configured {
-        provider
-            .models
-            .iter()
-            .enumerate()
-            .map(|(index, model)| {
-                let active = panel.active_provider_id.as_deref()
-                    == Some(provider.provider_id.as_str())
-                    && panel.active_model.as_deref() == Some(model.model.as_str());
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        if active { "● " } else { "  " },
-                        if active {
-                            Style::default()
-                        } else {
-                            Style::default().fg(theme().ghost)
-                        },
-                    ),
-                    Span::styled(
-                        format!(
-                            "{:<32}",
-                            fit_middle_columns(model.display_name.as_str(), 32)
-                        ),
-                        Style::default(),
-                    ),
-                    Span::styled(
-                        format!("  {}", model.model),
-                        Style::default().fg(theme().timestamp),
-                    ),
-                ]))
-                .style(if index == selected_model {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        vec![ListItem::new(Line::from(vec![
-            Span::styled("Configure API key", Style::default()),
-            Span::styled(
-                "  Credentials stay in the shared Runtime config.",
-                Style::default().fg(theme().muted),
-            ),
-        ]))
-        .style(Style::default().add_modifier(Modifier::REVERSED))]
-    };
+    let rows = model_picker::rows(app);
+    let selected_model = rows
+        .iter()
+        .position(|row| row.index == model_picker::selection(app))
+        .unwrap_or(0);
+    let list_area = picker_view::text_area(chunks[2], rows.len());
+    let label_columns = usize::from(list_area.width.saturating_sub(4)).min(32);
+    let items = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            picker_view::row(
+                &row.label,
+                row.description,
+                label_columns,
+                index == selected_model,
+            )
+        })
+        .collect::<Vec<_>>();
     app.model_list_area = Some(chunks[2]);
-    let visible = chunks[2].height as usize;
-    let offset = selected_model.saturating_sub(visible.saturating_sub(1));
-    app.model_list_offset = offset;
     if items.is_empty() {
+        app.model_list_offset = 0;
         frame.render_widget(
-            Paragraph::new("No selectable models.").style(Style::default().fg(theme().muted)),
+            Paragraph::new("No matching options.").style(Style::default().fg(theme().muted)),
             chunks[2],
         );
     } else {
-        let mut state = ListState::default()
-            .with_offset(offset)
-            .with_selected(Some(selected_model));
-        frame.render_stateful_widget(List::new(items), chunks[2], &mut state);
+        app.model_list_offset = picker_view::render_list(frame, list_area, items, selected_model);
     }
 
     if let Some(message) = app.message.as_deref() {
@@ -1812,264 +1742,16 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Paragraph::new(message).style(style), chunks[3]);
     }
     frame.render_widget(
-        Paragraph::new("Tab provider · ↑↓ select · Enter choose · Esc back")
-            .style(Style::default().fg(theme().muted)),
+        Paragraph::new(if app.pending_model_request.is_some() {
+            "Applying…"
+        } else if is_effort {
+            "Type to filter · ↑↓ select · Enter apply · Esc back"
+        } else {
+            "Type to filter · Tab provider · ↑↓ select · Enter next · Esc back"
+        })
+        .style(Style::default().fg(theme().muted)),
         chunks[4],
     );
-}
-
-pub(super) fn render_session_picker(frame: &mut Frame, area: Rect, app: &mut App) {
-    frame.render_widget(Clear, area);
-    app.panel_area = Some(area);
-    let content = Rect::new(
-        area.x.saturating_add(2),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(4),
-        area.height.saturating_sub(2),
-    );
-    let action_rows = if app.rename_session_id.is_some() {
-        input_row_count(app, content.width)
-    } else {
-        u16::from(app.pending_delete.is_some() || app.message.is_some())
-    };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(action_rows),
-            Constraint::Length(1),
-        ])
-        .split(content);
-
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "Sessions",
-            Style::default().add_modifier(Modifier::BOLD),
-        ))),
-        Rect::new(chunks[0].x, chunks[0].y, chunks[0].width, 1),
-    );
-
-    let selected_workspace = app
-        .selected_session_workspace
-        .min(app.session_workspaces.len().saturating_sub(1));
-    let tab_labels = app
-        .session_workspaces
-        .iter()
-        .enumerate()
-        .map(|(index, workspace)| {
-            let name = fit_middle_columns(workspace.name.as_str(), 18);
-            if index == selected_workspace {
-                format!("[{name}]")
-            } else {
-                format!(" {name} ")
-            }
-        })
-        .collect::<Vec<_>>();
-    let tab_widths = tab_labels
-        .iter()
-        .map(|label| label.chars().map(character_width).sum::<usize>())
-        .collect::<Vec<_>>();
-    let available_width = chunks[0].width as usize;
-    let mut first_tab = 0usize;
-    while first_tab < selected_workspace
-        && tab_widths[first_tab..=selected_workspace]
-            .iter()
-            .sum::<usize>()
-            + selected_workspace.saturating_sub(first_tab)
-            > available_width
-    {
-        first_tab += 1;
-    }
-    app.session_workspace_hit_regions = vec![Rect::default(); tab_labels.len()];
-    let mut tabs = Vec::new();
-    let mut used_width = 0usize;
-    for index in first_tab..tab_labels.len() {
-        let separator_width = usize::from(index > first_tab);
-        if used_width + separator_width + tab_widths[index] > available_width {
-            break;
-        }
-        if separator_width > 0 {
-            tabs.push(Span::raw(" "));
-            used_width += 1;
-        }
-        let style = if index == selected_workspace {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().fg(theme().muted)
-        };
-        app.session_workspace_hit_regions[index] = Rect::new(
-            chunks[0].x.saturating_add(used_width as u16),
-            chunks[0].y.saturating_add(1),
-            tab_widths[index] as u16,
-            1,
-        );
-        tabs.push(Span::styled(tab_labels[index].clone(), style));
-        used_width += tab_widths[index];
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(tabs)),
-        Rect::new(
-            chunks[0].x,
-            chunks[0].y.saturating_add(1),
-            chunks[0].width,
-            1,
-        ),
-    );
-    let workspace_root = app
-        .session_workspaces
-        .get(selected_workspace)
-        .map(|workspace| workspace.root.as_str())
-        .unwrap_or("No workspace");
-    frame.render_widget(
-        Paragraph::new(fit_middle_columns(workspace_root, chunks[0].width as usize))
-            .style(Style::default().fg(theme().timestamp)),
-        Rect::new(
-            chunks[0].x,
-            chunks[0].y.saturating_add(2),
-            chunks[0].width,
-            1,
-        ),
-    );
-
-    let selected = app
-        .selected_session
-        .min(app.sessions.len().saturating_sub(1));
-    let title_width = ((chunks[1].width as usize) / 3).clamp(12, 32);
-    let items = app
-        .sessions
-        .iter()
-        .enumerate()
-        .map(|(index, session)| {
-            let pinned = if session.is_pinned { "[P] " } else { "    " };
-            let unread = if session.is_unread { "* " } else { "  " };
-            let preview = session
-                .last_message
-                .as_deref()
-                .filter(|message| !message.trim().is_empty())
-                .unwrap_or("no messages yet");
-            let title = fit_middle_columns(session.title.as_str(), title_width);
-            let title_padding =
-                title_width.saturating_sub(title.chars().map(character_width).sum::<usize>());
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{:<8}  ", session.activity_state.label()),
-                    if session.activity_state == TuiSessionActivityState::Idle {
-                        Style::default()
-                    } else {
-                        Style::default().fg(theme().muted)
-                    },
-                ),
-                Span::styled(
-                    format!("{title}{}", " ".repeat(title_padding)),
-                    Style::default(),
-                ),
-                Span::styled(
-                    format!(
-                        "  {pinned}{unread}{} · {} · {}",
-                        short_session_id(session.id.as_str()),
-                        format_relative_time(session.updated_at),
-                        preview
-                    ),
-                    Style::default().fg(theme().timestamp),
-                ),
-            ]))
-            .style(if index == selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            })
-        })
-        .collect::<Vec<_>>();
-    app.session_list_area = Some(chunks[1]);
-    let visible = chunks[1].height as usize;
-    let offset = selected.saturating_sub(visible.saturating_sub(1));
-    app.session_list_offset = offset;
-    if items.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No sessions in this workspace.")
-                .style(Style::default().fg(theme().muted)),
-            chunks[1],
-        );
-    } else {
-        let mut state = ListState::default()
-            .with_offset(offset)
-            .with_selected(Some(selected));
-        frame.render_stateful_widget(List::new(items), chunks[1], &mut state);
-    }
-
-    if action_rows > 0 {
-        app.session_action_area = Some(chunks[2]);
-        if app.rename_session_id.is_some() {
-            render_input(frame, chunks[2], app);
-        } else if let Some(session_id) = app.pending_delete.as_deref() {
-            let title = app
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
-                .map(|session| session.title.as_str())
-                .unwrap_or(session_id);
-            let half = chunks[2].width.saturating_div(2) as usize;
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(
-                        format!(
-                            "{:<half$}",
-                            fit_middle_columns(format!("[Delete] {title}").as_str(), half)
-                        ),
-                        Style::default().fg(theme().muted),
-                    ),
-                    Span::styled("[Cancel]", Style::default().fg(theme().muted)),
-                ])),
-                chunks[2],
-            );
-        } else if let Some(message) = app.message.as_deref() {
-            frame.render_widget(
-                Paragraph::new(message).style(Style::default().fg(theme().muted)),
-                chunks[2],
-            );
-        }
-    }
-
-    let help = if app.rename_session_id.is_some() {
-        "Enter save · Esc cancel"
-    } else if app.pending_delete.is_some() {
-        "Enter delete · Esc cancel"
-    } else {
-        "Tab workspace · ↑↓ select · N more · Enter resume · P pin · R rename · D delete · Esc back"
-    };
-    frame.render_widget(
-        Paragraph::new(help).style(Style::default().fg(theme().muted)),
-        chunks[3],
-    );
-}
-
-pub(super) fn format_relative_time(updated_at: i64) -> String {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0);
-    let delta_ms = now_ms.saturating_sub(updated_at).max(0);
-    let minutes = delta_ms / 60_000;
-    if minutes < 1 {
-        return "just now".to_string();
-    }
-    if minutes < 60 {
-        return format!("{minutes}m ago");
-    }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return format!("{hours}h ago");
-    }
-    let days = hours / 24;
-    if days < 30 {
-        return format!("{days}d ago");
-    }
-    let months = days / 30;
-    if months < 12 {
-        return format!("{months}mo ago");
-    }
-    format!("{}y ago", months / 12)
 }
 
 pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -2078,68 +1760,151 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-/// 唯一动线：composer 上方的任务状态行（稳定指示 + 当前活动 + 计时）。
-pub(super) fn render_status_indicator(frame: &mut Frame, area: Rect, app: &App) {
-    let started_at = app.agent_run_started_at;
-    let elapsed = started_at
-        .map(|started_at| format_elapsed(started_at.elapsed()))
-        .unwrap_or_else(|| "0m 00s".to_string());
-    let header = status_header(app);
-    let mut spans = vec![
-        Span::styled(
-            "•",
-            Style::default()
-                .fg(theme().accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            header,
-            Style::default()
-                .fg(theme().accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" ({elapsed} • esc 停止)"),
-            Style::default()
-                .fg(theme().muted)
-                .add_modifier(Modifier::DIM),
-        ),
-    ];
-    if let Some(inline) = status_inline(app) {
-        spans.push(Span::styled(
-            format!(" · {inline}"),
-            Style::default()
-                .fg(theme().muted)
-                .add_modifier(Modifier::DIM),
-        ));
+fn render_workspace_header(frame: &mut Frame, area: Rect, app: &App) {
+    let style = Style::default().fg(theme().muted);
+    let label = status_usage::context_label(app).unwrap_or_default();
+    let context_width = (Line::raw(label.as_str()).width() as u16).min(area.width / 2);
+    let [path_area, context_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(context_width)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(fit_middle_columns(
+            &app.session_cwd,
+            path_area.width.saturating_sub(1) as usize,
+        ))
+        .style(style),
+        path_area,
+    );
+    frame.render_widget(Paragraph::new(label).style(style), context_area);
+}
+
+fn render_shortcuts(frame: &mut Frame, area: Rect, app: &App) {
+    let hints = if app.secret_input_active() {
+        "Enter save   Esc back"
+    } else if app.home_risk_panel.is_some() {
+        "↑↓ select   Enter confirm   Esc back"
+    } else if app.pending_question.is_some() {
+        "Enter answer   Esc stop"
+    } else if app.command_panel_open() {
+        "↑↓ select   Enter open   Tab complete"
+    } else if app.pending_esc_stop {
+        "Esc again to stop"
+    } else if has_active_agent_run(app) {
+        "Esc Esc stop   Ctrl+\\ sessions   /help commands"
+    } else {
+        "Enter send   Shift+Enter newline   Ctrl+\\ sessions   /help commands"
+    };
+    frame.render_widget(
+        Paragraph::new(hints).style(Style::default().fg(theme().muted)),
+        area,
+    );
+}
+
+pub(super) fn render_status_indicator(frame: &mut Frame, area: Rect, app: &mut App) {
+    const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const STOP: &str = "[stop]";
+    let elapsed = app.agent_run_started_at.map(|start| start.elapsed());
+    let glyph = if app.pending_question.is_some()
+        || matches!(
+            app.process_state,
+            RuntimeDisplayState::WaitingUser | RuntimeDisplayState::ConnectionLost
+        ) {
+        "·"
+    } else {
+        let tick = elapsed.map_or(0, |duration| {
+            duration.as_millis() / STATUS_REDRAW_INTERVAL.as_millis()
+        });
+        SPINNER[(tick % SPINNER.len() as u128) as usize]
+    };
+    let style = Style::default().fg(theme().muted);
+    let stop_width =
+        if has_active_agent_run(app) && app.process_state != RuntimeDisplayState::ConnectionLost {
+            STOP.len() as u16
+        } else {
+            0
+        };
+    let mut output = status_usage::output_label(app).unwrap_or_default();
+    if Line::raw(output.as_str()).width() + stop_width as usize + 16 > area.width as usize {
+        output.clear();
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let output_width = if output.is_empty() {
+        0
+    } else {
+        Line::raw(output.as_str()).width() as u16 + 2
+    };
+    let [phase_area, output_area, stop_area] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(output_width),
+        Constraint::Length(stop_width),
+    ])
+    .areas(area);
+    let header = status_header(app);
+    let time = elapsed.map_or_else(String::new, |elapsed| {
+        let gap = if header.is_empty() { "" } else { "  " };
+        format!("{gap}{}", format_elapsed(elapsed))
+    });
+    let label_width = phase_area.width.saturating_sub(3 + time.len() as u16);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{glyph} "), style),
+            Span::raw(fit_middle_columns(&header, label_width as usize)),
+            Span::styled(time, style),
+        ])),
+        phase_area,
+    );
+    frame.render_widget(Paragraph::new(output).style(style), output_area);
+    if stop_width == 0 {
+        return;
+    }
+    let hovered = app
+        .mouse_state
+        .position
+        .is_some_and(|position| stop_area.contains(position));
+    let stop_style = if hovered {
+        theme().hovered_row()
+    } else {
+        style
+    };
+    frame.render_widget(Paragraph::new(STOP).style(stop_style), stop_area);
+    app.mouse_state.stop_area = Some(stop_area);
 }
 
 pub(super) fn status_header(app: &App) -> String {
+    if app.process_state == RuntimeDisplayState::ConnectionLost {
+        return "Connection lost".to_string();
+    }
     if app.tool_protocol_error {
         return "Protocol error".to_string();
     }
-    if let Some(count) = tachikoma_easter_egg_count(app) {
-        return if count == 1 {
-            "Tachikoma ×1 · awaiting result…".to_string()
-        } else {
-            format!("Tachikoma ×{count} · whispering…")
-        };
+    if app.pending_question.is_some() {
+        return "Waiting for input".to_string();
     }
-    if let Some(text) = app.runtime_easter_egg {
-        return text.to_string();
+    if let StatusEasterEgg::Showing(egg) = app.status_easter_egg {
+        return match egg {
+            EasterEgg::Wired => "A faint signal crossed the Wired...".to_string(),
+            EasterEgg::LongTunnel => "Emerging from the long tunnel...".to_string(),
+            EasterEgg::Tachikoma => format!("Tachikoma ×{}", app.live_subagent_ids.len()),
+            EasterEgg::KeepsakeClover => "That Keepsake Clover...".to_string(),
+        };
     }
     match app.process_state {
         RuntimeDisplayState::Idle => "Idle",
-        RuntimeDisplayState::ConnectionLost => "Connection lost; run status unknown",
-        RuntimeDisplayState::Thinking => "Thinking",
-        RuntimeDisplayState::ToolRunning => "Running tools",
-        RuntimeDisplayState::ProviderWaiting => "Waiting for model",
-        RuntimeDisplayState::WaitingRuntime => "Waiting",
+        RuntimeDisplayState::ConnectionLost => "Connection lost",
+        RuntimeDisplayState::PendingPhase => "",
+        RuntimeDisplayState::Thinking => "Thinking...",
+        RuntimeDisplayState::Responding => "Responding...",
+        RuntimeDisplayState::ToolRunning => {
+            return app
+                .tool_projection
+                .active_description()
+                .map(str::to_owned)
+                .or_else(|| status_inline(app))
+                .unwrap_or_else(|| "Running tools...".into());
+        }
+        RuntimeDisplayState::Compacting => "Compacting...",
+        RuntimeDisplayState::Waiting(WaitReason::Unspecified) => "Waiting...",
+        RuntimeDisplayState::Waiting(WaitReason::Model) => "Waiting for model...",
+        RuntimeDisplayState::Waiting(WaitReason::Tasks) => "Waiting for tasks...",
         RuntimeDisplayState::WaitingUser => "Waiting for input",
-        RuntimeDisplayState::Working => "Working",
     }
     .to_string()
 }
@@ -2150,15 +1915,19 @@ pub(super) fn status_inline(app: &App) -> Option<String> {
         .or_else(|| app.tool_projection.active_label())
 }
 
-pub(super) fn status_line(app: &App, _width: usize) -> Line<'static> {
-    let mut values = Vec::with_capacity(2);
-    if let Some(effort) = app.model_effort.as_deref() {
-        values.push(effort);
-    }
-    if let Some(model) = app.model_display.as_deref() {
-        values.push(model);
-    }
-    Line::styled(values.join(" · "), Style::default().fg(theme().muted))
+pub(super) fn status_line(app: &App, width: usize) -> Line<'static> {
+    let Some(model) = app.model_display.as_deref() else {
+        return Line::default();
+    };
+    let effort = app
+        .model_effort
+        .as_deref()
+        .map_or_else(String::new, |effort| format!(" ({effort})"));
+    let model = fit_middle_columns(model, width.saturating_sub(effort.len() + 2));
+    Line::styled(
+        format!(" {model}{effort} "),
+        Style::default().fg(theme().muted),
+    )
 }
 
 pub(super) fn paragraph_line_count(lines: &[Line<'static>], width: u16) -> u16 {
@@ -2172,14 +1941,11 @@ pub(super) fn transcript_to_lines(items: &[TranscriptLine], width: u16) -> Vec<L
     transcript_to_lines_from(items, 0, width)
 }
 
-fn run_failure_lines(text: &str, width: u16) -> Vec<Line<'static>> {
-    let content_width = usize::from(width.saturating_sub(2).max(1));
-    let mut lines = hard_wrap_input_lines(
-        text.split('\n')
-            .map(|line| Line::raw(line.to_owned()))
-            .collect(),
-        content_width,
-    );
+fn run_failure_lines(text: &str, _width: u16) -> Vec<Line<'static>> {
+    let mut lines = text
+        .split('\n')
+        .map(|line| Line::raw(line.to_owned()))
+        .collect::<Vec<_>>();
     if lines.is_empty() {
         lines.push(Line::raw(""));
     }
@@ -2195,6 +1961,20 @@ fn run_failure_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+fn user_prompt_lines(text: &str) -> impl Iterator<Item = (Line<'static>, usize)> + '_ {
+    text.split('\n').enumerate().map(|(index, text)| {
+        let prefix = if index == 0 {
+            USER_PROMPT_PREFIX
+        } else {
+            USER_PROMPT_CONTINUATION
+        };
+        (
+            Line::styled(format!("{prefix}{text}"), theme().user_prompt()),
+            prefix.len(),
+        )
+    })
+}
+
 pub(super) fn transcript_to_lines_from(
     items: &[TranscriptLine],
     start: usize,
@@ -2202,16 +1982,12 @@ pub(super) fn transcript_to_lines_from(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut live_in_code_block = false;
-    let mut live_has_content = false;
     for (index, item) in items.iter().enumerate() {
         let emit = index >= start;
-        if !matches!(item.content(), TranscriptLine::LiveAssistant { .. }) {
-            live_has_content = false;
-        }
         match item.content() {
             TranscriptLine::RunItem { .. }
             | TranscriptLine::RunBoundary { .. }
-            | TranscriptLine::ProcessEnd { .. } => {}
+            | TranscriptLine::RunActivity { .. } => {}
             TranscriptLine::ReferencedAnswer { .. } => {
                 live_in_code_block = false;
                 if emit {
@@ -2227,16 +2003,8 @@ pub(super) fn transcript_to_lines_from(
             TranscriptLine::User(text) => {
                 live_in_code_block = false;
                 if emit {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "│ ",
-                            Style::default()
-                                .fg(theme().accent)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(text.clone()),
-                    ]));
-                    lines.push(Line::from(""));
+                    lines.extend(user_prompt_lines(text).map(|(line, _)| line));
+                    lines.push(Line::default());
                 }
             }
             TranscriptLine::Summary(text) => {
@@ -2255,11 +2023,7 @@ pub(super) fn transcript_to_lines_from(
                     width.saturating_sub(2),
                     live_in_code_block,
                 );
-                let has_content = rendered
-                    .iter()
-                    .any(|line| line.spans.iter().any(|span| !span.content.is_empty()));
-                indent_assistant_lines(&mut rendered, !live_has_content, width);
-                live_has_content |= has_content;
+                indent_assistant_lines(&mut rendered);
                 live_in_code_block = in_code_block;
                 if emit {
                     lines.extend(rendered);
@@ -2269,7 +2033,6 @@ pub(super) fn transcript_to_lines_from(
                 }
                 if *separator {
                     live_in_code_block = false;
-                    live_has_content = false;
                 }
             }
             TranscriptLine::Subagent(subagent) => {
@@ -2277,17 +2040,14 @@ pub(super) fn transcript_to_lines_from(
                 if !emit {
                     continue;
                 }
-                let style = match subagent.status.as_str() {
-                    "failed" | "cancelled" => Style::default().fg(theme().muted),
-                    _ => Style::default().fg(theme().muted),
-                };
+                let style = Style::default().fg(theme().muted);
                 let summary = if subagent.summary.trim().is_empty() {
                     String::new()
                 } else {
                     format!(": {}", subagent.summary)
                 };
                 lines.push(Line::from(vec![
-                    Span::styled("● ", style),
+                    Span::styled("  ", style),
                     Span::styled(
                         fit_middle(
                             &format!("{}{}", subagent.title, summary),
@@ -2322,7 +2082,7 @@ pub(super) fn transcript_to_lines_from(
                 if !emit {
                     continue;
                 }
-                lines.extend(super::presentation::tool_lines(tool, width));
+                lines.push(presentation::tool_header(tool).0);
                 let show_diff_path = tool_operation_paths(&tool.operations).len() > 1;
                 let result_detail = empty_tool_result_detail(tool);
                 let detail_replaces_blocks =
@@ -2341,7 +2101,7 @@ pub(super) fn transcript_to_lines_from(
                 live_in_code_block = false;
                 if emit {
                     lines.push(Line::from(vec![
-                        Span::styled("● Error: ", Style::default().fg(ratatui::style::Color::Red)),
+                        Span::styled("  Error: ", Style::default().fg(ratatui::style::Color::Red)),
                         Span::styled(text.clone(), Style::default().fg(theme().muted)),
                     ]));
                 }
@@ -2375,11 +2135,11 @@ pub(super) fn push_tool_result_block(
         ToolResultBlock::Diff { path, rows, .. } => {
             if show_diff_path {
                 lines.push(Line::from(vec![
-                    Span::styled("  └ ", tool_result_style()),
+                    Span::styled("  │ ", tool_result_style()),
                     Span::styled(path.clone(), tool_result_style()),
                 ]));
             }
-            let prefix = "    ";
+            let prefix = "  │ ";
             let line_number_width = diff_line_number_width(rows);
             for row in rows {
                 lines.push(diff_row_line(
@@ -2394,10 +2154,9 @@ pub(super) fn push_tool_result_block(
 }
 
 pub(super) fn push_text_result_block(lines: &mut Vec<Line<'static>>, result_lines: &[String]) {
-    for (index, text) in result_lines.iter().enumerate() {
-        let prefix = if index == 0 { "  └ " } else { "    " };
+    for text in result_lines {
         lines.push(Line::from(vec![
-            Span::styled(prefix.to_string(), tool_result_style()),
+            Span::styled("  │ ", tool_result_style()),
             Span::styled(text.clone(), tool_result_style()),
         ]));
     }
@@ -2470,26 +2229,6 @@ pub(super) fn format_elapsed(duration: Duration) -> String {
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
     format!("{minutes}m {seconds:02}s")
-}
-
-pub(super) fn session_summary(session: &TuiSession) -> String {
-    format!(
-        "{} ({})",
-        session.title,
-        short_session_id(session.id.as_str())
-    )
-}
-
-pub(super) fn short_session_id(id: &str) -> String {
-    let chars = id.chars().collect::<Vec<_>>();
-    if chars.len() <= 18 {
-        return id.to_string();
-    }
-    let tail = chars
-        .iter()
-        .skip(chars.len().saturating_sub(12))
-        .collect::<String>();
-    format!("...{tail}")
 }
 
 pub(super) fn fit_middle(value: &str, max_chars: usize) -> String {

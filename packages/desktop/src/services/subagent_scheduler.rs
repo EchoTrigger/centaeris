@@ -49,11 +49,19 @@ pub(crate) async fn run_background_worker(
         if let Err(error) = crate::subagent_delivery::reconcile_terminal_jobs(&event_writer).await {
             eprintln!("centaeris terminal Job delivery recovery failed: {error}");
         }
-        match next_queued_parent_session().await {
+        match next_queued_parent_session_for_owner(&event_writer).await {
             Ok(Some(session_id)) => {
                 if clients.is_draining() {
                     return;
                 }
+                let _session_writer = match event_writer.pin_session(&session_id) {
+                    Ok(Some(permit)) => permit,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("centaeris Agent background worker ownership failed: {error}");
+                        continue;
+                    }
+                };
                 match run_parent_batch(session_id.as_str(), event_writer.clone(), &shutdown_jobs)
                     .await
                 {
@@ -69,6 +77,29 @@ pub(crate) async fn run_background_worker(
 }
 
 pub(crate) async fn stop_pending_jobs(shutdown_jobs: &ShutdownJobs) -> Result<(), String> {
+    stop_pending_jobs_in_scope(shutdown_jobs, None).await
+}
+
+pub(crate) async fn stop_pending_jobs_for_owner(
+    shutdown_jobs: &ShutdownJobs,
+    writer: &EventWriter,
+) -> Result<(), String> {
+    let Some(sessions) = writer.owned_sessions()? else {
+        return stop_pending_jobs(shutdown_jobs).await;
+    };
+    for session in sessions {
+        let Some(_session_writer) = writer.pin_session(&session)? else {
+            continue;
+        };
+        stop_pending_jobs_in_scope(shutdown_jobs, Some(&session)).await?;
+    }
+    Ok(())
+}
+
+async fn stop_pending_jobs_in_scope(
+    shutdown_jobs: &ShutdownJobs,
+    session_id: Option<&str>,
+) -> Result<(), String> {
     let store = agent_runtime::agent_runtime_job_store()?;
     loop {
         let jobs = store
@@ -78,6 +109,7 @@ pub(crate) async fn stop_pending_jobs(shutdown_jobs: &ShutdownJobs) -> Result<()
                     RuntimeJobStatus::Leased,
                     RuntimeJobStatus::Running,
                 ],
+                session_id: session_id.map(str::to_owned),
                 limit: SUBAGENT_QUEUE_SCAN_LIMIT,
                 ..Default::default()
             })
@@ -180,6 +212,14 @@ async fn resolve_stop_result<S: AsyncJobStorePort + ?Sized>(
 /// Startup reconciles job admission with authoritative Session terminals before
 /// reclaiming expired leases. Stopped child work is never made runnable again.
 pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
+    reconcile_stopped_jobs_in_scope(None).await
+}
+
+pub(crate) async fn reconcile_stopped_jobs_for_session(session_id: &str) -> Result<(), String> {
+    reconcile_stopped_jobs_in_scope(Some(session_id)).await
+}
+
+async fn reconcile_stopped_jobs_in_scope(session_id: Option<&str>) -> Result<(), String> {
     let store = agent_runtime::agent_runtime_job_store()?;
     let mut offset = 0;
     loop {
@@ -190,6 +230,7 @@ pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
                     RuntimeJobStatus::Leased,
                     RuntimeJobStatus::Running,
                 ],
+                session_id: session_id.map(str::to_owned),
                 limit: SUBAGENT_QUEUE_SCAN_LIMIT,
                 offset,
                 ..Default::default()
@@ -211,12 +252,55 @@ pub(crate) async fn reconcile_stopped_jobs() -> Result<(), String> {
     }
 }
 
+async fn next_queued_parent_session_for_owner(
+    writer: &EventWriter,
+) -> Result<Option<String>, String> {
+    let Some(sessions) = writer.owned_sessions()? else {
+        return next_queued_parent_session().await;
+    };
+    if sessions.is_empty() {
+        return Ok(None);
+    }
+    let store = agent_runtime::agent_runtime_job_store()?;
+    reclaim_expired_leases(store.as_ref()).await?;
+    let mut errors = Vec::new();
+    for session in sessions {
+        let Some(_session_writer) = writer.pin_session(&session)? else {
+            continue;
+        };
+        match next_queued_parent_session_in_scope(store.as_ref(), Some(&session)).await {
+            Ok(Some(parent)) => return Ok(Some(parent)),
+            Ok(None) => {}
+            Err(error) => errors.push(error),
+        }
+    }
+    if errors.is_empty() {
+        Ok(None)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 async fn next_queued_parent_session() -> Result<Option<String>, String> {
     let store = agent_runtime::agent_runtime_job_store()?;
+    reclaim_expired_leases(store.as_ref()).await?;
+    next_queued_parent_session_in_scope(store.as_ref(), None).await
+}
+
+async fn reclaim_expired_leases(store: &dyn AsyncJobStorePort) -> Result<(), String> {
+    // Lease expiry is a JobStore transaction shared by all workers. A live
+    // lease cannot be reclaimed, and session ownership still gates admission.
     store
         .reclaim_expired_runtime_job_leases(current_timestamp_ms())
         .await
-        .map_err(|error| error.diagnostic_message())?;
+        .map(|_| ())
+        .map_err(|error| error.diagnostic_message())
+}
+
+async fn next_queued_parent_session_in_scope(
+    store: &dyn AsyncJobStorePort,
+    session_id: Option<&str>,
+) -> Result<Option<String>, String> {
     let mut offset = 0;
     let mut errors = Vec::new();
     loop {
@@ -224,7 +308,7 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
             .list_runtime_jobs(ListRuntimeJobsRequest {
                 statuses: vec![RuntimeJobStatus::Queued],
                 job_kind: Some(SUBAGENT_RUN_JOB_KIND.to_string()),
-                session_id: None,
+                session_id: session_id.map(str::to_owned),
                 branch_id: None,
                 limit: SUBAGENT_QUEUE_SCAN_LIMIT,
                 offset,
@@ -241,23 +325,23 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| format!("Agent runtime job session missing: {}", job.job_id))?;
-            let binding = match load_subagent_work_packet_async(store.as_ref(), &job)
-                .await
-                .and_then(|packet| {
-                    subagent_work_packet_runtime_binding(&packet, &job).map_err(Into::into)
-                }) {
-                Ok(binding) => binding,
-                Err(JobStoreError::Rejected(reason)) => {
-                    reject_invalid_work_packet(store.as_ref(), &job, reason).await?;
-                    offset +=
-                        usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
-                    continue;
-                }
-                Err(error) => return Err(error.diagnostic_message()),
-            };
+            let binding =
+                match load_subagent_work_packet_async(store, &job)
+                    .await
+                    .and_then(|packet| {
+                        subagent_work_packet_runtime_binding(&packet, &job).map_err(Into::into)
+                    }) {
+                    Ok(binding) => binding,
+                    Err(JobStoreError::Rejected(reason)) => {
+                        reject_invalid_work_packet(store, &job, reason).await?;
+                        offset += usize::from(queued_job_is_retained(store, &job.job_id).await?);
+                        continue;
+                    }
+                    Err(error) => return Err(error.diagnostic_message()),
+                };
             if sessions::listed_session(parent_session_id)?.is_none() {
-                stop_job(store.as_ref(), &job, "session_deleted").await?;
-                offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
+                stop_job(store, &job, "session_deleted").await?;
+                offset += usize::from(queued_job_is_retained(store, &job.job_id).await?);
                 continue;
             }
             if let Some(parent_run) = message_log::project_agent_run(&binding.parent_agent_run_id)?
@@ -268,12 +352,12 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
                 })
             {
                 stop_job(
-                    store.as_ref(),
+                    store,
                     &job,
                     parent_run.error.as_deref().unwrap_or("parent_cancelled"),
                 )
                 .await?;
-                offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
+                offset += usize::from(queued_job_is_retained(store, &job.job_id).await?);
                 continue;
             }
             let materialized = sessions::cwd_for_session_id(parent_session_id).and_then(|cwd| {
@@ -292,7 +376,7 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
                     "Agent creation recovery failed: jobId={} error={error}",
                     job.job_id
                 ));
-                offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
+                offset += usize::from(queued_job_is_retained(store, &job.job_id).await?);
                 continue;
             }
             if agent_session_is_ready(&job, &binding)? {
@@ -304,7 +388,7 @@ async fn next_queued_parent_session() -> Result<Option<String>, String> {
                 }
                 return Ok(Some(parent_session_id.to_string()));
             }
-            offset += usize::from(queued_job_is_retained(store.as_ref(), &job.job_id).await?);
+            offset += usize::from(queued_job_is_retained(store, &job.job_id).await?);
         }
     }
     if errors.is_empty() {

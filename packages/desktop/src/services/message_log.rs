@@ -31,6 +31,7 @@ use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Instant, SystemTime};
 
 mod observation_cas;
+pub(crate) mod fork;
 pub(crate) mod read_state;
 
 #[cfg(test)]
@@ -2088,18 +2089,31 @@ fn session_metadata_record(
     )
 }
 
-pub(crate) fn lock_session_logs_for_read() -> Result<RwLockReadGuard<'static, ()>, String> {
-    SESSION_LOG_LOCK
-        .get_or_init(|| RwLock::new(()))
-        .read()
-        .map_err(|_| "session log lock poisoned".to_string())
+pub(crate) struct SessionLogGuard<G> {
+    _file: Option<std::fs::File>,
+    _guard: G,
 }
 
-fn lock_session_logs_for_write() -> Result<RwLockWriteGuard<'static, ()>, String> {
-    SESSION_LOG_LOCK
+pub(crate) fn lock_session_logs_for_read() -> Result<SessionLogGuard<RwLockReadGuard<'static, ()>>, String> {
+    let guard = SESSION_LOG_LOCK
+        .get_or_init(|| RwLock::new(()))
+        .read()
+        .map_err(|_| "session log lock poisoned".to_string())?;
+    Ok(SessionLogGuard {
+        _file: crate::local_host::lock_profile_file("session-logs", true)?,
+        _guard: guard,
+    })
+}
+
+fn lock_session_logs_for_write() -> Result<SessionLogGuard<RwLockWriteGuard<'static, ()>>, String> {
+    let guard = SESSION_LOG_LOCK
         .get_or_init(|| RwLock::new(()))
         .write()
-        .map_err(|_| "session log lock poisoned".to_string())
+        .map_err(|_| "session log lock poisoned".to_string())?;
+    Ok(SessionLogGuard {
+        _file: crate::local_host::lock_profile_file("session-logs", false)?,
+        _guard: guard,
+    })
 }
 
 fn required_string(raw: &str, field: &str) -> Result<String, String> {
@@ -2594,6 +2608,127 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), before_rejected_append);
         read_state::invalidate(&path);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_observation_storage_round_trips_core_delivery_and_input_uptake() {
+        let _guard = test_env_mutex().lock().unwrap_or_else(|p| p.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let session_id = "session-observation-contract";
+        let turn_id = "turn-observation-contract";
+        let run_id = "run-observation-contract";
+        let path = root.path().join(format!("{session_id}.jsonl"));
+        create_session_document(
+            &path,
+            SessionManifestV1::new(
+                session_id,
+                1,
+                centaeris_core::runtime::CORE_PROTOCOL_VERSION,
+            )
+            .unwrap(),
+            SessionMetadataV1 {
+                record_id: String::new(),
+                title: "observation contract".into(),
+                cwd: root.path().to_string_lossy().into(),
+                session_kind: "main".into(),
+                parent_session_id: None,
+                runtime_job_id: None,
+                sort_order: Some(0),
+                is_pinned: false,
+                is_unread: false,
+            },
+        )
+        .map_err(CreateSessionDocumentError::into_string)
+        .unwrap();
+        let started = canonical_session_record(
+            "event:observation-contract:started",
+            SessionRecordType::AgentRunStarted,
+            session_id,
+            Some(turn_id.into()),
+            Some(run_id.into()),
+            2,
+            json!({"userObjective": "Preserve supplemented input in model observations."}),
+        )
+        .unwrap();
+        append_incremental(&path, vec![started]).unwrap();
+        let mut requests = Vec::new();
+        for round in 0..2 {
+            let observations = vec![
+                json!({"kind": "system_prompt", "content": "stable prompt"}),
+                json!({"kind": "required_completion_delivery", "state": {
+                    "schema": "runtime.completion_delivery.v1",
+                    "agentRunId": run_id,
+                    "authorizationDigest": format!("sha256:{}", "a".repeat(64)),
+                    "toolName": "deliver_result",
+                    "inputKey": format!("sha256:{}", "b".repeat(64)),
+                    "turnIds": [turn_id],
+                    "deliveredCallId": null,
+                    "repairAttempted": false,
+                    "draft": null,
+                }}),
+                json!({"kind": "input_uptake", "inputIds": [format!("supplement-{round}")]}),
+            ];
+            let record = canonical_session_record(
+                format!("event:observation-contract:{round}"),
+                SessionRecordType::ModelRequestStarted,
+                session_id,
+                Some(turn_id.into()),
+                Some(run_id.into()),
+                3 + round,
+                test_model_request_payload(observations, &format!("request-{round}")),
+            )
+            .unwrap();
+            append_incremental(&path, vec![record.clone()]).unwrap();
+            requests.push(record);
+        }
+        let original = fs::read_to_string(&path).unwrap();
+        let restored = read_session_document(&path).unwrap();
+        let restored_requests = restored
+            .records
+            .iter()
+            .filter(|record| record.event_type == SessionRecordType::ModelRequestStarted)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(restored_requests, requests);
+
+        for observation in [
+            json!({"kind": "unknown_observation"}),
+            json!({"kind": "input_uptake", "inputIds": "not-an-array"}),
+            json!({"kind": "input_uptake", "inputIds": ["supplement"], "unknownField": true}),
+        ] {
+            let mut invalid = requests[0].clone();
+            invalid.event_id = "event:observation-contract:invalid".into();
+            invalid.payload["observations"] = json!([observation]);
+            assert!(append_incremental(&path, vec![invalid])
+                .unwrap_err()
+                .contains("payload.observations is invalid"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+            // Simulate externally supplied, correctly hashed CAS content. Core
+            // must reject its semantics after the storage adapter hydrates it.
+            let original_lines = original.lines().collect::<Vec<_>>();
+            let mut wire = serde_json::from_str::<Value>(original_lines.last().unwrap()).unwrap();
+            observation_cas::hydrate_wires(&path, session_id, std::slice::from_mut(&mut wire))
+                .unwrap();
+            wire["payload"]["observations"] = json!([observation]);
+            observation_cas::compact_and_install_wires(
+                &path,
+                session_id,
+                std::slice::from_mut(&mut wire),
+            )
+            .unwrap();
+            let mut modified = original_lines[..original_lines.len() - 1].join("\n");
+            modified.push('\n');
+            modified.push_str(&serde_json::to_string(&wire).unwrap());
+            modified.push('\n');
+            fs::write(&path, modified).unwrap();
+            assert!(read_session_document(&path)
+                .err()
+                .expect("Core must reject invalid stored observations")
+                .contains("payload.observations is invalid"));
+            fs::write(&path, &original).unwrap();
+        }
+        read_state::invalidate(&path);
     }
 
     fn test_model_request_payload(observations: Vec<Value>, request_id: &str) -> Value {

@@ -106,7 +106,13 @@ fn open_records(root: &Path) -> Result<rusqlite::Connection, String> {
     use crate::local_work_store as db;
     let mut conn = db::open(&root.join("index.sqlite3"))?;
     if db::get::<bool>(&conn, "meta", "imported")?.is_none() {
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        if db::get::<bool>(&tx, "meta", "imported")?.is_some() {
+            drop(tx);
+            return Ok(conn);
+        }
         // Legacy JSON records remain untouched as the migration backup. The
         // marker and imported rows commit together, so interruption is retryable.
         for entry in fs::read_dir(root).map_err(|e| e.to_string())? {
@@ -531,6 +537,9 @@ pub(crate) fn tick(writer: &EventWriter) -> Result<(), String> {
     let root = root();
     let manager = process_sessions::manager();
     for mut record in records_for(&root, None)? {
+        let Some(_session_writer) = writer.pin_session(&record.owner.session_id)? else {
+            continue;
+        };
         if record.delivery != Delivery::Pending {
             if let Some(id) = record.process_session_id {
                 manager.acknowledge_notification(process_sessions::Target {
@@ -582,7 +591,7 @@ pub(crate) fn tick(writer: &EventWriter) -> Result<(), String> {
                 };
                 // Admission owns the lease and deterministic operation receipt.
                 // Busy races and a lost reply are retried with the same identity.
-                if agent_runtime::input(writer.clone(), request).is_err() {
+                if agent_runtime::input_from_process_completion(writer.clone(), request).is_err() {
                     continue;
                 }
                 record.delivery = Delivery::Delivered;
@@ -613,11 +622,32 @@ pub(crate) async fn run_worker(
     }
 }
 pub(crate) fn flush_completions() -> Result<(), String> {
+    flush_completions_in_scope(None)
+}
+
+pub(crate) fn flush_owned_completions(writer: &EventWriter) -> Result<(), String> {
+    if writer.uses_session_writers() {
+        flush_completions_in_scope(Some(writer))
+    } else {
+        flush_completions()
+    }
+}
+
+fn flush_completions_in_scope(writer: Option<&EventWriter>) -> Result<(), String> {
     let _lock = OUTBOX_LOCK
         .lock()
         .map_err(|_| "process outbox lock poisoned")?;
     let root = root();
     for mut record in records_for(&root, None)? {
+        let _session_writer = match writer {
+            Some(writer) => {
+                let Some(permit) = writer.pin_session(&record.owner.session_id)? else {
+                    continue;
+                };
+                Some(permit)
+            }
+            None => None,
+        };
         if record.delivery == Delivery::Pending
             && record.completion.is_none()
             && capture(&mut record, process_sessions::manager())?

@@ -109,6 +109,7 @@ pub(crate) fn mark_dirty(path: &Path, run_ids: &[&str]) -> Result<(), String> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| "catalog lock poisoned")?;
+    let _shared = crate::local_host::lock_profile_file("session-catalog", false)?;
     let mut conn = open(root)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     enqueue(&tx, root, path)?;
@@ -233,6 +234,7 @@ fn with_index<T>(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| "catalog lock poisoned")?;
+    let _shared = crate::local_host::lock_profile_file("session-catalog", false)?;
     let mut conn = open(root)?;
     initialize(&mut conn, root)?;
     action(&mut conn)

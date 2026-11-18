@@ -1,3 +1,6 @@
+// Core validates event semantics before publication and after hydration. This
+// storage adapter preserves observation bytes and bindings without duplicating
+// Core's observation variants.
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +66,25 @@ pub(super) fn compact_and_install_wires(
     session_id: &str,
     wires: &mut [Value],
 ) -> Result<(), String> {
+    compact_and_install_wires_with_parent(log_path, session_id, wires, || {
+        latest_manifest_digest(log_path, session_id)
+    })
+}
+
+pub(super) fn compact_and_install_new_wires(
+    log_path: &Path,
+    session_id: &str,
+    wires: &mut [Value],
+) -> Result<(), String> {
+    compact_and_install_wires_with_parent(log_path, session_id, wires, || Ok(None))
+}
+
+fn compact_and_install_wires_with_parent(
+    log_path: &Path,
+    session_id: &str,
+    wires: &mut [Value],
+    load_parent: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<(), String> {
     validate_session_log_path(log_path, session_id)?;
     if !wires
         .iter()
@@ -73,7 +95,7 @@ pub(super) fn compact_and_install_wires(
     let mut contents = BTreeMap::<String, ObservationContent>::new();
     let content_dir = content_directory(log_path, session_id)?;
     let mut manifest_cache = BTreeMap::<String, Vec<ObservationReference>>::new();
-    let mut parent_digest = latest_manifest_digest(log_path, session_id)?;
+    let mut parent_digest = load_parent()?;
     let mut parent_references = match parent_digest.as_deref() {
         Some(digest) => {
             resolve_manifest_references(content_dir.as_path(), digest, &mut manifest_cache)?
@@ -239,7 +261,7 @@ pub(super) fn delete_session_document(path: &Path, session_id: &str) -> Result<(
             return Err(format!(
                 "delete session log failed for {}: {error}",
                 path.display()
-            ))
+            ));
         }
     }
     let content_dir = content_directory(path, session_id)?;
@@ -250,7 +272,7 @@ pub(super) fn delete_session_document(path: &Path, session_id: &str) -> Result<(
             return Err(format!(
                 "delete model observation CAS failed for {}: {error}",
                 content_dir.display()
-            ))
+            ));
         }
     }
     Ok(())
@@ -436,7 +458,6 @@ fn observation_content(observation: &Value) -> Result<ObservationContent, String
     let kind = observation
         .get("kind")
         .and_then(Value::as_str)
-        .filter(|kind| valid_kind(kind))
         .ok_or_else(|| "model observation storage kind is invalid".to_string())?
         .to_string();
     let content_json = serde_json::to_string(observation)
@@ -660,13 +681,9 @@ fn decode_manifest(digest: &str, content_json: String) -> Result<ObservationMani
             return Err("stored model observation manifest changes are not ordered".to_string());
         }
         previous_index = Some(index);
-        let kind = object
-            .get("kind")
-            .and_then(Value::as_str)
-            .filter(|kind| valid_kind(kind))
-            .ok_or_else(|| {
-                "stored model observation manifest change kind is invalid".to_string()
-            })?;
+        let kind = object.get("kind").and_then(Value::as_str).ok_or_else(|| {
+            "stored model observation manifest change kind is invalid".to_string()
+        })?;
         let reference_digest = object
             .get("contentDigest")
             .and_then(Value::as_str)
@@ -821,7 +838,6 @@ fn decode_content(digest: &str, content_json: String) -> Result<ObservationConte
     let kind = value
         .get("kind")
         .and_then(Value::as_str)
-        .filter(|kind| valid_kind(kind))
         .ok_or_else(|| "stored model observation content kind is invalid".to_string())?
         .to_string();
     if !value.is_object() || value.get("contentDigest").is_some() {
@@ -839,13 +855,6 @@ fn require_wire_session(wire: &Value, expected_session_id: &str) -> Result<(), S
         return Err("stored model request sessionId mismatch".to_string());
     }
     Ok(())
-}
-
-fn valid_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "system_prompt" | "message" | "input_image" | "tool_catalog" | "compaction_prompt"
-    )
 }
 
 fn digest_content(content_json: &str) -> String {
@@ -884,7 +893,7 @@ fn content_directory(log_path: &Path, session_id: &str) -> Result<PathBuf, Strin
     let path = log_path.with_extension(CONTENT_DIRECTORY_EXTENSION);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err("model observation CAS must be a real directory".to_string())
+            return Err("model observation CAS must be a real directory".to_string());
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -923,7 +932,7 @@ fn ensure_content_directory(path: &Path) -> Result<(), String> {
             return Err(format!(
                 "create model observation CAS failed for {}: {error}",
                 path.display()
-            ))
+            ));
         }
     }
     Ok(())

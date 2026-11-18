@@ -6,15 +6,6 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const tuiRoot = realpathSync(dirname(fileURLToPath(import.meta.url)));
-const repoRoot = resolve(tuiRoot, "../..");
-const runtimeName = process.platform === "win32"
-  ? "centaeris-runtime.exe"
-  : "centaeris-runtime";
-const runtimePath = process.env.CENTAERIS_RUNTIME_EXE ?? resolve(
-  repoRoot,
-  "target/release",
-  runtimeName,
-);
 
 const result = spawnSync(
   process.platform === "win32" ? "cargo.exe" : "cargo",
@@ -29,7 +20,6 @@ const result = spawnSync(
   ],
   {
     cwd: process.cwd(),
-    env: { ...process.env, CENTAERIS_RUNTIME_EXE: runtimePath },
     stdio: "inherit",
   },
 );

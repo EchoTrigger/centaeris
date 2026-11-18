@@ -330,7 +330,7 @@ async fn serve_unix(
     }
 }
 
-async fn serve_connection<TStream>(
+pub(crate) async fn serve_connection<TStream>(
     stream: TStream,
     state: Arc<Mutex<RuntimeHostState>>,
     clients: Arc<RuntimeServerClientHub>,
@@ -468,40 +468,47 @@ async fn handle_rpc_request(
     request: RuntimeRpcRequest,
 ) -> RuntimeRpcResponse {
     let id = request.id.clone();
-    let result = async move {
-        let host_request = HostCommandRequest::try_from(request)?;
-        let command = crate::commands::RuntimeHostCommand::parse(&host_request.command)?;
-        if command != crate::commands::RuntimeHostCommand::Initialize {
-            event_writer.require_registered()?;
-        }
-        if event_writer.is_draining() && !allowed_while_draining(command) {
-            return Err(RuntimeHostError::new(
-                "runtime_server_draining",
-                "Runtime is shutting down; new work is not accepted",
-            ));
-        }
-        let _action_permit = if command == crate::commands::RuntimeHostCommand::Initialize
-            || allowed_while_draining(command)
-        {
-            None
-        } else {
-            Some(event_writer.start_action()?)
-        };
-        if let Some(value) = handle_stateless_request_async(&host_request).await? {
-            return Ok(value);
-        }
-        handle_request_async(state, host_request, event_writer).await
-    }
-    .await;
+    let result = match HostCommandRequest::try_from(request) {
+        Ok(host_request) => dispatch_host_command(state, event_writer, host_request).await,
+        Err(error) => Err(error),
+    };
     match result {
         Ok(value) => RuntimeRpcResponse::success(id, value),
         Err(error) => RuntimeRpcResponse::failure(id, crate::errors::to_runtime_rpc_error(&error)),
     }
 }
 
+pub(crate) async fn dispatch_host_command(
+    state: Arc<Mutex<RuntimeHostState>>,
+    event_writer: EventWriter,
+    host_request: HostCommandRequest,
+) -> Result<serde_json::Value, RuntimeHostError> {
+    let command = crate::commands::RuntimeHostCommand::parse(&host_request.command)?;
+    if command != crate::commands::RuntimeHostCommand::Initialize {
+        event_writer.require_registered()?;
+    }
+    if event_writer.is_draining() && !allowed_while_draining(command) {
+        return Err(RuntimeHostError::new(
+            "runtime_server_draining",
+            "Runtime is shutting down; new work is not accepted",
+        ));
+    }
+    let _action_permit = if command == crate::commands::RuntimeHostCommand::Initialize
+        || allowed_while_draining(command)
+    {
+        None
+    } else {
+        Some(event_writer.start_action()?)
+    };
+    if let Some(value) = handle_stateless_request_async(&host_request).await? {
+        return Ok(value);
+    }
+    handle_request_async(state, host_request, event_writer).await
+}
+
 // Transport headroom is reserved for lifecycle control, independently of which
 // operations remain legal during shutdown. Ordinary reads use ordinary capacity.
-fn uses_control_admission(command: crate::commands::RuntimeHostCommand) -> bool {
+pub(crate) fn uses_control_admission(command: crate::commands::RuntimeHostCommand) -> bool {
     use crate::commands::RuntimeHostCommand;
     matches!(
         command,

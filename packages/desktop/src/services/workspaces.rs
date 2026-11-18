@@ -201,6 +201,7 @@ pub(crate) fn reveal_folder(
 }
 
 pub(crate) fn rename(request: WorkspaceRenameRequest) -> Result<WorkspaceSnapshotResponse, String> {
+    let _lock = crate::local_host::lock_profile_file("workspace-catalog", false)?;
     let next_name = request.name.trim();
     if next_name.is_empty() {
         return Err(String::from("workspace name cannot be empty"));
@@ -216,6 +217,7 @@ pub(crate) fn rename(request: WorkspaceRenameRequest) -> Result<WorkspaceSnapsho
 }
 
 pub(crate) fn remove(request: WorkspaceRootRequest) -> Result<WorkspaceRemoveResponse, String> {
+    let _lock = crate::local_host::lock_profile_file("workspace-catalog", false)?;
     let root = catalog_workspace_root(request.root.as_str(), "workspaceRoot")
         .map_err(|error| error.message())?;
     let root_key = normalized_workspace_root_key_from_path(root.as_path());
@@ -248,6 +250,7 @@ pub(crate) fn remove(request: WorkspaceRootRequest) -> Result<WorkspaceRemoveRes
 pub(crate) fn reset_catalog(
     request: WorkspaceCatalogResetRequest,
 ) -> Result<WorkspaceCatalogResetResponse, String> {
+    let _lock = crate::local_host::lock_profile_file("workspace-catalog", false)?;
     if !request.confirm {
         return Err("workspace catalog reset requires confirm=true".to_string());
     }
@@ -613,6 +616,7 @@ pub(crate) fn bind_active_session_to_workspace_selected_at(
     selected_at_ms: i64,
     reject_stale: bool,
 ) -> Result<bool, String> {
+    let _lock = crate::local_host::lock_profile_file("workspace-catalog", false)?;
     let normalized_session_id = session_id.trim();
     if normalized_session_id.is_empty() {
         return Ok(false);
@@ -639,6 +643,7 @@ pub(crate) fn bind_active_session_to_workspace_selected_at(
 }
 
 pub(crate) fn unbind_deleted_session(session_id: &str) -> Result<(), String> {
+    let _lock = crate::local_host::lock_profile_file("workspace-catalog", false)?;
     let normalized_session_id = session_id.trim();
     if normalized_session_id.is_empty() {
         return Err("sessionId is required to clear workspace binding".to_string());
@@ -669,6 +674,7 @@ fn normalized_workspace_root_key_from_path(root: &Path) -> String {
 }
 
 fn activate_workspace_root(root: &Path) -> Result<PersistedWorkspaceState, String> {
+    let _lock = crate::local_host::lock_profile_file("workspace-catalog", false)?;
     let normalized = normalize_workspace_root(root.to_path_buf())
         .ok_or_else(|| "workspace root is not a directory".to_string())?;
     let mut state = read_workspace_state()?;
