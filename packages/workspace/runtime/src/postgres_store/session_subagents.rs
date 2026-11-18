@@ -197,7 +197,7 @@ fn load_agent(
     if row.get::<_, String>(0) != "external_context.v1"
         || row.get::<_, String>(1) != "subagent_work_packet"
         || row.get::<_, String>(2) != "centaeris.core"
-        || row.get::<_, String>(3) != "agent"
+        || !matches!(row.get::<_, String>(3).as_str(), "agent" | "spawn_agent" | "followup_task")
     {
         return Err("session_subagent_packet_source_invalid".into());
     }

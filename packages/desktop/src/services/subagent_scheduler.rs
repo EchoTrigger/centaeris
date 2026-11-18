@@ -751,21 +751,19 @@ fn agent_session_is_ready(
     job: &RuntimeJobRecord,
     binding: &SubagentWorkPacketRuntimeBindingV1,
 ) -> Result<bool, String> {
-    let Some((parent_session_id, runtime_job_id)) =
+    let Some((parent_session_id, _origin_job_id)) =
         sessions::find_agent_runtime_binding(binding.child_session_id.as_str())?
     else {
         return Ok(false);
     };
-    if Some(parent_session_id.as_str()) != job.session_id.as_deref() || runtime_job_id != job.job_id
-    {
+    if Some(parent_session_id.as_str()) != job.session_id.as_deref() {
         return Err(format!(
             "Agent session binding mismatch: sessionId={} runtimeJobId={}",
             binding.child_session_id, job.job_id
         ));
     }
-    let agent_runs = message_log::project_session_agent_runs(binding.child_session_id.as_str())?;
-    Ok(agent_runs.iter().any(|task| {
-        task.agent_run_id == job.job_id
+    Ok(message_log::project_agent_run(&job.job_id)?.is_some_and(|task| {
+        task.session_id == binding.child_session_id
             && task.turn_id == binding.child_turn_id
             && matches!(task.status.as_str(), "queued" | "running")
     }))
@@ -798,14 +796,7 @@ impl ElectronSubagentRunner {
                 req.job.job_id, self.parent_session_id
             ));
         }
-        let persisted_binding = sessions::agent_runtime_binding(binding.child_session_id.as_str())?
-            .ok_or_else(|| {
-                format!(
-                    "Agent child session is not a subagent session: {}",
-                    binding.child_session_id
-                )
-            })?;
-        if persisted_binding != (self.parent_session_id.clone(), req.job.job_id.clone()) {
+        if !agent_session_is_ready(&req.job, &binding)? {
             return Err(format!(
                 "Agent child session binding mismatch: {}",
                 binding.child_session_id

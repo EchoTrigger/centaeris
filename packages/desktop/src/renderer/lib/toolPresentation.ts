@@ -28,6 +28,9 @@ const definitions: Record<string, ToolActivityDefinition> = {
   web_search: { kind: "webSearch", title: "Searched the web", detailRendererKind: "none", runningVerb: "Searching", completedVerb: "Searched", failedVerb: "Search failed", pathOpenable: false, expandable: false },
   agent: { kind: "agent", title: "Ran an agent", detailRendererKind: "none", runningVerb: "Running", completedVerb: "Ran", failedVerb: "Run failed", pathOpenable: false, expandable: false },
   task_output: { kind: "taskOutput", title: "Read task results", detailRendererKind: "none", runningVerb: "Reading", completedVerb: "Read", failedVerb: "Read failed", pathOpenable: false, expandable: false },
+  spawn_agent: { kind: "agent", title: "Ran an agent", detailRendererKind: "none", runningVerb: "Running", completedVerb: "Ran", failedVerb: "Run failed", pathOpenable: false, expandable: false },
+  followup_task: { kind: "agent", title: "Ran an agent", detailRendererKind: "none", runningVerb: "Running", completedVerb: "Ran", failedVerb: "Run failed", pathOpenable: false, expandable: false },
+  wait_agent: { kind: "taskOutput", title: "Read task results", detailRendererKind: "none", runningVerb: "Reading", completedVerb: "Read", failedVerb: "Read failed", pathOpenable: false, expandable: false },
 };
 
 const externalToolDefinition: ToolActivityDefinition = {

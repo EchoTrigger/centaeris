@@ -154,8 +154,8 @@ class NativeLifecycleRuntimeTests(EnvironmentRuntimeFixture, LiveServerTestCase)
             if turn == 1:
                 references = self.runtime_command("seed-read-only-subagents", "environment-runtime-read-only-subagents:")
                 self.assertEqual(len(references), 3)
-                calls = [{"id": f"wait-native-child-{index}", "name": "task_output",
-                          "argsJson": json.dumps({"output_ref": reference})}
+                calls = [{"id": f"wait-native-child-{index}", "name": "wait_agent",
+                          "argsJson": json.dumps({"task_id": reference["runtime_job_id"]})}
                          for index, reference in enumerate(references)]
                 return {"text": "", "toolCalls": calls, "usage": zero_usage()}
             self.assertEqual(turn, 2)
@@ -274,7 +274,7 @@ class NativeLifecycleRuntimeTests(EnvironmentRuntimeFixture, LiveServerTestCase)
                     return {"text": f"default-child-result-{index}", "toolCalls": [], "usage": zero_usage()}
             parent_requests += 1
             if parent_requests == 1:
-                calls = [{"id": f"start-default-child-{index}", "name": "agent",
+                calls = [{"id": f"start-default-child-{index}", "name": "spawn_agent",
                           "argsJson": json.dumps({"prompt": f"default-native-child-{index}",
                                                   "description": f"Default child {index}"})}
                          for index in range(3)]
@@ -284,14 +284,8 @@ class NativeLifecycleRuntimeTests(EnvironmentRuntimeFixture, LiveServerTestCase)
                 self.assertEqual(len(starts), 3)
                 calls = []
                 for index, start in enumerate(starts):
-                    reference = start["outputRef"]
-                    calls.append({"id": f"wait-default-child-{index}", "name": "task_output",
-                                  "argsJson": json.dumps({"output_ref": {
-                                      "schema": reference["schema"], "kind": reference["kind"],
-                                      "runtime_job_id": reference["runtimeJobId"],
-                                      "child_session_id": reference["childSessionId"],
-                                      "result_ref": reference["resultRef"],
-                                  }})})
+                    calls.append({"id": f"wait-default-child-{index}", "name": "wait_agent",
+                                  "argsJson": json.dumps({"task_id": start["taskId"]})})
                 return {"text": "", "toolCalls": calls, "usage": zero_usage()}
             self.assertEqual(parent_requests, 3)
             results = "\n".join(message["content"] for message in messages if message["role"] == "tool")

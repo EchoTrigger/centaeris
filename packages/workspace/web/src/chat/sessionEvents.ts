@@ -78,6 +78,7 @@ export type ToolActivity = UnknownRecord & {
   sequence: number;
   status: string;
   childSessionId: string | null | undefined;
+  taskId?: string;
   call: UnknownRecord;
   result: UnknownRecord | null;
   waitResult: UnknownRecord | null;
@@ -325,6 +326,13 @@ function applySessionEvent(
         agentWaits: { ...view.agentWaits, [payload.callId]: agent.activityId },
       };
     }
+    if (payload.toolName === "wait_agent" && typeof normalizedInput.task_id === "string") {
+      const agent = view.activities.find((item) => item.taskId === normalizedInput.task_id);
+      if (agent) return {
+        ...view,
+        agentWaits: { ...view.agentWaits, [payload.callId]: agent.activityId },
+      };
+    }
     return {
       ...view,
       activities: upsertBy(view.activities, "activityId", {
@@ -360,12 +368,18 @@ function applySessionEvent(
     const current = view.activities[index];
     let status = ["failed", "denied", "aborted"].includes(payload.resultState) ? "failed" : "completed";
     let childSessionId = current.childSessionId;
-    if (current.toolName === "agent") {
+    let taskId = current.taskId;
+    if (["agent", "spawn_agent", "followup_task"].includes(current.toolName)) {
       try {
         const result: unknown = JSON.parse(payload.modelContent as string);
         if (isRecord(result) && result.schema === "agent_tool_result_v1" && result.status === "started") {
           status = "running";
           childSessionId = result.childSessionId as string | undefined;
+        } else if (isRecord(result) && current.toolName !== "agent"
+          && typeof result.taskId === "string" && typeof result.childSessionId === "string") {
+          status = ["queued", "leased", "running"].includes(String(result.status)) ? "running" : status;
+          childSessionId = result.childSessionId;
+          taskId = result.taskId;
         }
       } catch {
         if (status === "completed") throw new Error("Agent tool result is invalid JSON");
@@ -375,6 +389,7 @@ function applySessionEvent(
       ...current,
       status,
       childSessionId,
+      taskId,
       result: rawResult,
     };
     return { ...view, activities: view.activities.map((item, itemIndex) => itemIndex === index ? activity : item) };

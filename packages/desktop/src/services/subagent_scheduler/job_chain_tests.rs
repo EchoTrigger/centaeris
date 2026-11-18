@@ -140,7 +140,7 @@ impl MockModel {
                         } else {
                             let args: serde_json::Value = serde_json::from_str(args).unwrap();
                             (
-                                serde_json::json!({"tool_calls":[{"index":0,"id":"join-result","type":"function","function":{"name":"task_output","arguments":args.to_string()}}]}),
+                                serde_json::json!({"tool_calls":[{"index":0,"id":"join-result","type":"function","function":{"name":"wait_agent","arguments":args.to_string()}}]}),
                                 "tool_calls",
                             )
                         }
@@ -298,13 +298,7 @@ async fn join_result(parent: &str, row: &RuntimeJobRecord) {
         file_mutation_commit_port: None,
     })
     .unwrap();
-    let jobs = agent_runtime::native_job_store_handle().unwrap();
-    let current = jobs.get_runtime_job(&row.job_id).await.unwrap().unwrap();
-    let args = serde_json::json!({"output_ref":{
-        "schema":"task_output_ref_v1", "kind":"agent", "runtime_job_id":row.job_id,
-        "child_session_id":format!("session-{}", child_name(row)),
-        "result_ref":current.output_refs[0],
-    }});
+    let args = serde_json::json!({"task_id": row.job_id});
     let (model_config, registry) =
         agent_runtime::model_session_config_and_registry(&config).unwrap();
     let config_store = agent_runtime::SingleModelSessionConfigStore {

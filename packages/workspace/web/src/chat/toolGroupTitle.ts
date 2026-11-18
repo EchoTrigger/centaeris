@@ -28,6 +28,9 @@ const TOOL_CATEGORIES: Record<string, ToolGroupCategory> = {
   publish_artifact: "publishArtifact",
   web_search: "webSearch",
   agent: "agent",
+  spawn_agent: "agent",
+  followup_task: "agent",
+  wait_agent: "taskOutput",
   task_output: "taskOutput",
 };
 

@@ -97,7 +97,8 @@ impl<
             }
             if matches!(
                 evidence.effective_call.name.as_str(),
-                "agent" | "task_output" | "question" | "finalize"
+                "agent" | "task_output" | "spawn_agent" | "followup_task" | "wait_agent"
+                    | "interrupt_agent" | "list_agents" | "question" | "finalize"
             ) {
                 return Err(
                     "prepared_tool_recovery_requires_existing_wait_or_terminal_protocol".into(),

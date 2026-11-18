@@ -4,8 +4,24 @@ use super::types::{ToolContract, ToolTurnBehavior};
 
 pub const BUILTIN_TOOL_PROVIDER_ID: &str = "centaeris.builtin";
 
-pub(crate) const MODEL_TOOL_CATALOG_ORDER: &[&str] =
-    &["read", "bash", "edit", "write", "task_output", "agent"];
+pub(crate) const AGENT_CONTROL_TOOL_NAMES: &[&str] = &[
+    "spawn_agent",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+];
+pub(crate) const MODEL_TOOL_CATALOG_ORDER: &[&str] = &[
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "spawn_agent",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+];
 
 pub(crate) const READ_MAX_LINES: usize = 2_000;
 pub(crate) const READ_MAX_BYTES: usize = 50 * 1024;
@@ -170,10 +186,43 @@ fn tool_contract(tool_name: &str) -> (&'static str, &'static str, Value, bool) {
             }),
             false,
         ),
-        "agent" => (
+        "wait_agent" | "interrupt_agent" => (
             "runtime.agent",
-            "Start a bounded independent task in a child Agent. The task always runs in the background; use task_output with the returned output_ref when its result is needed.",
+            if tool_name == "wait_agent" {
+                "Wait for one delegated task and read its bounded result. Copy taskId exactly from spawn_agent, followup_task, or list_agents."
+            } else {
+                "Request cancellation of one delegated task. Copy taskId exactly from spawn_agent, followup_task, or list_agents. Use wait_agent to observe the final outcome."
+            },
             json!({
+                "type": "object",
+                "properties": { "task_id": { "type": "string", "pattern": "^subagent[.]run:[0-9a-f]{16}$" } },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+            false,
+        ),
+        "list_agents" => (
+            "runtime.agent",
+            "List this Session's delegated agents and their tasks with the exact IDs, descriptions, and statuses.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            false,
+        ),
+        "spawn_agent" | "followup_task" => (
+            "runtime.agent",
+            if tool_name == "spawn_agent" {
+                "Create a child Agent and submit its first background task. Use the returned taskId with wait_agent and agentId with followup_task. Copy IDs exactly."
+            } else {
+                "Submit another task to an existing child Agent, keeping its conversation. Tasks run in order. Copy agentId exactly from spawn_agent or list_agents and use the new taskId with wait_agent."
+            },
+            agent_submission_schema(tool_name),
+            false,
+        ),
+        _ => unreachable!("fixed tool catalog contains unknown tool: {tool_name}"),
+    }
+}
+
+fn agent_submission_schema(tool_name: &str) -> Value {
+    let mut schema = json!({
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string" },
@@ -188,11 +237,19 @@ fn tool_contract(tool_name: &str) -> (&'static str, &'static str, Value, bool) {
                 },
                 "required": ["prompt", "description"],
                 "additionalProperties": false
-            }),
-            false,
-        ),
-        _ => unreachable!("fixed tool catalog contains unknown tool: {tool_name}"),
+    });
+    if tool_name == "followup_task" {
+        schema["properties"]["agent_id"] =
+            json!({ "type": "string", "pattern": "^agent-[0-9a-f]{16}$" });
+        schema["required"] = json!(["agent_id", "prompt", "description"]);
     }
+    schema
+}
+
+// Used only to verify the definition digest of a wait already persisted by an
+// older runtime. This contract is never exposed or accepted for new calls.
+pub(crate) fn historical_task_output_contract() -> ToolContract {
+    build_tool_contract("task_output")
 }
 
 #[cfg(test)]
@@ -237,7 +294,17 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["read", "bash", "edit", "write", "task_output", "agent"]
+            vec![
+                "read",
+                "bash",
+                "edit",
+                "write",
+                "spawn_agent",
+                "followup_task",
+                "wait_agent",
+                "interrupt_agent",
+                "list_agents"
+            ]
         );
         assert_eq!(canonicalize_tool_name("banana"), None);
         assert_eq!(canonicalize_tool_name(" read "), None);
@@ -249,7 +316,7 @@ mod tests {
         }
         let agent = contracts
             .iter()
-            .find(|contract| contract.name == "agent")
+            .find(|contract| contract.name == "spawn_agent")
             .expect("agent contract");
         assert_eq!(
             agent.input_schema["required"],

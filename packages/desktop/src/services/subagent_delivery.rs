@@ -154,37 +154,44 @@ async fn deliver_terminal_job_in_scope(
         return Ok(None);
     };
     let _work = writer.begin_background_work(parent)?;
-    let native = sessions::listed_children_for_job(parent, job_id)?;
-    let [child] = native.as_slice() else {
-        return Err(format!(
-            "terminal delivery requires one authoritative child binding: {job_id}"
-        ));
-    };
-    let _child_work = if deleting_child == Some(child.id.as_str()) {
-        None
-    } else {
-        Some(writer.begin_background_work(&child.id)?)
-    };
-    let run =
-        message_log::project_agent_run(job_id)?.ok_or("terminal delivery child Run missing")?;
-    if run.session_id != child.id {
-        return Err("terminal delivery child Run binding mismatch".into());
-    }
     let packet = match load_subagent_work_packet_async(&jobs, &job).await {
         Ok(packet) => Some(packet),
         Err(JobStoreError::Rejected(_)) => None,
         Err(error) => return Err(error.diagnostic_message()),
     };
     let event = terminal_subagent_event_from_job(&job, packet.as_ref())?;
-    if event.child_session_id != child.id {
-        return Err("terminal delivery canonical child identity mismatch".into());
-    }
-    // A rejected packet has no trusted parent Run identity for a live hint.
-    // Its authoritative Job and native child still drive durable delivery.
     let binding = packet
         .as_ref()
-        .and_then(|packet| subagent_work_packet_runtime_binding(packet, &job).ok())
-        .filter(|binding| binding.child_session_id == child.id);
+        .and_then(|packet| subagent_work_packet_runtime_binding(packet, &job).ok());
+    if binding.is_none() {
+        let native = sessions::listed_children_for_job(parent, job_id)?;
+        if native.len() != 1 || native[0].id != event.child_session_id {
+            return Err(format!("terminal delivery requires one authoritative child binding: {job_id}"));
+        }
+    }
+    if let Some(binding) = &binding {
+        if message_log::project_agent_run(job_id)?.is_none() {
+            let cwd = sessions::cwd_for_session_id(parent)?;
+            agent_runtime::materialize_agent_session_blocking(
+                parent, &binding.child_session_id, &binding.child_turn_id,
+                job_id, &binding.description, &cwd, job.created_at_ms,
+            )?;
+        }
+    }
+    let run = message_log::project_agent_run(job_id)?.ok_or("terminal delivery child Run missing")?;
+    let child_id = run.session_id.as_str();
+    let child_binding = sessions::find_agent_runtime_binding(child_id)?;
+    if event.child_session_id != child_id
+        || child_binding.as_ref().is_none_or(|(owner, _)| owner != parent)
+        || binding.as_ref().is_some_and(|binding| binding.child_turn_id != run.turn_id)
+    {
+        return Err("terminal delivery child Run binding mismatch".into());
+    }
+    let _child_work = if deleting_child == Some(child_id) {
+        None
+    } else {
+        Some(writer.begin_background_work(child_id)?)
+    };
     checkpoint(DeliveryPoint::BeforeParent, job_id);
     let snapshots = agent_runtime::agent_runtime_store_actor()?;
     persist_subagent_result_projection_from_scheduler_events_async(
@@ -200,7 +207,7 @@ async fn deliver_terminal_job_in_scope(
         &jobs,
         writer,
         job_id,
-        &child.id,
+        child_id,
         &run.turn_id,
         &subagent_scheduler::ShutdownJobs::default(),
     )

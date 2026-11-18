@@ -1812,6 +1812,7 @@ async fn next_subagent_worker_batch_async<S: AsyncJobStorePort + ?Sized>(
 ) -> Result<Vec<(usize, ClaimedSubagentRunJob)>, JobStoreError> {
     let mut batch = Vec::with_capacity(max_parallelism.max(1));
     let mut active_claims = Vec::with_capacity(max_parallelism.max(1));
+    let mut child_sessions = std::collections::HashSet::new();
     let scan_len = pending.len();
     for _ in 0..scan_len {
         let Some(item) = pending.pop_front() else {
@@ -1821,8 +1822,13 @@ async fn next_subagent_worker_batch_async<S: AsyncJobStorePort + ?Sized>(
             pending.push_back(item);
             continue;
         }
-        let resource_claim = subagent_resource_claim_for_job_async(store, &item.1.job).await?;
-        if subagent_resource_claim_can_join(&active_claims, &resource_claim) {
+        let job = &item.1.job;
+        let packet = load_subagent_work_packet_async(store, job).await?;
+        let packet = decode_work_packet_for_resource_claim(&packet.content_json)?;
+        let resource_claim = subagent_resource_claim_from_packet(job, &packet);
+        if subagent_resource_claim_can_join(&active_claims, &resource_claim)
+            && child_sessions.insert(packet.run_context.branch_id)
+        {
             active_claims.push(resource_claim);
             batch.push(item);
         } else {
@@ -2181,7 +2187,7 @@ fn required_subagent_job_field<'a>(
         })
 }
 
-fn subagent_id_from_job(job: &RuntimeJobRecord) -> Result<String, String> {
+pub(super) fn subagent_id_from_job(job: &RuntimeJobRecord) -> Result<String, String> {
     if job.job_kind != SUBAGENT_RUN_JOB_KIND {
         return Err(format!(
             "subagent runtime job has invalid job kind: job_id={} job_kind={}",

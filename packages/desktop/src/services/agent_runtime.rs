@@ -494,7 +494,8 @@ fn cancel_agent_run_with_children(
             emit_agent_run_terminal_payload(&event_writer, agent_run)?;
         }
         if let Some(session_id) = session_id.filter(|_| cancel_children) {
-            schedule_child_job_cancellation(event_writer, session_id, reason)?;
+            let run_id = response.agent_run.as_ref().map(|run| run.agent_run_id.clone());
+            schedule_child_job_cancellation(event_writer, session_id, run_id, reason)?;
         }
     }
     Ok(response)
@@ -639,6 +640,7 @@ pub(crate) fn close_incomplete_tool_calls_for_agent_run(
 fn schedule_child_job_cancellation(
     event_writer: EventWriter,
     session_id: String,
+    agent_run_id: Option<String>,
     reason: String,
 ) -> Result<(), String> {
     let binding = sessions::agent_runtime_binding(session_id.as_str())?;
@@ -658,7 +660,9 @@ fn schedule_child_job_cancellation(
             let _work = _work;
             let cancellation = async {
                 let (parent_session_id, events) =
-                    if let Some((parent_session_id, runtime_job_id)) = binding {
+                    if let Some((parent_session_id, _origin_job_id)) = binding {
+                        let runtime_job_id = agent_run_id
+                            .ok_or("Agent cancellation has no Run identity")?;
                         let event = cancel_subagent_run_job_async(
                             store.as_ref(),
                             CancelSubagentRunJobRequest {
@@ -3198,22 +3202,27 @@ pub(crate) fn materialize_agent_session_blocking(
     at_ms: i64,
 ) -> Result<(), String> {
     run_message_log_blocking("materialize spawned Agent session", || {
-        sessions::ensure_agent_session(
-            child_session_id,
-            parent_session_id,
-            runtime_job_id,
-            title,
-            cwd,
-            at_ms,
-        )?;
-        let agent_runs = message_log::project_session_agent_runs(child_session_id)?;
-        if let Some(agent_run) = agent_runs.first() {
-            if agent_run.agent_run_id == runtime_job_id && agent_run.turn_id == child_turn_id {
+        if let Some((parent, _origin_job)) = sessions::find_agent_runtime_binding(child_session_id)? {
+            if parent != parent_session_id {
+                return Err(format!("Agent session parent mismatch: {child_session_id}"));
+            }
+        } else {
+            sessions::ensure_agent_session(
+                child_session_id,
+                parent_session_id,
+                runtime_job_id,
+                title,
+                cwd,
+                at_ms,
+            )?;
+        }
+        if let Some(agent_run) = message_log::project_agent_run(runtime_job_id)? {
+            if agent_run.session_id == child_session_id && agent_run.turn_id == child_turn_id {
                 return Ok(());
             }
             return Err(format!(
-                "AgentRun session mismatch: sessionId={} expected={} actual={}",
-                child_session_id, runtime_job_id, agent_run.agent_run_id
+                "AgentRun session mismatch: jobId={runtime_job_id} expected={child_session_id} actual={}",
+                agent_run.session_id
             ));
         }
         message_log::append_agent_turn_queued(

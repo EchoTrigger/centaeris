@@ -12,7 +12,7 @@ function TaskClock({ startedAtMs }: { startedAtMs: number }) {
   const text = formatActiveDuration(Math.max(now, Date.now()) - startedAtMs);
   return text ? <time className="runStatusElapsed" aria-hidden="true">{text}</time> : null;
 }
-const toolLabels: Record<string, string> = { read:"reading", bash:"executing", edit:"editing", write:"editing", web_search:"searching", agent:"agents", task_output:"reading" };
+const toolLabels: Record<string, string> = { read:"reading", bash:"executing", edit:"editing", write:"editing", web_search:"searching", agent:"agents", spawn_agent:"agents", followup_task:"agents", task_output:"reading", wait_agent:"reading" };
 function labelKey(task: ActiveTask) { return task.phase ?? toolLabels[task.label] ?? "executing"; }
 
 export const RunStatusLine = memo(function RunStatusLine({ turnId }: { turnId: string }) {

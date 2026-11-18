@@ -11,6 +11,7 @@ mod projection;
 mod types;
 
 pub use catalog::{canonicalize_tool_name, list_tool_contracts, BUILTIN_TOOL_PROVIDER_ID};
+pub(crate) use catalog::{historical_task_output_contract, AGENT_CONTROL_TOOL_NAMES};
 pub(crate) use catalog::{
     EDIT_MAX_ARGS_BYTES, EDIT_MAX_ITEMS, EDIT_MAX_NEW_TEXT_BYTES, EDIT_MAX_OLD_TEXT_BYTES,
     READ_MAX_BYTES, READ_MAX_LINES, WORKSPACE_MUTATION_MAX_BYTES,

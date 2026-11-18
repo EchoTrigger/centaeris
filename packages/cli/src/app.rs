@@ -3728,13 +3728,14 @@ fn apply_session_event_inner(app: &mut App, event: &Value, agent_run_id: Option<
                 )));
                 return;
             };
+            let task_id = payload.get("runtimeJobId").and_then(Value::as_str).unwrap_or(subagent_id);
             if agent_run_id == app.active_agent_run_id.as_deref() {
                 app.seen_subagent_ids.insert(subagent_id.to_string());
                 if matches!(
                     event_type,
                     "SubagentResult" | "SubagentFailed" | "SubagentCancelled"
                 ) {
-                    app.live_subagent_ids.remove(subagent_id);
+                    app.live_subagent_ids.remove(task_id);
                     if app.live_subagent_ids.is_empty()
                         && app.process_state == RuntimeDisplayState::ToolRunning
                         && !app.tool_projection.has_open_calls()
@@ -3742,7 +3743,7 @@ fn apply_session_event_inner(app: &mut App, event: &Value, agent_run_id: Option<
                         app.process_state = RuntimeDisplayState::PendingPhase;
                     }
                 } else {
-                    app.live_subagent_ids.insert(subagent_id.to_string());
+                    app.live_subagent_ids.insert(task_id.to_string());
                     if app.process_state == RuntimeDisplayState::PendingPhase {
                         app.process_state = RuntimeDisplayState::ToolRunning;
                     }

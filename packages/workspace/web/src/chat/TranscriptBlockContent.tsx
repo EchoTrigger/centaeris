@@ -378,7 +378,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
   const agentCalls = new Set(groupAgents.map(agent => agent.callId));
   const visibleEntries = entries.filter(entry => {
     if (agentCalls.has(entry.callId)) return false;
-    if (entry.body.toolName !== "task_output" || entry.body.status === "failed"
+    if (!["task_output", "wait_agent"].includes(opText(entry.body.toolName)) || entry.body.status === "failed"
       || entry.body.status === "interrupted" || ["failed", "denied", "aborted"].includes(entry.resultState)) return true;
     const waitingFor = matchedSubagentWait(entry.call.normalizedInput, subagents);
     return !waitingFor || !onOpenSubagent || !listIdentity.blockIds.some(blockId => store.getBlockSnapshot(blockId)?.body.callId === waitingFor.callId);

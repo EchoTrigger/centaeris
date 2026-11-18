@@ -431,17 +431,54 @@ pub(crate) async fn delete_async(
     .await
     .map_err(|error| error.to_string())??;
     let jobs = agent_runtime::native_job_store_handle()?;
-    if let Some((_, id)) = &bound_job {
-        if let Some(job) = jobs
-            .get_runtime_job(id)
-            .await
+    let mut child_jobs = Vec::new();
+    if let Some((parent_id, id)) = &bound_job {
+        use centaeris_core::runtime::subagent::{lifecycle_record_from_job, SUBAGENT_RUN_JOB_KIND};
+
+        let origin = jobs.get_runtime_job(id).await
             .map_err(|error| error.diagnostic_message())?
-        {
-            if !job.status.is_terminal() {
-                crate::subagent_scheduler::stop_job(&jobs, &job, "session_deleted").await?;
+            .ok_or_else(|| format!("Session deletion bound Job missing: {id}"))?;
+        let now = current_timestamp_ms();
+        let agent_id = lifecycle_record_from_job(&origin, now)?.subagent_id;
+        if let Some(reference) = origin.payload_ref.as_deref() {
+            let snapshots = agent_runtime::agent_runtime_store_actor()?;
+            if let Some(mut object) = snapshots.load_external_context_object(reference).await? {
+                object.metadata["agentRetiredAtMs"] = serde_json::json!(now);
+                object.updated_at_ms = now;
+                snapshots.upsert_external_context_object(object).await?;
             }
-        } else {
-            return Err(format!("Session deletion bound Job missing: {id}"));
+        }
+        // The origin is retired before scanning so an outstanding follow-up
+        // cannot be admitted after this snapshot of the Agent's tasks.
+        const PAGE: usize = 64;
+        let mut offset = 0;
+        loop {
+            let page = jobs.list_runtime_jobs(ListRuntimeJobsRequest {
+                session_id: Some(parent_id.clone()),
+                job_kind: Some(SUBAGENT_RUN_JOB_KIND.into()),
+                limit: PAGE,
+                offset,
+                ..Default::default()
+            }).await.map_err(|error| error.diagnostic_message())?;
+            let count = page.len();
+            for mut job in page {
+                if lifecycle_record_from_job(&job, now)?.subagent_id != agent_id {
+                    continue;
+                }
+                while !job.status.is_terminal() {
+                    if crate::subagent_scheduler::stop_job(&jobs, &job, "session_deleted").await? {
+                        break;
+                    }
+                    job = jobs.get_runtime_job(&job.job_id).await
+                        .map_err(|error| error.diagnostic_message())?
+                        .ok_or("Session deletion task disappeared before cancellation")?;
+                }
+                child_jobs.push(job.job_id);
+            }
+            if count < PAGE {
+                break;
+            }
+            offset += count;
         }
     }
     let mut guarded = vec![root.clone()];
@@ -507,7 +544,7 @@ pub(crate) async fn delete_async(
             break;
         }
     }
-    if let Some((_, id)) = bound_job {
+    for id in child_jobs {
         crate::subagent_delivery::finish_child_delivery_before_deletion(&writer, &id, &root)
             .await?;
     }

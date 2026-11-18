@@ -639,8 +639,22 @@ impl<
                     wait.tool_call_id, wait.source_tool_name, call.name
                 ));
             }
-            let current_definition_digest =
-                self.projected_tool_definition_digest(&session, wait.source_tool_name.as_str())?;
+            let current_definition_digest = if wait.job_kind == SUBAGENT_RUN_JOB_KIND
+                && wait.source_tool_name == "task_output"
+            {
+                let contract = crate::tool::historical_task_output_contract();
+                let definition = crate::tool::ModelToolDefinition {
+                    name: contract.name,
+                    description: contract.summary,
+                    input_schema: contract.input_schema,
+                };
+                let bytes = serde_json::to_vec(&definition)
+                    .map_err(|error| format!("serialize historical tool definition failed: {error}"))?;
+                use sha2::{Digest, Sha256};
+                format!("sha256:{:x}", Sha256::digest(bytes))
+            } else {
+                self.projected_tool_definition_digest(&session, wait.source_tool_name.as_str())?
+            };
             if current_definition_digest != wait.tool_definition_digest {
                 return Err(format!(
                     "runtime_job_wait_tool_definition_digest_mismatch: callId={}",
@@ -1069,7 +1083,7 @@ impl<
         wait: &RuntimeJobWaitV1,
         job: &RuntimeJobRecord,
     ) -> Result<Vec<ExternalContextObject>, String> {
-        if wait.source_tool_name != "task_output" {
+        if !matches!(wait.source_tool_name.as_str(), "wait_agent" | "task_output") {
             return Err(format!(
                 "subagent_runtime_job_wait_tool_mismatch: jobId={} expected=task_output actual={}",
                 job.job_id, wait.source_tool_name

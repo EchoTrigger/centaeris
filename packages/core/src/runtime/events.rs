@@ -32,7 +32,7 @@ pub(super) use self::status::{
 };
 pub(super) use self::subagent::{
     build_runtime_event_subagent_event_from_scheduler_event,
-    build_runtime_event_subagent_spawned_from_tool_result,
+    build_runtime_event_subagent_submission_from_tool_result,
     build_runtime_event_subagent_tool_group_events_from_tool_results,
 };
 pub(super) use self::tool::{

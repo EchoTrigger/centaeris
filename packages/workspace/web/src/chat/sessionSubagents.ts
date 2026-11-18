@@ -78,7 +78,9 @@ export function sortSessionSubagents(agents: readonly SessionSubagent[]) {
 }
 
 export function matchedSubagentWait(input: unknown, agents: readonly SessionSubagent[]): SessionSubagent | undefined {
-  if (!record(input) || !record(input.output_ref)) return undefined;
+  if (!record(input)) return undefined;
+  if (typeof input.task_id === "string") return agents.find(item => item.runtimeJobId === input.task_id);
+  if (!record(input.output_ref)) return undefined;
   const ref = input.output_ref;
   if (!exact(ref, ["schema", "kind", "runtime_job_id", "child_session_id", "result_ref"])
     || ref.schema !== "task_output_ref_v1" || ref.kind !== "agent"

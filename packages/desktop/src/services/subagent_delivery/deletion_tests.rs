@@ -56,6 +56,44 @@ fn direct_child_deletion_cancels_bound_queued_job_and_removes_delivery_work() {
         let child = "session-delete-queued-child";
         child_event(child).await;
         let jobs = agent_runtime::native_job_store_handle().unwrap();
+        let origin_ref = row.payload_ref.as_ref().unwrap();
+        let mut followup_packet = jobs
+            .load_external_context_object(origin_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        let followup = centaeris_core::runtime::subagent::build_subagent_run_job(
+            centaeris_core::runtime::subagent::SubagentRunJobRequest {
+                session_id: parent.id.clone(),
+                parent_turn_id: row.branch_id.clone().unwrap(),
+                tool_call_id: "followup-before-delete".into(),
+                subagent_id: "delete-queued-child".into(),
+                work_packet_ref: "followup-before-delete-packet".into(),
+                checkpoint_id: None,
+                run_at_ms: 2,
+                created_at_ms: 2,
+                max_retries: 0,
+            },
+        );
+        let mut content: serde_json::Value =
+            serde_json::from_str(&followup_packet.content).unwrap();
+        content["workPacket"]["run_context"]["turnId"] = "followup-turn".into();
+        content["workPacket"]["run_context"]["agentRunId"] = followup.job_id.clone().into();
+        content["workPacket"]["run_context"]["agentRef"]["agentRunId"] =
+            followup.job_id.clone().into();
+        followup_packet.content = content.to_string();
+        followup_packet.object_id = followup.payload_ref.clone().unwrap();
+        followup_packet.source_tool_name = "followup_task".into();
+        followup_packet.metadata["originWorkPacketRef"] = origin_ref.clone().into();
+        followup_packet.metadata["runtimeJobId"] = followup.job_id.clone().into();
+        let submission =
+            centaeris_core::session::store::UpsertExternalContextAndScheduleJobRequest {
+                object: followup_packet,
+                job: followup,
+            };
+        jobs.upsert_external_context_and_schedule_job(submission.clone())
+            .await
+            .unwrap();
         let writer = Arc::new(RuntimeServerClientHub::default()).broadcaster();
         let deleted = sessions::delete_async(
             writer.clone(),
@@ -75,6 +113,21 @@ fn direct_child_deletion_cancels_bound_queued_job_and_removes_delivery_work() {
             RuntimeJobStatus::Cancelled,
             "deleting the child must cancel its parent-owned Job"
         );
+        assert_eq!(
+            jobs.get_runtime_job(&submission.job.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeJobStatus::Cancelled,
+            "deleting the child cancels its queued follow-up"
+        );
+        assert!(jobs
+            .upsert_external_context_and_schedule_job(submission)
+            .await
+            .unwrap_err()
+            .diagnostic_message()
+            .contains("retired"));
         assert_eq!(
             jobs.pending_terminal_deliveries(64, None)
                 .await
