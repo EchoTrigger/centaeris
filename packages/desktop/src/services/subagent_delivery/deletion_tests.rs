@@ -3,7 +3,7 @@ use super::*;
 use crate::runtime_rpc_transport::RuntimeServerClientHub;
 use crate::subagent_scheduler::queue_tests::Profile;
 use centaeris_core::runtime::contracts::{EventVisibility, RuntimeEvent};
-use centaeris_core::session::reliability::RuntimeJobStatus;
+use centaeris_core::session::store::AgentRuntimeSnapshotStorePort;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,6 +57,8 @@ fn direct_child_deletion_cancels_bound_queued_job_and_removes_delivery_work() {
         child_event(child).await;
         let jobs = agent_runtime::native_job_store_handle().unwrap();
         let origin_ref = row.payload_ref.as_ref().unwrap();
+        let stale_packet = load_subagent_work_packet_async(&jobs, &row).await.unwrap();
+        let stale_binding = subagent_work_packet_runtime_binding(&stale_packet, &row).unwrap();
         let mut followup_packet = jobs
             .load_external_context_object(origin_ref)
             .await
@@ -91,6 +93,7 @@ fn direct_child_deletion_cancels_bound_queued_job_and_removes_delivery_work() {
                 object: followup_packet,
                 job: followup,
             };
+        let followup_id = submission.job.job_id.clone();
         jobs.upsert_external_context_and_schedule_job(submission.clone())
             .await
             .unwrap();
@@ -104,6 +107,17 @@ fn direct_child_deletion_cancels_bound_queued_job_and_removes_delivery_work() {
         .await
         .unwrap();
         assert_eq!(deleted.deleted_session_ids, vec![child]);
+        // Resume a queue reader after it has already decoded the old packet.
+        let admission = ChildTaskAdmission::acquire(&writer, &parent.id, child)
+            .unwrap()
+            .unwrap();
+        assert!(!admission
+            .materialize_if_current(&jobs, &row, &stale_binding, |status| {
+                *status == RuntimeJobStatus::Queued
+            })
+            .await
+            .unwrap());
+        drop(admission);
         assert_eq!(
             jobs.get_runtime_job(&row.job_id)
                 .await
@@ -136,6 +150,23 @@ fn direct_child_deletion_cancels_bound_queued_job_and_removes_delivery_work() {
             0,
             "child deletion must settle delivery before removing its authoritative binding"
         );
+        let stored = agent_runtime::agent_runtime_store_actor()
+            .unwrap()
+            .load_agent_runtime_snapshot(&parent.id)
+            .unwrap()
+            .unwrap();
+        let snapshot: centaeris_core::session::state::SessionStateSnapshot =
+            serde_json::from_str(&stored).unwrap();
+        let task_results = snapshot
+            .metadata
+            .values()
+            .filter_map(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .find(|value| value["schema"] == "subagent_result_projection_v1")
+            .unwrap();
+        assert!(task_results["items"].as_array().unwrap().iter().any(|result| {
+            result["subagentRunRef"] == format!("runtime_job:{followup_id}")
+                && result["status"] == "cancelled"
+        }));
         reconcile_terminal_jobs(&writer).await.unwrap();
         assert_child_removed(&profile, child, &parent.id);
         agent_runtime::close_storage_owners().await.unwrap();
@@ -159,8 +190,13 @@ fn direct_child_deletion_settles_delivered_terminal_job_before_acknowledgement()
         child_event(child).await;
         let jobs = agent_runtime::native_job_store_handle().unwrap();
         let writer = Arc::new(RuntimeServerClientHub::default()).broadcaster();
+        let stale_delivery = jobs
+            .pending_terminal_delivery(&row.job_id)
+            .await
+            .unwrap()
+            .unwrap();
         // Perform both authoritative projections, deliberately leaving durable acknowledgement pending.
-        deliver_terminal_job(&writer, &row.job_id).await.unwrap();
+        deliver_terminal_job(&writer, &stale_delivery).await.unwrap();
         assert_eq!(
             message_log::project_agent_run(&row.job_id)
                 .unwrap()
@@ -199,6 +235,11 @@ fn direct_child_deletion_settles_delivered_terminal_job_before_acknowledgement()
             0,
             "already delivered terminal must be acknowledged before its child binding is removed"
         );
+        // Resume a reader holding the same outbox record after deletion's acknowledgement.
+        assert!(deliver_terminal_job(&writer, &stale_delivery)
+            .await
+            .unwrap()
+            .is_none());
         reconcile_terminal_jobs(&writer).await.unwrap();
         assert_child_removed(&profile, child, &parent.id);
         agent_runtime::close_storage_owners().await.unwrap();

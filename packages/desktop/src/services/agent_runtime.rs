@@ -39,7 +39,7 @@ use centaeris_core::runtime::projection::{
 use centaeris_core::runtime::subagent::{
     cancel_subagent_run_job_async, cancel_subagent_run_jobs_async, load_subagent_work_packet_async,
     subagent_work_packet_runtime_binding, CancelSubagentRunJobRequest,
-    CancelSubagentRunJobsRequest,
+    CancelSubagentRunJobsRequest, SubagentWorkPacketRuntimeBindingV1,
 };
 use centaeris_core::runtime::{
     build_subagent_scheduler_runtime_event, completed_turn_projection_from_result,
@@ -2476,8 +2476,11 @@ async fn run_session_agent_run(
                             return;
                         }
                     }
-                    if let Err(error) =
-                        materialize_spawned_agent_session_blocking(session_id.as_str(), &event)
+                    if let Err(error) = materialize_spawned_agent_session_blocking(
+                        &event_writer,
+                        session_id.as_str(),
+                        &event,
+                    )
                     {
                         stream_persistence_error = Some(error);
                         return;
@@ -3165,6 +3168,7 @@ fn run_message_log_blocking<T>(
 }
 
 fn materialize_spawned_agent_session_blocking(
+    writer: &EventWriter,
     parent_session_id: &str,
     update: &TurnUpdate,
 ) -> Result<(), String> {
@@ -3180,37 +3184,75 @@ fn materialize_spawned_agent_session_blocking(
             readiness.parent_session_id
         ));
     }
-    let cwd = sessions::cwd_for_session_id(parent_session_id)?;
-    materialize_agent_session_blocking(
-        parent_session_id,
-        &readiness.child_session_id,
-        &readiness.child_turn_id,
-        &readiness.runtime_job_id,
-        &readiness.title,
-        &cwd,
-        readiness.at_ms,
-    )
+    run_message_log_blocking("admit spawned Agent session", || {
+        tokio::runtime::Handle::current().block_on(async {
+            use centaeris_core::session::reliability::RuntimeJobStatus;
+
+            let Some(admission) = crate::subagent_scheduler::ChildTaskAdmission::acquire(
+                writer,
+                parent_session_id,
+                &readiness.child_session_id,
+            )?
+            else {
+                return Ok(());
+            };
+            let store = agent_runtime_job_store()?;
+            let Some(job) = store
+                .get_runtime_job(&readiness.runtime_job_id)
+                .await
+                .map_err(|error| error.diagnostic_message())?
+            else {
+                return Ok(());
+            };
+            // The scanner already materialized a running job. Terminal jobs
+            // belong to outbox delivery, which checks the current receipt.
+            if job.status != RuntimeJobStatus::Queued {
+                return Ok(());
+            }
+            let packet = load_subagent_work_packet_async(store.as_ref(), &job)
+                .await
+                .map_err(|error| error.diagnostic_message())?;
+            let binding = subagent_work_packet_runtime_binding(&packet, &job)?;
+            if binding.child_session_id != readiness.child_session_id
+                || binding.child_turn_id != readiness.child_turn_id
+                || binding.parent_turn_id != readiness.parent_turn_id
+            {
+                return Err(format!(
+                    "SubagentSpawned Job binding mismatch: {}",
+                    readiness.runtime_job_id
+                ));
+            }
+            admission
+                .materialize_if_current(store.as_ref(), &job, &binding, |status| {
+                    *status == RuntimeJobStatus::Queued
+                })
+                .await?;
+            Ok(())
+        })
+    })
 }
 
 pub(crate) fn materialize_agent_session_blocking(
     parent_session_id: &str,
-    child_session_id: &str,
-    child_turn_id: &str,
+    binding: &SubagentWorkPacketRuntimeBindingV1,
     runtime_job_id: &str,
-    title: &str,
+    origin_job_id: &str,
     cwd: &str,
     at_ms: i64,
 ) -> Result<(), String> {
+    let child_session_id = binding.child_session_id.as_str();
+    let child_turn_id = binding.child_turn_id.as_str();
+    let title = binding.description.as_str();
     run_message_log_blocking("materialize spawned Agent session", || {
-        if let Some((parent, _origin_job)) = sessions::find_agent_runtime_binding(child_session_id)? {
-            if parent != parent_session_id {
-                return Err(format!("Agent session parent mismatch: {child_session_id}"));
+        if let Some((parent, origin_job)) = sessions::find_agent_runtime_binding(child_session_id)? {
+            if parent != parent_session_id || origin_job != origin_job_id {
+                return Err(format!("Agent session origin mismatch: {child_session_id}"));
             }
         } else {
             sessions::ensure_agent_session(
                 child_session_id,
                 parent_session_id,
-                runtime_job_id,
+                origin_job_id,
                 title,
                 cwd,
                 at_ms,
@@ -4824,21 +4866,34 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn spawned_agent_session_is_durable_before_the_parent_tag_is_published() {
+        use crate::runtime_rpc_transport::RuntimeServerClientHub;
+        use crate::subagent_scheduler::queue_tests::{job, object, packet, Profile};
+        use centaeris_core::session::store::{
+            RuntimeStoreTransactionPort, UpsertExternalContextAndScheduleJobRequest,
+        };
+
         let guard = message_log::test_env_mutex()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let root = unique_test_dir("spawned-agent-session");
-        let workspace = root.join("workspace");
-        fs::create_dir_all(workspace.as_path()).expect("create workspace");
-        let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
-        let previous_log_dir = std::env::var_os("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR");
-        std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &root);
-        std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", root.join("sessions"));
+        let profile = Profile::new();
+        let writer = Arc::new(RuntimeServerClientHub::default()).broadcaster();
         let result = (|| {
+            let cwd = profile.root.join("workspace").to_string_lossy().into_owned();
             let parent = sessions::create(sessions::SessionCreateRequest {
                 title: Some("parent".to_string()),
-                cwd: workspace.to_string_lossy().to_string(),
+                cwd: cwd.clone(),
             })?;
+            let child_id = "session-agent-research";
+            let job = job(&parent.id, "agent-research", 42);
+            let job_id = job.job_id.clone();
+            let packet = packet(&parent.id, child_id, &job, &cwd);
+            RuntimeStoreTransactionPort::upsert_external_context_and_schedule_job(
+                &agent_runtime_store_actor()?,
+                UpsertExternalContextAndScheduleJobRequest {
+                    object: object(job.payload_ref.as_deref().unwrap(), packet.to_string()),
+                    job,
+                },
+            )?;
             let update = TurnUpdate::RuntimeEvent {
                 event: serde_json::from_value(serde_json::json!({
                     "id": "evt-agent-spawned",
@@ -4846,15 +4901,15 @@ mod tests {
                     "type": "SubagentSpawned",
                     "at": 42,
                     "sessionId": parent.id.as_str(),
-                    "turnId": "turn-parent",
+                    "turnId": "parent-turn",
                     "taskId": "agent-research",
                     "parentTaskId": "task-parent",
                     "status": "queued",
                     "payload": {
                         "subagentId": "agent-research",
-                        "childSessionId": "session-agent-research",
-                        "childTurnId": "turn-child",
-                        "runtimeJobId": "subagent.run:research",
+                        "childSessionId": child_id,
+                        "childTurnId": "child-turn",
+                        "runtimeJobId": job_id,
                         "description": "research the issue"
                     },
                     "visibility": "user",
@@ -4863,46 +4918,36 @@ mod tests {
                 .expect("runtime event fixture"),
             };
 
-            materialize_spawned_agent_session_blocking(parent.id.as_str(), &update)?;
-            materialize_spawned_agent_session_blocking(parent.id.as_str(), &update)?;
+            materialize_spawned_agent_session_blocking(&writer, &parent.id, &update)?;
+            materialize_spawned_agent_session_blocking(&writer, &parent.id, &update)?;
 
             let child = sessions::get(sessions::SessionGetRequest {
-                session_id: "session-agent-research".to_string(),
+                session_id: child_id.to_string(),
             })?;
             if child.parent_session_id.as_deref() != Some(parent.id.as_str())
-                || child.runtime_job_id.as_deref() != Some("subagent.run:research")
+                || child.runtime_job_id.as_deref() != Some(job_id.as_str())
             {
                 return Err("child session binding mismatch".to_string());
             }
-            let agent_runs = message_log::project_session_agent_runs("session-agent-research")?;
+            let agent_runs = message_log::project_session_agent_runs(child_id)?;
             if agent_runs.len() != 1
                 || agent_runs[0].status != "running"
-                || agent_runs[0].turn_id != "turn-child"
-                || message_log::project_chat_messages("session-agent-research")?.len() != 1
+                || agent_runs[0].turn_id != "child-turn"
+                || message_log::project_chat_messages(child_id)?.len() != 1
             {
                 return Err("child transcript was not materialized once".to_string());
             }
-            message_log::append_agent_turn_running(
-                "session-agent-research",
-                "subagent.run:research",
-            )?;
-            let running = message_log::project_session_agent_runs("session-agent-research")?;
+            message_log::append_agent_turn_running(child_id, &job_id)?;
+            let running = message_log::project_session_agent_runs(child_id)?;
             if running[0].status != "running"
-                || message_log::project_chat_messages("session-agent-research")?.len() != 1
+                || message_log::project_chat_messages(child_id)?.len() != 1
             {
                 return Err("running transition duplicated the child transcript".to_string());
             }
             Ok::<(), String>(())
         })();
-        match previous_data_dir {
-            Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
-            None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),
-        }
-        match previous_log_dir {
-            Some(value) => std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", value),
-            None => std::env::remove_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR"),
-        }
-        fs::remove_dir_all(root).ok();
+        close_storage_owners().await.unwrap();
+        drop(profile);
         drop(guard);
         result.expect("materialize spawned Agent session");
     }

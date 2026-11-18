@@ -4,7 +4,7 @@ use crate::http_transport::ReqwestJsonHttpTransport;
 use crate::mcp;
 use crate::message_log;
 use crate::runtime_config;
-use crate::runtime_rpc_transport::{EventWriter, RuntimeServerClientHub};
+use crate::runtime_rpc_transport::{EventWriter, RuntimeServerClientHub, SessionWritePermit};
 use crate::sessions;
 use centaeris_core::model::{
     AnthropicMessagesModelClient, OpenAiCompatibleModelClient, OpenAiResponsesModelClient, WireApi,
@@ -255,20 +255,21 @@ async fn reconcile_stopped_jobs_in_scope(session_id: Option<&str>) -> Result<(),
 async fn next_queued_parent_session_for_owner(
     writer: &EventWriter,
 ) -> Result<Option<String>, String> {
-    let Some(sessions) = writer.owned_sessions()? else {
-        return next_queued_parent_session().await;
-    };
-    if sessions.is_empty() {
+    let sessions = writer.owned_sessions()?;
+    if sessions.as_ref().is_some_and(Vec::is_empty) {
         return Ok(None);
     }
     let store = agent_runtime::agent_runtime_job_store()?;
     reclaim_expired_leases(store.as_ref()).await?;
+    let Some(sessions) = sessions else {
+        return next_queued_parent_session_in_scope(writer, store.as_ref(), None).await;
+    };
     let mut errors = Vec::new();
     for session in sessions {
         let Some(_session_writer) = writer.pin_session(&session)? else {
             continue;
         };
-        match next_queued_parent_session_in_scope(store.as_ref(), Some(&session)).await {
+        match next_queued_parent_session_in_scope(writer, store.as_ref(), Some(&session)).await {
             Ok(Some(parent)) => return Ok(Some(parent)),
             Ok(None) => {}
             Err(error) => errors.push(error),
@@ -281,10 +282,10 @@ async fn next_queued_parent_session_for_owner(
     }
 }
 
+#[cfg(test)]
 async fn next_queued_parent_session() -> Result<Option<String>, String> {
-    let store = agent_runtime::agent_runtime_job_store()?;
-    reclaim_expired_leases(store.as_ref()).await?;
-    next_queued_parent_session_in_scope(store.as_ref(), None).await
+    let writer = Arc::new(RuntimeServerClientHub::default()).broadcaster();
+    next_queued_parent_session_for_owner(&writer).await
 }
 
 async fn reclaim_expired_leases(store: &dyn AsyncJobStorePort) -> Result<(), String> {
@@ -298,6 +299,7 @@ async fn reclaim_expired_leases(store: &dyn AsyncJobStorePort) -> Result<(), Str
 }
 
 async fn next_queued_parent_session_in_scope(
+    writer: &EventWriter,
     store: &dyn AsyncJobStorePort,
     session_id: Option<&str>,
 ) -> Result<Option<String>, String> {
@@ -360,26 +362,30 @@ async fn next_queued_parent_session_in_scope(
                 offset += usize::from(queued_job_is_retained(store, &job.job_id).await?);
                 continue;
             }
-            let materialized = sessions::cwd_for_session_id(parent_session_id).and_then(|cwd| {
-                agent_runtime::materialize_agent_session_blocking(
-                    parent_session_id,
-                    &binding.child_session_id,
-                    &binding.child_turn_id,
-                    &job.job_id,
-                    &binding.description,
-                    &cwd,
-                    job.created_at_ms,
-                )
-            });
-            if let Err(error) = materialized {
+            let ready = async {
+                let Some(admission) =
+                    ChildTaskAdmission::acquire(writer, parent_session_id, &binding.child_session_id)?
+                else {
+                    return Ok(false);
+                };
+                if !admission
+                    .materialize_if_current(store, &job, &binding, |status| {
+                        *status == RuntimeJobStatus::Queued
+                    })
+                    .await?
+                {
+                    return Ok(false);
+                }
+                agent_session_is_ready(&job, &binding)
+            }
+            .await;
+            if let Err(error) = &ready {
                 errors.push(format!(
                     "Agent creation recovery failed: jobId={} error={error}",
                     job.job_id
                 ));
-                offset += usize::from(queued_job_is_retained(store, &job.job_id).await?);
-                continue;
             }
-            if agent_session_is_ready(&job, &binding)? {
+            if ready.unwrap_or(false) {
                 if !errors.is_empty() {
                     eprintln!(
                         "centaeris Agent creation recovery deferred: {}",
@@ -395,6 +401,121 @@ async fn next_queued_parent_session_in_scope(
         Ok(None)
     } else {
         Err(errors.join("; "))
+    }
+}
+
+/// Pins the Session family and, on the native host, participates in deletion's
+/// background-work drain before any child Session reads or writes.
+pub(crate) struct ChildTaskAdmission {
+    _session_writer: SessionWritePermit,
+    #[cfg(feature = "native-job-store")]
+    _parent_work: tokio_util::task::task_tracker::TaskTrackerToken,
+    #[cfg(feature = "native-job-store")]
+    _child_work: tokio_util::task::task_tracker::TaskTrackerToken,
+    parent: String,
+    child: String,
+}
+
+impl ChildTaskAdmission {
+    pub(crate) fn acquire(
+        writer: &EventWriter,
+        parent: &str,
+        child: &str,
+    ) -> Result<Option<Self>, String> {
+        let Some(session_writer) = writer.pin_session(parent)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            _session_writer: session_writer,
+            #[cfg(feature = "native-job-store")]
+            _parent_work: writer.begin_background_work(parent)?,
+            #[cfg(feature = "native-job-store")]
+            _child_work: writer.begin_background_work(child)?,
+            parent: parent.into(),
+            child: child.into(),
+        }))
+    }
+
+    #[cfg(feature = "native-job-store")]
+    pub(crate) fn into_session_writer(self) -> SessionWritePermit {
+        self._session_writer
+    }
+
+    pub(crate) async fn materialize_if_current(
+        &self,
+        store: &dyn AsyncJobStorePort,
+        observed: &RuntimeJobRecord,
+        binding: &SubagentWorkPacketRuntimeBindingV1,
+        eligible: impl FnOnce(&RuntimeJobStatus) -> bool,
+    ) -> Result<bool, String> {
+        let Some(job) = store
+            .get_runtime_job(&observed.job_id)
+            .await
+            .map_err(|error| error.diagnostic_message())?
+        else {
+            return Ok(false);
+        };
+        if job.session_id.as_deref() != Some(self.parent.as_str())
+            || job.job_kind != SUBAGENT_RUN_JOB_KIND
+            || job.payload_ref != observed.payload_ref
+            || job.branch_id.as_deref() != Some(binding.parent_turn_id.as_str())
+            || self.child != binding.child_session_id
+        {
+            return Err(format!("Agent child task binding changed: {}", job.job_id));
+        }
+        if !eligible(&job.status) || sessions::listed_session(&self.parent)?.is_none() {
+            return Ok(false);
+        }
+        let Some(origin_job_id) = self.active_origin_job_id(store, &job).await? else {
+            return Ok(false);
+        };
+        let cwd = sessions::cwd_for_session_id(&self.parent)?;
+        agent_runtime::materialize_agent_session_blocking(
+            &self.parent,
+            binding,
+            &job.job_id,
+            &origin_job_id,
+            &cwd,
+            job.created_at_ms,
+        )?;
+        Ok(true)
+    }
+
+    async fn active_origin_job_id(
+        &self,
+        store: &dyn AsyncJobStorePort,
+        job: &RuntimeJobRecord,
+    ) -> Result<Option<String>, String> {
+        let packet_ref = job.payload_ref.as_deref().ok_or("Agent WorkPacket missing")?;
+        // The WorkPacket loader also accepts inline packets with no stored origin.
+        if serde_json::from_str::<serde_json::Value>(packet_ref).is_ok() {
+            return Ok(Some(job.job_id.clone()));
+        }
+        let packet = store
+            .load_external_context_object(packet_ref)
+            .await
+            .map_err(|error| error.diagnostic_message())?
+            .ok_or("Agent WorkPacket missing during materialization")?;
+        if packet.source_tool_name == "followup_task" {
+            let origin_ref = packet.metadata["originWorkPacketRef"]
+                .as_str()
+                .ok_or("Follow-up task origin WorkPacket reference missing")?;
+            let origin = store
+                .load_external_context_object(origin_ref)
+                .await
+                .map_err(|error| error.diagnostic_message())?
+                .ok_or("Agent origin WorkPacket missing during materialization")?;
+            if !origin.metadata["agentRetiredAtMs"].is_null() {
+                return Ok(None);
+            }
+            let origin_id = origin.metadata["runtimeJobId"]
+                .as_str()
+                .ok_or("Agent origin WorkPacket has no runtimeJobId")?;
+            return Ok(Some(origin_id.to_owned()));
+        }
+        Ok(packet.metadata["agentRetiredAtMs"]
+            .is_null()
+            .then_some(job.job_id.clone()))
     }
 }
 
