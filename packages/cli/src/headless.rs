@@ -1,5 +1,5 @@
 use crate::arguments::{OutputMode, PromptOptions};
-use centaeris_desktop_services::rpc_client::{RuntimeClient, RuntimeEvent, SessionCommand};
+use centaeris_cli_runtime::rpc_client::{RuntimeClient, RuntimeEvent, SessionCommand};
 use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::path::Path;

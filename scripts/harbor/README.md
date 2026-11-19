@@ -50,10 +50,13 @@ docker run --rm \
   --mount "type=bind,source=$PWD/target,target=/build" \
   -e CARGO_TARGET_DIR=/build/harbor-bookworm -e CARGO_BUILD_JOBS=2 \
   -w /source rust:1.95.0-bookworm \
-  /usr/local/cargo/bin/cargo build --locked -p centaeris-desktop-services --bin centaeris-runtime
-export CENTAERIS_RUNTIME_BINARY="$PWD/target/harbor-bookworm/debug/centaeris-runtime"
+  /usr/local/cargo/bin/cargo build --locked -p centaeris-tui --bin cet
+export CENTAERIS_RUNTIME_BINARY="$PWD/target/harbor-bookworm/debug/cet"
 python3 -B -m unittest discover -s scripts/harbor -p 'test_*.py'
 ```
+
+The supervisor starts `cet --mode rpc` over stdio. Its private, per-trial
+control socket lets Harbor request cancellation from the separate teardown process.
 
 Windows Docker Desktop can also build this Linux binary. Use absolute Windows
 bind paths for the two mounts above. The output is still a Linux ELF, not `.exe`.

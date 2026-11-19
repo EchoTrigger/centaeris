@@ -246,8 +246,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
             profile.mkdir()
             instruction = root / "instruction.txt"
             instruction.write_text("task", encoding="utf-8")
-            endpoint_process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'{"endpoint":"/runtime"}', b"")))
-            runtime = SimpleNamespace(returncode=0)
+            runtime = SimpleNamespace(stdout=None, stdin=None, returncode=0)
             rpc = SimpleNamespace(call=AsyncMock(return_value={}), close=AsyncMock(),
                                   restore_event_log=lambda: {"mirrorErrorErrno": None, "mirrorRestored": False})
             args = SimpleNamespace(logs=str(root), attempt="attempt", context_tokens=500000,
@@ -256,7 +255,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
                                    timeout=30, credential_env="TEST_MODEL_KEY", deadline_at_ms=None,
                                    keep_alive=False, linger=0)
             result = {"sessionId": "session-test", "agentRunId": "run-test", "status": "succeeded"}
-            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(side_effect=[endpoint_process, runtime])), patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.run_trial", AsyncMock(return_value=result)), patch("runner.collect_provider_usage", side_effect=ValueError("usage log truncated")), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
+            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(return_value=runtime)), patch("runner.Rpc", return_value=rpc), patch("runner.initialize", AsyncMock(return_value={})), patch("runner.start_cancel_listener", AsyncMock(return_value=None)), patch("runner.run_trial", AsyncMock(return_value=result)), patch("runner.collect_provider_usage", side_effect=ValueError("usage log truncated")), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
                 await supervise(args)
             endpoint = json.loads((root / "endpoint.json").read_text(encoding="utf-8"))
             saved = json.loads((root / "result.json").read_text(encoding="utf-8"))
@@ -275,8 +274,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
             profile.mkdir()
             instruction = root / "instruction.txt"
             instruction.write_text("task", encoding="utf-8")
-            endpoint_process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'{"endpoint":"/runtime"}', b"")))
-            runtime = SimpleNamespace(returncode=None, wait=AsyncMock(side_effect=[asyncio.TimeoutError("still running"), 0]), kill=Mock())
+            runtime = SimpleNamespace(stdout=None, stdin=None, returncode=None, wait=AsyncMock(side_effect=[asyncio.TimeoutError("still running"), 0]), kill=Mock())
             rpc = SimpleNamespace(call=AsyncMock(side_effect=ConnectionError("shutdown connection closed")),
                                   close=AsyncMock(side_effect=OSError("connection close failed")))
             args = SimpleNamespace(logs=str(root), attempt="attempt", context_tokens=500000,
@@ -285,7 +283,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
                                    timeout=30, credential_env="TEST_MODEL_KEY", deadline_at_ms=None,
                                    keep_alive=False, linger=0)
             primary = ValueError("trial contract failure")
-            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(side_effect=[endpoint_process, runtime])), patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.run_trial", AsyncMock(side_effect=primary)), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
+            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(return_value=runtime)), patch("runner.Rpc", return_value=rpc), patch("runner.initialize", AsyncMock(return_value={})), patch("runner.start_cancel_listener", AsyncMock(return_value=None)), patch("runner.run_trial", AsyncMock(side_effect=primary)), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
                 with self.assertRaises(ValueError) as caught:
                     await supervise(args)
             self.assertIs(caught.exception, primary)
@@ -305,8 +303,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
             profile.mkdir()
             instruction = root / "instruction.txt"
             instruction.write_text("task", encoding="utf-8")
-            endpoint_process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'{"endpoint":"/runtime"}', b"")))
-            runtime = SimpleNamespace(returncode=None, wait=AsyncMock(return_value=0), kill=Mock())
+            runtime = SimpleNamespace(stdout=None, stdin=None, returncode=None, wait=AsyncMock(return_value=0), kill=Mock())
             cleanup = ConnectionError("shutdown connection closed")
             rpc = SimpleNamespace(call=AsyncMock(side_effect=cleanup), close=AsyncMock(),
                                   restore_event_log=lambda: {"mirrorErrorErrno": None, "mirrorRestored": False})
@@ -316,7 +313,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
                                    timeout=30, credential_env="TEST_MODEL_KEY", deadline_at_ms=None,
                                    keep_alive=False, linger=0)
             result = {"sessionId": "session-test", "agentRunId": "run-test", "status": "succeeded"}
-            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(side_effect=[endpoint_process, runtime])), patch("runner.connect", AsyncMock(return_value=rpc)), patch("runner.run_trial", AsyncMock(return_value=result)), patch("runner.collect_provider_usage", return_value={}), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
+            with patch("runner.trial_profile", return_value=profile), patch("runner.asyncio.create_subprocess_exec", AsyncMock(return_value=runtime)), patch("runner.Rpc", return_value=rpc), patch("runner.initialize", AsyncMock(return_value={})), patch("runner.start_cancel_listener", AsyncMock(return_value=None)), patch("runner.run_trial", AsyncMock(return_value=result)), patch("runner.collect_provider_usage", return_value={}), patch.dict("runner.os.environ", {"TEST_MODEL_KEY": "fake-test-key"}):
                 with self.assertRaises(ConnectionError) as caught:
                     await supervise(args)
             self.assertIs(caught.exception, cleanup)

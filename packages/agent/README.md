@@ -26,16 +26,16 @@ the actual operation and provide their event stream's closure signal.
 ## Host composition
 
 The shared local product host lives in
-[Desktop services](../desktop/src/services/README.md). It composes the local
+[Desktop services](../cli/runtime/README.md). It composes the local
 profile, SQLite store, model configuration, product services and RPC listener.
 Desktop and CLI use that application host.
 
-The [native Session example](../desktop/src/services/examples/session.rs) uses the
+The [native Session example](../cli/runtime/examples/session.rs) uses the
 shared host with the SDK.
 
 ```sh
-cargo run -p centaeris-desktop-services --example session
-cargo run -p centaeris-desktop-services --example session -- "Explain this repository"
+cargo run -p centaeris-cli-runtime --example session
+cargo run -p centaeris-cli-runtime --example session -- "Explain this repository"
 ```
 
 `local_execution_host` and `openssh` expose the reusable local execution adapters.

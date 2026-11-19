@@ -10,18 +10,22 @@ fn automatic_followup_attaches_only_to_the_visible_session() {
     let workspace = unique_test_dir("followup-workspace");
     let data_root = unique_test_dir("followup-data");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.active_session = Some(TuiSession {
+    app.session.active_session = Some(TuiSession {
         id: "visible".into(),
     });
     let update = |session: &str, run: &str| json!({"sessionId":session,"agentRunId":run,"payload":{"type":"runtime_event","event":{"id":format!("event:{run}"),"type":"ModelRequestStart","processState":"thinking","payload":{"purpose":"main","contextTokenEstimate":10,"initialContent":"follow-up"}}}});
-    apply_session_update(&mut app, &update("other", "other-run"));
-    assert!(app.assistant_buffer.is_empty());
-    assert!(app.active_agent_run_id.is_none());
-    apply_session_update(&mut app, &update("visible", "followup-run"));
-    assert_eq!(app.active_agent_run_id.as_deref(), Some("followup-run"));
-    assert_eq!(app.assistant_buffer, "follow-up");
-    apply_session_update(&mut app, &update("other", "other-run-2"));
+    apply_session_update(&mut app.session, &update("other", "other-run"));
+    assert!(app.session.assistant_buffer.is_empty());
+    assert!(app.session.active_agent_run_id.is_none());
+    apply_session_update(&mut app.session, &update("visible", "followup-run"));
+    assert_eq!(
+        app.session.active_agent_run_id.as_deref(),
+        Some("followup-run")
+    );
+    assert_eq!(app.session.assistant_buffer, "follow-up");
+    apply_session_update(&mut app.session, &update("other", "other-run-2"));
     assert!(!app
+        .session
         .transcript
         .iter()
         .any(|line| matches!(line, TranscriptLine::Error(_))));
@@ -109,7 +113,7 @@ fn transcript_paging_materializes_tail_then_prepends_at_the_fixed_waterline() {
         state.materialize_history(false),
         vec![
             TranscriptLine::Summary("tail".to_string()),
-            TranscriptLine::Tool(crate::tool_projection::transcript_page_tool_line(
+            TranscriptLine::tool(crate::tool_projection::transcript_page_tool_line(
                 "call-12",
                 "read_file",
                 TranscriptBlockStatusV1::Running,
@@ -335,8 +339,8 @@ fn transcript_patch_polling_applies_revisions_without_exposing_new_tail_during_l
 fn tui_uses_current_directory_as_default_workspace() {
     let cwd = unique_test_dir("default-cwd-workspace");
 
-    let config =
-        resolve_config_with_default(None, cwd.clone()).expect("default workspace from cwd");
+    let config = resolve_config_with_default_and_home(None, cwd.clone(), None)
+        .expect("default workspace from cwd");
 
     let canonical = cwd.canonicalize().expect("canonical cwd");
     assert_eq!(config.session_cwd, display_path(canonical.as_path()));
@@ -362,10 +366,10 @@ fn bare_home_workspace_sets_first_prompt_warning_only_for_implicit_launch() {
 fn home_risk_waits_until_the_user_has_entered_a_prompt() {
     let workspace = PathBuf::from("D:/home");
     let mut app = test_app("", workspace.clone(), workspace);
-    app.home_risk_pending = true;
+    app.session.home_risk_pending = true;
     assert!(!should_open_home_risk_panel(&app, ""));
     assert!(should_open_home_risk_panel(&app, "inspect this project"));
-    app.home_risk_pending = false;
+    app.session.home_risk_pending = false;
     assert!(!should_open_home_risk_panel(&app, "inspect this project"));
 }
 
@@ -452,7 +456,7 @@ fn pending_model_request_keeps_input_responsive_until_config_arrives() {
         &mut app,
     );
     assert_eq!(
-        app.input, "x",
+        app.session.input, "x",
         "model config loading must not block keyboard input"
     );
     start_model_command(&mut app, ModelCommand::List)
@@ -470,7 +474,7 @@ fn pending_model_request_keeps_input_responsive_until_config_arrives() {
 
     assert_eq!(app.model_display.as_deref(), Some("gpt-5.5"));
     assert!(app.model_panel.is_some());
-    assert!(app.message.is_none());
+    assert!(app.session.message.is_none());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -482,8 +486,8 @@ fn paste_appends_text_to_input() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
     insert_text_at_cursor(&mut app, "before");
     handle_paste(&mut app, "\nline two\nline three".to_string());
-    assert_eq!(app.input, "before\nline two\nline three");
-    assert!(!app.show_help);
+    assert_eq!(app.session.input, "before\nline two\nline three");
+    assert!(!app.session.show_help);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -498,10 +502,10 @@ fn terminal_text_of_an_absolute_image_path_creates_an_image_placeholder() {
 
     handle_paste(&mut app, format!("\"{}\"", source.display()));
 
-    assert_eq!(app.input, "[Image #1] ");
-    assert_eq!(app.draft_image_attachments.len(), 1);
-    assert_ne!(app.draft_image_attachments[0].local_path, source);
-    assert!(app.draft_image_attachments[0].local_path.is_file());
+    assert_eq!(app.session.input, "[Image #1] ");
+    assert_eq!(app.session.draft_image_attachments.len(), 1);
+    assert_ne!(app.session.draft_image_attachments[0].local_path, source);
+    assert!(app.session.draft_image_attachments[0].local_path.is_file());
     clear_composer(&mut app);
 
     for character in source.display().to_string().replace(' ', "` ").chars() {
@@ -510,8 +514,8 @@ fn terminal_text_of_an_absolute_image_path_creates_an_image_placeholder() {
             &mut app,
         );
     }
-    assert_eq!(app.input, "[Image #1] ");
-    assert_eq!(app.draft_image_attachments.len(), 1);
+    assert_eq!(app.session.input, "[Image #1] ");
+    assert_eq!(app.session.draft_image_attachments.len(), 1);
     clear_composer(&mut app);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -525,7 +529,7 @@ fn shift_enter_inserts_a_newline_and_expands_the_composer() {
 
     handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), &mut app);
 
-    assert_eq!(app.input, "first line\n");
+    assert_eq!(app.session.input, "first line\n");
     assert_eq!(input_row_count(&app, 80), 2);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -538,15 +542,15 @@ fn paste_is_ignored_while_panels_are_open() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
     open_model_panel(&mut app, &model_picker_config()).unwrap();
     handle_paste(&mut app, "ignored".to_string());
-    assert!(app.input.is_empty());
+    assert!(app.session.input.is_empty());
     close_model_panel(&mut app);
-    app.home_risk_panel = Some(HomeRiskPanel {
+    app.session.home_risk_panel = Some(HomeRiskPanel {
         workspaces: Vec::new(),
         selected: 0,
         notice: None,
     });
     handle_paste(&mut app, "still ignored".to_string());
-    assert!(app.input.is_empty());
+    assert!(app.session.input.is_empty());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -596,12 +600,12 @@ fn native_multiline_paste_waits_for_one_manual_submit_in_idle_and_busy_sessions(
     for busy in [false, true] {
         let path = PathBuf::from("D:/workspace");
         let mut app = test_app("", path.clone(), path);
-        app.active_session = Some(TuiSession {
+        app.session.active_session = Some(TuiSession {
             id: "paste-session".into(),
         });
         if busy {
-            app.active_agent_run_id = Some("paste-run".into());
-            app.active_agent_run_ids.insert("paste-run".into());
+            app.session.active_agent_run_id = Some("paste-run".into());
+            app.session.active_agent_run_ids.insert("paste-run".into());
         }
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let received = requests.clone();
@@ -611,24 +615,27 @@ fn native_multiline_paste_waits_for_one_manual_submit_in_idle_and_busy_sessions(
         }));
 
         deliver_terminal_paste_keys(&mut app, text, true);
-        assert_eq!(app.input, text);
+        assert_eq!(app.session.input, text);
         assert!(
             requests.lock().unwrap().is_empty(),
             "paste must not send a prompt or supplement"
         );
-        assert!(app.transcript.is_empty());
-        assert!(app.message.is_none());
+        assert!(app.session.transcript.is_empty());
+        assert!(app.session.message.is_none());
 
         assert!(!handle_terminal_event(
             Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)),
             &mut app
         ));
-        assert!(app.input.is_empty(), "a paste must undo as one edit");
+        assert!(
+            app.session.input.is_empty(),
+            "a paste must undo as one edit"
+        );
         assert!(!handle_terminal_event(
             Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
             &mut app
         ));
-        assert_eq!(app.input, text);
+        assert_eq!(app.session.input, text);
 
         let mut input = input_events::InputEvents::default();
         let now = Instant::now();
@@ -644,8 +651,8 @@ fn native_multiline_paste_waits_for_one_manual_submit_in_idle_and_busy_sessions(
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["params"]["request"]["message"], text.trim_end());
-        assert!(app.input.is_empty());
-        assert!(app.message.is_none());
+        assert!(app.session.input.is_empty());
+        assert!(app.session.message.is_none());
     }
 }
 
@@ -657,14 +664,14 @@ fn native_multiline_paste_cannot_activate_modal_or_command_actions() {
         match panel {
             "model" => open_model_panel(&mut app, &model_picker_config()).unwrap(),
             "home" => {
-                app.home_risk_panel = Some(HomeRiskPanel {
+                app.session.home_risk_panel = Some(HomeRiskPanel {
                     workspaces: Vec::new(),
                     selected: 0,
                     notice: None,
                 })
             }
             "question" => {
-                app.pending_question = Some(PendingQuestion {
+                app.session.pending_question = Some(PendingQuestion {
                     id: "paste-question".into(),
                     question: "Pick one".into(),
                     options: Vec::new(),
@@ -673,16 +680,16 @@ fn native_multiline_paste_cannot_activate_modal_or_command_actions() {
                 })
             }
             "commands" => {
-                app.input = "/".into();
-                app.input_cursor = 1;
-                app.show_help = true;
+                app.session.input = "/".into();
+                app.session.input_cursor = 1;
+                app.session.show_help = true;
             }
             _ => unreachable!(),
         }
-        let draft = app.input.clone();
+        let draft = app.session.input.clone();
         deliver_terminal_paste_keys(&mut app, "/model\n/exit\n", false);
-        assert_eq!(app.input, draft, "{panel}");
-        assert!(app.message.is_none(), "{panel}");
+        assert_eq!(app.session.input, draft, "{panel}");
+        assert!(app.session.message.is_none(), "{panel}");
         assert!(
             app.runtime.is_none(),
             "paste must not create a Runtime: {panel}"
@@ -693,8 +700,11 @@ fn native_multiline_paste_cannot_activate_modal_or_command_actions() {
                 app.model_panel.as_ref().unwrap().stage,
                 model_picker::Stage::Models
             )),
-            "home" => assert!(app.home_risk_panel.is_some()),
-            "question" => assert_eq!(app.pending_question.as_ref().unwrap().id, "paste-question"),
+            "home" => assert!(app.session.home_risk_panel.is_some()),
+            "question" => assert_eq!(
+                app.session.pending_question.as_ref().unwrap().id,
+                "paste-question"
+            ),
             "commands" => assert!(app.command_panel_open()),
             _ => unreachable!(),
         }
@@ -709,8 +719,8 @@ fn explicit_terminal_paste_normalizes_crlf_without_creating_submit_actions() {
         Event::Paste("中文\r\n👩‍💻\r\n".into()),
         &mut app
     ));
-    assert_eq!(app.input, "中文\n👩‍💻\n");
-    assert!(app.active_agent_run_id.is_none());
+    assert_eq!(app.session.input, "中文\n👩‍💻\n");
+    assert!(app.session.active_agent_run_id.is_none());
     assert!(app.runtime.is_none());
 }
 
@@ -723,14 +733,14 @@ fn native_image_drop_preserves_text_cursor_and_one_undo_step() {
     let dropped = format!("\"{}\"", source.display());
     for (draft, cursor) in [("", 0), ("图片", "图片".len()), ("前文后文", "前文".len())] {
         let mut app = test_app(draft, root.clone(), root.clone());
-        app.input_cursor = cursor;
+        app.session.input_cursor = cursor;
         deliver_terminal_paste_keys(&mut app, &dropped, false);
 
         let expected = format!("{}[Image #1] {}", &draft[..cursor], &draft[cursor..]);
-        assert_eq!(app.input, expected);
-        assert_eq!(app.input_cursor, cursor + "[Image #1] ".len());
-        assert_eq!(app.draft_image_attachments.len(), 1);
-        let image = &app.draft_image_attachments[0];
+        assert_eq!(app.session.input, expected);
+        assert_eq!(app.session.input_cursor, cursor + "[Image #1] ".len());
+        assert_eq!(app.session.draft_image_attachments.len(), 1);
+        let image = &app.session.draft_image_attachments[0];
         assert_eq!(
             (image.start, image.end),
             (cursor, cursor + "[Image #1]".len())
@@ -744,8 +754,8 @@ fn native_image_drop_preserves_text_cursor_and_one_undo_step() {
             &TuiSession {
                 id: "drop-session".into(),
             },
-            &app.input,
-            &app.draft_image_attachments,
+            &app.session.input,
+            &app.session.draft_image_attachments,
             "drop-operation",
         );
         assert_eq!(request["message"], expected);
@@ -755,9 +765,9 @@ fn native_image_drop_preserves_text_cursor_and_one_undo_step() {
             KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
             &mut app,
         );
-        assert_eq!(app.input, draft);
-        assert_eq!(app.input_cursor, cursor);
-        assert!(app.draft_image_attachments.is_empty());
+        assert_eq!(app.session.input, draft);
+        assert_eq!(app.session.input_cursor, cursor);
+        assert!(app.session.draft_image_attachments.is_empty());
         assert!(owned.is_file());
         for modifiers in [
             KeyModifiers::CONTROL,
@@ -774,14 +784,14 @@ fn native_image_drop_preserves_text_cursor_and_one_undo_step() {
                 ),
                 &mut app,
             );
-            assert_eq!(app.input, expected);
-            assert_eq!(app.input_cursor, cursor + "[Image #1] ".len());
-            assert_eq!(app.draft_image_attachments[0].local_path, owned);
+            assert_eq!(app.session.input, expected);
+            assert_eq!(app.session.input_cursor, cursor + "[Image #1] ".len());
+            assert_eq!(app.session.draft_image_attachments[0].local_path, owned);
             handle_key(
                 KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
                 &mut app,
             );
-            assert_eq!(app.input, draft);
+            assert_eq!(app.session.input, draft);
         }
         clear_composer(&mut app);
         assert!(!owned.exists());
@@ -849,7 +859,7 @@ fn tui_status_line_only_shows_effort_and_model() {
 
     let status = status_line(&app, 200).to_string();
     assert_eq!(status.trim(), "openai/gpt-5.5 (xhigh)");
-    assert!(!status.contains(app.workspace_root.as_str()));
+    assert!(!status.contains(app.session.workspace_root.as_str()));
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -1159,6 +1169,7 @@ fn test_tool_line(
             .collect(),
         result_blocks: Vec::new(),
         images: Vec::new(),
+        video_paths: Vec::new(),
         result_states,
         interrupted: false,
         running: false,
@@ -1169,7 +1180,7 @@ fn test_tool_line(
 
 fn apply_tool_call(app: &mut App, call_id: &str, tool_name: &str) {
     apply_stream_payload(
-        app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -1185,7 +1196,7 @@ fn apply_tool_call(app: &mut App, call_id: &str, tool_name: &str) {
 
 fn apply_described_bash_call(app: &mut App, call_id: &str) {
     apply_stream_payload(
-        app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -1212,6 +1223,7 @@ fn apply_tool_result(
     operations: Value,
 ) {
     let tool_name = app
+        .session
         .tool_projection
         .open_tool_name(call_id)
         .unwrap_or("bash")
@@ -1235,7 +1247,7 @@ fn apply_tool_result(
         }
     }
     apply_stream_payload(
-        app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -1275,6 +1287,8 @@ fn command_matching_filters_by_prefix() {
     let matches = matching_commands("/mo");
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].name, "/model");
+    assert_eq!(matching_commands("/sess")[0].name, "/sessions");
+    assert_eq!(matching_commands("/conf")[0].name, "/config");
     for input in [
         "/model ",
         "/model test/model-a",
@@ -1296,13 +1310,28 @@ fn command_table_contains_only_the_available_commands() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        vec!["/model", "/effort", "/resume", "/new", "/clear", "/stop", "/help", "/exit"]
+        vec![
+            "/model",
+            "/effort",
+            "/resume",
+            "/dashboard",
+            "/settings",
+            "/new",
+            "/clear",
+            "/stop",
+            "/help",
+            "/exit"
+        ]
     );
 }
 
 fn resume_panel_text(app: &mut App) -> String {
+    resume_panel_text_at_height(app, 24)
+}
+
+fn resume_panel_text_at_height(app: &mut App, height: u16) -> String {
     let view = build_transcript_view(app, 80);
-    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, height)).unwrap();
     terminal.draw(|frame| render(frame, app, &view)).unwrap();
     test_buffer_text(terminal.backend().buffer())
 }
@@ -1311,6 +1340,7 @@ fn wait_for_resume_text(app: &mut App, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         session_picker::poll(app);
+        session_transcript::poll_history(app);
         let text = resume_panel_text(app);
         if text.contains(expected) {
             return;
@@ -1318,6 +1348,596 @@ fn wait_for_resume_text(app: &mut App, expected: &str) {
         assert!(Instant::now() < deadline, "missing {expected} in {text}");
         thread::sleep(Duration::from_millis(2));
     }
+}
+
+fn dashboard_entry(id: &str, title: &str, pinned: bool) -> Value {
+    json!({"id": id, "title": title, "cwd": "D:/workspace", "isPinned": pinned})
+}
+
+fn dashboard_key(app: &mut App, code: KeyCode) {
+    handle_key(KeyEvent::new(code, KeyModifiers::NONE), app);
+}
+
+fn dashboard_toggle(app: &mut App, alias: char) {
+    handle_key(
+        KeyEvent::new(KeyCode::Char(alias), KeyModifiers::CONTROL),
+        app,
+    );
+}
+
+fn dashboard_session(id: &str, response: &str) -> SessionState {
+    let mut state = SessionState::empty();
+    state.workspace_root = "D:/workspace".into();
+    state.session_cwd = "D:/workspace".into();
+    state.active_session = Some(TuiSession { id: id.into() });
+    state
+        .transcript
+        .push(TranscriptLine::Summary(response.into()));
+    state
+}
+
+fn filter_settings(app: &mut App, query: &str) {
+    dashboard_key(app, KeyCode::Char('/'));
+    handle_key(
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        app,
+    );
+    handle_terminal_event(Event::Paste(query.into()), app);
+    dashboard_key(app, KeyCode::Enter);
+}
+
+fn wait_for_settings_value(app: &mut App, label: &str, value: &str) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        settings::poll(app);
+        let surface = resume_panel_text(app);
+        if surface.lines().any(|row| {
+            row.split_once(label)
+                .is_some_and(|(_, suffix)| suffix.trim_start().starts_with(value))
+        }) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing {label} value {value} in {surface}"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn settings_config_alias_keeps_placeholders_blank_and_persists_dashboard_preview() {
+    let root = unique_test_dir("settings-preview");
+    let preferences = root.join("tui.json");
+    let workspace = PathBuf::from("D:/workspace");
+    let mut app = test_app("/config", workspace, root.clone());
+    app.ui_preferences = settings::Preferences::load(preferences.clone());
+    app.parked_sessions.insert(
+        "peek-target".into(),
+        dashboard_session("peek-target", "Dashboard preview fixture"),
+    );
+    app.runtime = Some(RuntimeClient::from_test_request_handler(
+        |frame| match frame["method"].as_str().unwrap() {
+            "agent_runtime_config_get" => json!({"bashPath": null}),
+            "session/catalog" if frame["params"]["request"]["mode"] == "pinned" => json!({
+                "items": [dashboard_entry("peek-target", "Pinned target", true)],
+                "nextCursor": null, "reset": false,
+            }),
+            "session/catalog" => json!({"items": [], "nextCursor": null, "reset": false}),
+            "_centaeris/session/activate" => {
+                assert_eq!(frame["params"]["request"]["sessionId"], "peek-target");
+                dashboard_entry("peek-target", "Pinned target", true)
+            }
+            other => panic!("unexpected settings request: {other}"),
+        },
+    ));
+
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(settings::visible(&app));
+    filter_settings(&mut app, "Theme");
+    dashboard_key(&mut app, KeyCode::Enter);
+    let surface = resume_panel_text(&mut app);
+    assert!(surface
+        .lines()
+        .any(|row| row.trim_end_matches([' ', '│']).ends_with(" Theme")));
+    assert!(
+        !preferences.exists(),
+        "a blank placeholder must not write preferences"
+    );
+
+    filter_settings(&mut app, "Dashboard preview");
+    wait_for_settings_value(&mut app, "Dashboard preview", "On");
+    dashboard_key(&mut app, KeyCode::Enter);
+    wait_for_settings_value(&mut app, "Dashboard preview", "Off");
+    assert!(!settings::Preferences::load(preferences.clone()).dashboard_preview());
+
+    dashboard_key(&mut app, KeyCode::Esc);
+    assert!(!settings::visible(&app));
+    dashboard_toggle(&mut app, '4');
+    wait_for_resume_text(&mut app, "Pinned target");
+    dashboard_key(&mut app, KeyCode::Down);
+    wait_for_resume_text(&mut app, "Enter Open session");
+    let surface = resume_panel_text(&mut app);
+    assert!(!surface.contains("Dashboard preview fixture"));
+    assert!(!surface.contains("Reply"));
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(!dashboard::visible(&app));
+    assert_eq!(
+        app.session.active_session.as_ref().unwrap().id,
+        "peek-target"
+    );
+
+    std::fs::remove_file(preferences).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+fn settings_filters_and_edits_bash_path_through_the_existing_runtime_rpc() {
+    let workspace = PathBuf::from("D:/workspace");
+    let mut app = test_app("/settings", workspace.clone(), workspace);
+    let (saved, requests) = mpsc::channel();
+    let old = "D:/Git Tools/bin/bash.exe";
+    let new = "D:/Alternate/bin/bash.exe";
+    app.runtime = Some(RuntimeClient::from_test_request_handler(
+        move |frame| match frame["method"].as_str().unwrap() {
+            "agent_runtime_config_get" => json!({"bashPath": old}),
+            "agent_runtime_config_set" => {
+                let path = frame["params"]["request"]["bashPath"].as_str().unwrap();
+                saved.send(frame["params"].clone()).unwrap();
+                json!({"bashPath": (!path.is_empty()).then_some(path)})
+            }
+            other => panic!("unexpected settings request: {other}"),
+        },
+    ));
+
+    dashboard_key(&mut app, KeyCode::Enter);
+    let surface = resume_panel_text(&mut app);
+    let border_y = surface.lines().position(|row| row.contains('┌')).unwrap();
+    let (y, row) = surface
+        .lines()
+        .enumerate()
+        .find(|(_, row)| row.contains("Filter"))
+        .unwrap();
+    let x = row.split_once("Filter").unwrap().0.chars().count() as u16;
+    for (row, focused) in [(border_y, false), (y, true)] {
+        handle_terminal_event(
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: row as u16,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut app,
+        );
+        assert_eq!(resume_panel_text(&mut app).contains("Enter Done"), focused);
+    }
+    handle_terminal_event(Event::Paste("Bash path".into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Enter);
+    wait_for_settings_value(&mut app, "Bash path", old);
+    assert!(!resume_panel_text(&mut app).contains("Dashboard preview"));
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(resume_panel_text(&mut app).contains("Settings › Bash path"));
+    handle_key(
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        &mut app,
+    );
+    handle_terminal_event(Event::Paste(new.into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Enter);
+    wait_for_settings_value(&mut app, "Bash path", new);
+    assert_eq!(
+        requests.recv_timeout(Duration::from_secs(1)).unwrap(),
+        json!({"request":{"bashPath":new}})
+    );
+
+    dashboard_key(&mut app, KeyCode::Char('d'));
+    assert!(resume_panel_text(&mut app).contains("Restore Bash path to its default?"));
+    dashboard_key(&mut app, KeyCode::Esc);
+    assert!(requests.try_recv().is_err());
+    dashboard_key(&mut app, KeyCode::Char('d'));
+    dashboard_key(&mut app, KeyCode::Enter);
+    wait_for_settings_value(&mut app, "Bash path", "Auto");
+    assert_eq!(
+        requests.recv_timeout(Duration::from_secs(1)).unwrap(),
+        json!({"request":{"bashPath":""}})
+    );
+}
+
+#[test]
+fn settings_default_model_opens_the_picker_only_while_settings_are_open() {
+    let workspace = PathBuf::from("D:/workspace");
+    let mut app = test_app("/settings", workspace.clone(), workspace);
+    let writes = attach_model_runtime(&mut app, model_picker_config());
+
+    dashboard_key(&mut app, KeyCode::Enter);
+    filter_settings(&mut app, "Default model");
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(app.pending_model_request.is_some());
+    dashboard_key(&mut app, KeyCode::Esc);
+    finish_model_requests(&mut app);
+    assert!(app.model_panel.is_none());
+    assert!(!settings::visible(&app));
+
+    settings::open(&mut app);
+    filter_settings(&mut app, "Default model");
+    dashboard_key(&mut app, KeyCode::Enter);
+    finish_model_requests(&mut app);
+    assert!(app.model_panel.is_some());
+    assert!(writes.lock().unwrap().is_empty());
+    dashboard_key(&mut app, KeyCode::Esc);
+    assert!(settings::visible(&app));
+}
+
+#[test]
+fn dashboard_keyboard_peek_and_full_row_click_keep_the_origin_and_selection() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("Original composer", path.clone(), path);
+    app.session.active_session = Some(TuiSession { id: "a".into() });
+    app.session
+        .transcript
+        .push(TranscriptLine::Summary("Original response".into()));
+    app.session.transcript_scroll = 4;
+    app.session.transcript_follow_bottom = false;
+    app.parked_sessions
+        .insert("b".into(), dashboard_session("b", "Latest target response"));
+    let mut awaiting = dashboard_session("c", "Previous response");
+    awaiting.active_agent_run_id = Some("run-c".into());
+    awaiting.process_state = RuntimeDisplayState::WaitingUser;
+    app.parked_sessions.insert("c".into(), awaiting);
+    app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
+        let request = &frame["params"]["request"];
+        if frame["method"] == "session/catalog" {
+            assert_eq!(request["cwd"], "D:/workspace");
+        }
+        match frame["method"].as_str().unwrap() {
+            "session/catalog" if request["mode"] == "pinned" => json!({
+                "items": [dashboard_entry("b", "Pinned target", true)], "nextCursor": null, "reset": false
+            }),
+            "session/catalog" => json!({
+                "items": [dashboard_entry("a", "Original session", false),
+                          dashboard_entry("c", "Awaiting session", false),
+                          dashboard_entry("stored", "Stored hidden session", false)],
+                "nextCursor": null, "reset": false
+            }),
+            "_centaeris/session/activate" if request["sessionId"] == "a" => {
+                dashboard_entry("a", "Original session", false)
+            }
+            "_centaeris/session/activate" => {
+                assert_eq!(request["sessionId"], "b");
+                dashboard_entry("b", "Pinned target", true)
+            }
+            other => panic!("unexpected dashboard request: {other}"),
+        }
+    }));
+
+    dashboard_toggle(&mut app, '4');
+    wait_for_resume_text(&mut app, "Awaiting session");
+    let surface = resume_panel_text(&mut app);
+    assert!(surface
+        .lines()
+        .any(|row| row.contains("D:/workspace") && row.contains("1 awaiting")));
+    assert!(surface.contains("Pinned target"));
+    assert!(surface.contains("Awaiting input"));
+    assert!(surface.contains("Inactive (1)"));
+    assert!(!surface.contains("Stored hidden session"));
+    let composer_row = surface
+        .lines()
+        .position(|row| row.contains("New agent prompt"))
+        .unwrap();
+    assert!(surface
+        .lines()
+        .nth(composer_row + 1)
+        .unwrap()
+        .contains("Back"));
+    dashboard_key(&mut app, KeyCode::Down);
+    let surface = resume_panel_text(&mut app);
+    assert!(surface.contains("Latest target response"));
+    assert!(surface.contains("Reply"));
+    assert_eq!(app.session.active_session.as_ref().unwrap().id, "a");
+
+    let row = surface
+        .lines()
+        .position(|line| line.contains("Pinned target"))
+        .unwrap() as u16;
+    send_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 76, row);
+    assert_eq!(app.session.active_session.as_ref().unwrap().id, "b");
+    assert!(!dashboard::visible(&app));
+    dashboard_toggle(&mut app, '\\');
+    assert!(resume_panel_text(&mut app).contains("Latest target response"));
+    dashboard_toggle(&mut app, '\\');
+    assert_eq!(app.session.active_session.as_ref().unwrap().id, "a");
+    assert_eq!(app.session.input, "Original composer");
+    assert_eq!(app.session.transcript_scroll, 4);
+    assert!(!app.session.transcript_follow_bottom);
+}
+
+#[test]
+fn dashboard_and_main_composers_share_the_bottom_anchor() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("", path.clone(), path);
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    for (width, height) in [(80, 24), (42, 16)] {
+        terminal.backend_mut().resize(width, height);
+        let view = build_transcript_view(&app, width);
+        terminal
+            .draw(|frame| render(frame, &mut app, &view))
+            .unwrap();
+        let caret = app.frame_caret.unwrap();
+        assert_eq!(caret, Position::new(2, height - 2));
+
+        dashboard_toggle(&mut app, '\\');
+        terminal
+            .draw(|frame| render(frame, &mut app, &view))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "D");
+        assert_eq!(buffer[(0, caret.y)].symbol(), "❯");
+        assert_eq!(buffer[(caret.x, caret.y)].symbol(), "N");
+        assert_eq!(app.frame_caret, Some(caret));
+        dashboard_toggle(&mut app, '\\');
+    }
+}
+
+#[test]
+fn dashboard_commands_open_the_panel_and_working_status_preserves_the_preview() {
+    for command in ["/dashboard", "/sessions"] {
+        let path = PathBuf::from("D:/workspace");
+        let mut app = test_app(command, path.clone(), path);
+        let mut target = dashboard_session("target", "First response line\n\nSecond response line");
+        target.active_agent_run_id = Some("run".into());
+        target.process_state = RuntimeDisplayState::Thinking;
+        app.parked_sessions.insert("target".into(), target);
+        app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
+            assert_eq!(frame["method"], "session/catalog");
+            let items = if frame["params"]["request"]["mode"] == "pinned" {
+                json!([dashboard_entry("target", "Live session", true)])
+            } else {
+                json!([])
+            };
+            json!({"items": items, "nextCursor": null, "reset": false})
+        }));
+        dashboard_key(&mut app, KeyCode::Enter);
+        wait_for_resume_text(&mut app, "Live session");
+        dashboard_key(&mut app, KeyCode::Down);
+        let thinking = resume_panel_text(&mut app);
+        let caret = app.frame_caret.expect("reply input is focused");
+        assert!(thinking.contains("Thinking"));
+        assert!(thinking.contains("First response line"));
+        assert!(thinking.contains("Second response line"));
+
+        let target = app.parked_sessions.get_mut("target").unwrap();
+        target.process_state = RuntimeDisplayState::ToolRunning;
+        target.active_tool_label = Some("Running command".into());
+        let running = resume_panel_text(&mut app);
+        assert!(running.contains("Running command"));
+        assert!(running.contains("First response line"));
+        assert!(running.contains("Second response line"));
+        assert_eq!(app.frame_caret, Some(caret));
+        dashboard_key(&mut app, KeyCode::Tab);
+        resume_panel_text(&mut app);
+        assert_eq!(app.frame_caret, None);
+    }
+}
+
+#[test]
+fn dashboard_peek_keeps_the_current_prompt_and_shows_more_of_the_turn_when_taller() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("", path.clone(), path);
+    let mut target = dashboard_session("target", "Previous turn response");
+    target.transcript.push(TranscriptLine::User(
+        "Current prompt\nOther prompt line".into(),
+    ));
+    target.transcript.push(TranscriptLine::tool(test_tool_line(
+        ToolActionKind::Read,
+        "preview-test.txt",
+        vec![],
+        vec![ToolResultState::SuccessWithOutput],
+    )));
+    let response = (1..=8)
+        .map(|index| format!("Answer row {index}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let emitted = "Previously streamed\n\n";
+    target.transcript.push(TranscriptLine::LiveAssistant {
+        markdown: emitted.into(),
+        separator: false,
+    });
+    target.assistant_buffer = format!("{emitted}{response}");
+    target.assistant_emitted_bytes = emitted.len();
+    app.parked_sessions.insert("target".into(), target);
+    app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
+        assert_eq!(frame["method"], "session/catalog");
+        let items = if frame["params"]["request"]["mode"] == "pinned" {
+            json!([dashboard_entry("target", "Live session", true)])
+        } else {
+            json!([])
+        };
+        json!({"items": items, "nextCursor": null, "reset": false})
+    }));
+
+    dashboard_toggle(&mut app, '4');
+    wait_for_resume_text(&mut app, "Live session");
+    dashboard_key(&mut app, KeyCode::Down);
+    let compact = resume_panel_text(&mut app);
+    assert!(compact.contains("Current prompt"));
+    assert!(compact.contains('…'));
+    assert!(compact.contains("Answer row 8"));
+    assert!(!compact.contains("Answer row 3"));
+
+    let tall = resume_panel_text_at_height(&mut app, 64);
+    assert!(tall.contains("Current prompt"));
+    assert!(tall.contains("preview-test.txt"));
+    assert_eq!(tall.matches("Previously streamed").count(), 1);
+    assert!(tall.contains("Answer row 1"));
+    assert!(tall.contains("Answer row 8"));
+    assert!(!tall.contains("Other prompt line"));
+    assert!(!tall.contains("Previous turn response"));
+    assert!(tall.contains("Reply"));
+}
+
+#[test]
+fn dashboard_replies_use_target_fifo_and_preserve_both_composers() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("A draft", path.clone(), path);
+    app.session.active_session = Some(TuiSession { id: "a".into() });
+    let mut target = dashboard_session("b", "Existing answer");
+    target.input = "B draft".into();
+    target.input_cursor = 2;
+    target.transcript_scroll = 2;
+    target.transcript_follow_bottom = false;
+    app.parked_sessions.insert("b".into(), target);
+    let (sent, requests) = mpsc::channel();
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
+        let request = &frame["params"]["request"];
+        match frame["method"].as_str().unwrap() {
+            "session/catalog" if request["mode"] == "pinned" => json!({
+                "items": [dashboard_entry("b", "Reply target", true)], "nextCursor": null, "reset": false
+            }),
+            "session/catalog" => json!({"items": [], "nextCursor": null, "reset": false}),
+            "session/prompt" => {
+                assert_eq!(request["sessionId"], "b");
+                assert_eq!(request["attachments"], json!([]));
+                let text = request["message"].as_str().unwrap();
+                sent.send(text.to_owned()).unwrap();
+                json!({"sessionId": "b", "agentRunId": format!("run-{text}"), "streamItems": []})
+            }
+            "_centaeris/session/activate" => dashboard_entry("b", "Reply target", true),
+            other => panic!("unexpected dashboard reply request: {other}"),
+        }
+    }));
+
+    dashboard_toggle(&mut app, '\\');
+    wait_for_resume_text(&mut app, "Reply target");
+    dashboard_key(&mut app, KeyCode::Down);
+    handle_terminal_event(Event::Paste("first".into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert_eq!(requests.try_recv().unwrap(), "first");
+    assert!(dashboard::visible(&app));
+    assert_eq!(app.session.active_session.as_ref().unwrap().id, "a");
+
+    handle_terminal_event(Event::Paste("second".into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Enter);
+    handle_terminal_event(Event::Paste("third".into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(resume_panel_text(&mut app).contains("2 queued"));
+    assert!(requests.try_recv().is_err());
+    assert_eq!(app.session.input, "A draft");
+    assert_eq!(app.parked_sessions["b"].input, "B draft");
+    assert_eq!(app.parked_sessions["b"].input_cursor, 2);
+    assert_eq!(app.parked_sessions["b"].transcript_scroll, 2);
+
+    let complete = |app: &mut App, run| {
+        session_views::route_update(
+            app,
+            &json!({
+                "sessionId": "b", "agentRunId": format!("run-{run}"),
+                "payload": {"type": "session_event", "event": {
+                    "id": format!("complete-{run}"), "type": "AgentRunCompleted"
+                }}
+            }),
+        );
+        assert!(dashboard::drain_replies(app));
+    };
+    complete(&mut app, "first");
+    assert_eq!(requests.try_recv().unwrap(), "second");
+    complete(&mut app, "second");
+    assert_eq!(requests.try_recv().unwrap(), "third");
+
+    dashboard_key(&mut app, KeyCode::Tab);
+    handle_terminal_event(Event::Paste("list focus ignores paste".into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Tab);
+    handle_terminal_event(Event::Paste("fourth".into()), &mut app);
+    handle_key(
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        &mut app,
+    );
+    assert_eq!(app.session.active_session.as_ref().unwrap().id, "b");
+    assert!(!dashboard::visible(&app));
+    assert_eq!(app.session.input, "B draft");
+    assert_eq!(app.session.transcript_scroll, 2);
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn dashboard_new_agent_preserves_an_unsubmitted_home_risk_draft() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("Unsubmitted draft", path.clone(), path);
+    app.session.home_risk_pending = true;
+    app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
+        assert_eq!(frame["method"], "session/catalog");
+        json!({"items": [], "nextCursor": null, "reset": false})
+    }));
+    dashboard_toggle(&mut app, '\\');
+    handle_terminal_event(Event::Paste("/new".into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(!dashboard::visible(&app));
+    assert!(app.session.input.is_empty());
+    assert!(app.session.home_risk_pending);
+    assert_eq!(app.session.session_cwd, "D:/workspace");
+    dashboard_toggle(&mut app, '\\');
+    dashboard_toggle(&mut app, '\\');
+    assert_eq!(app.session.input, "Unsubmitted draft");
+    assert!(app.session.home_risk_pending);
+}
+
+#[test]
+fn dashboard_inactive_entry_uses_the_existing_read_only_open() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("Unsent", path.clone(), path);
+    app.runtime = Some(
+        RuntimeClient::from_test_request_handler_with_session_ownership(|frame| {
+            let request = &frame["params"]["request"];
+            match frame["method"].as_str().unwrap() {
+                "session/catalog" if request["mode"] == "pinned" => {
+                    json!({"items": [], "nextCursor": null, "reset": false})
+                }
+                "session/catalog" => json!({
+                    "items": [dashboard_entry("session-paged", "Stored session", false)],
+                    "nextCursor": null, "reset": false
+                }),
+                "_centaeris/session/claim-writer" => {
+                    assert_eq!(request["sessionId"], "session-paged");
+                    json!({"claimed": false})
+                }
+                "transcript/page" => {
+                    assert_eq!(request["sessionId"], "session-paged");
+                    json!({
+                        "schema": "transcript.page.rpc.v1",
+                        "projectionVersion": TRANSCRIPT_PROJECTION_VERSION_V1,
+                        "projectionGeneration": "generation-paged",
+                        "projectedSourceHighWater": "12",
+                        "targetSourceHighWater": "12",
+                        "targetReached": true,
+                        "page": transcript_test_page(vec![transcript_test_block("answer", 1, 12,
+                            TranscriptBlockBodyV1::AssistantText {
+                                content: TranscriptTextContentV1::inline("Stored response".into()),
+                                status: TranscriptBlockStatusV1::Completed,
+                            })], None),
+                    })
+                }
+                other => panic!("unexpected inactive open request: {other}"),
+            }
+        }),
+    );
+    dashboard_toggle(&mut app, '\\');
+    wait_for_resume_text(&mut app, "Inactive (1)");
+    assert!(!resume_panel_text(&mut app).contains("Stored session"));
+    dashboard_key(&mut app, KeyCode::Down);
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(resume_panel_text(&mut app).contains("Stored session"));
+    dashboard_key(&mut app, KeyCode::Down);
+    handle_terminal_event(Event::Paste("Should not become a reply".into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Right);
+    assert!(app.session.read_only_session.is_some());
+    wait_for_resume_text(&mut app, "Stored response");
+    dashboard_toggle(&mut app, '\\');
+    let preview = resume_panel_text(&mut app);
+    assert!(preview.contains("Stored session"));
+    assert!(preview.contains("Stored response"));
+    assert!(preview.contains("Enter Open session"));
+    assert!(app.frame_caret.is_none());
+    dashboard_toggle(&mut app, '\\');
+    assert!(app.session.active_session.is_none());
+    assert_eq!(app.session.input, "Unsent");
 }
 
 #[test]
@@ -1328,15 +1948,16 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
     let image = temporary.join("draft.png");
     std::fs::write(&image, test_png_bytes()).unwrap();
     insert_draft_image(&mut app, image.clone());
-    let draft = app.input.clone();
-    app.active_session = Some(TuiSession {
+    let draft = app.session.input.clone();
+    app.session.active_session = Some(TuiSession {
         id: "before".into(),
     });
-    app.transcript
+    app.session
+        .transcript
         .push(TranscriptLine::Summary("Prior session".into()));
-    app.transcript_scroll = 2;
-    app.transcript_follow_bottom = false;
-    app.active_agent_run_id = Some("run-before".into());
+    app.session.transcript_scroll = 2;
+    app.session.transcript_follow_bottom = false;
+    app.session.active_agent_run_id = Some("run-before".into());
     app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
         let request = &frame["params"]["request"];
         match frame["method"].as_str().unwrap() {
@@ -1352,6 +1973,7 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
                 json!({"items": [{"id": "session-paged", "title": "终端历史验收", "cwd": "D:/other", "isPinned": false}],
                     "nextCursor": null, "reset": false})
             }
+            "_centaeris/session/search" => json!({"items": []}),
             "_centaeris/session/agent-runs/attach" => {
                 assert_eq!(request["sessionId"], "session-paged");
                 json!({"transitionReason": "viewer_attached"})
@@ -1379,7 +2001,6 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
         }
     }));
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-    let sessions = KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL);
     let recent_activity = |app: &mut App| {
         resume_panel_text(app)
             .lines()
@@ -1387,20 +2008,29 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
             .map(|(prefix, _)| prefix.to_owned())
             .expect("Recent work in the session list")
     };
-    handle_key(sessions, &mut app);
+    session_picker::open(&mut app, "").unwrap();
     wait_for_resume_text(&mut app, "Recent work");
     assert!(recent_activity(&mut app).contains(['⋅', ':', '⸬', '⁙']));
     handle_terminal_event(Event::Paste("终端历史".into()), &mut app);
-    wait_for_resume_text(&mut app, "D:/other");
+    wait_for_resume_text(&mut app, "other");
+    let surface = resume_panel_text(&mut app);
+    assert!(surface
+        .lines()
+        .any(|row| row.trim().trim_matches('│').trim() == "other"));
+    assert!(!surface.contains("D:/other"));
     handle_key(enter, &mut app);
     assert!(app.session_picker.is_none());
-    assert_eq!(app.active_session.as_ref().unwrap().id, "session-paged");
-    assert_eq!(app.session_cwd, "D:/other");
     assert_eq!(
-        app.transcript,
+        app.session.active_session.as_ref().unwrap().id,
+        "session-paged"
+    );
+    assert_eq!(app.session.session_cwd, "D:/other");
+    wait_for_resume_text(&mut app, "Resumed history");
+    assert_eq!(
+        app.session.transcript,
         vec![TranscriptLine::Summary("Resumed history".into())]
     );
-    assert!(app.input.is_empty());
+    assert!(app.session.input.is_empty());
     let update = json!({
         "sessionId": "before",
         "agentRunId": "run-before",
@@ -1411,9 +2041,9 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
         }}
     });
     assert!(!session_views::route_update(&mut app, &update));
-    assert!(app.assistant_buffer.is_empty());
+    assert!(app.session.assistant_buffer.is_empty());
 
-    handle_key(sessions, &mut app);
+    session_picker::open(&mut app, "").unwrap();
     wait_for_resume_text(&mut app, "Recent work");
     assert!(recent_activity(&mut app).contains(['⋅', ':', '⸬', '⁙']));
     let now = Instant::now();
@@ -1430,7 +2060,7 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
             }}
         })
     ));
-    assert!(recent_activity(&mut app).contains('◆'));
+    assert!(recent_activity(&mut app).contains('!'));
     assert!(!periodic_redraw_due(&app, last_draw, now));
     assert!(session_views::route_update(
         &mut app,
@@ -1455,22 +2085,360 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
         })
     ));
     let list = resume_panel_text(&mut app);
-    assert!(recent_activity(&mut app).contains('◇'));
+    assert!(!recent_activity(&mut app).contains(['⋅', ':', '⸬', '⁙', '!']));
     assert!(!list.contains("Running"));
     assert!(!periodic_redraw_due(&app, last_draw, now));
     handle_key(enter, &mut app);
-    assert_eq!(app.active_session.as_ref().unwrap().id, "before");
-    assert_eq!(app.input, draft);
-    assert_eq!(app.draft_image_attachments[0].local_path, image);
+    assert_eq!(app.session.active_session.as_ref().unwrap().id, "before");
+    assert_eq!(app.session.input, draft);
+    assert_eq!(app.session.draft_image_attachments[0].local_path, image);
     assert!(image.exists());
-    assert_eq!(app.transcript_scroll, 2);
-    assert!(!app.transcript_follow_bottom);
+    assert_eq!(app.session.transcript_scroll, 2);
+    assert!(!app.session.transcript_follow_bottom);
     assert!(
         rendered_lines_text(&build_transcript_view(&app, 80).lines).contains("Background response")
     );
     drop(app);
     assert!(!image.exists());
     std::fs::remove_dir(temporary).unwrap();
+}
+
+#[test]
+fn resume_loads_history_without_holding_the_terminal_or_stealing_focus() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("/resume", path.clone(), path);
+    let ready = Arc::new(AtomicBool::new(false));
+    let sent = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicBool::new(false));
+    let dir = unique_test_dir("resume-queued-image");
+    let image = dir.join("queued.png");
+    std::fs::write(&image, test_png_bytes()).unwrap();
+    app.runtime = Some(RuntimeClient::from_test_request_handler({
+        let (ready, sent, entered, image) = (
+            Arc::clone(&ready),
+            Arc::clone(&sent),
+            Arc::clone(&entered),
+            image.clone(),
+        );
+        move |frame| {
+            let request = &frame["params"]["request"];
+            match frame["method"].as_str().unwrap() {
+                "session/catalog" if request["mode"] == "pinned" => {
+                    json!({"items": [], "nextCursor": null, "reset": false})
+                }
+                "session/catalog" => json!({
+                    "items": [dashboard_entry("session-paged", "Cold session", false)],
+                    "nextCursor": null, "reset": false
+                }),
+                "_centaeris/session/agent-runs/attach" => {
+                    json!({"transitionReason": "viewer_attached"})
+                }
+                "_centaeris/session/agent-runs" => json!({"agentRuns": []}),
+                "_centaeris/session/activate" => {
+                    dashboard_entry("session-paged", "Cold session", false)
+                }
+                "transcript/page" => {
+                    assert_eq!(request["sessionId"], "session-paged");
+                    let first = !entered.swap(true, Ordering::SeqCst);
+                    let complete = !first && ready.load(Ordering::SeqCst);
+                    if !first {
+                        assert_eq!(request["sourceHighWater"], "12");
+                        assert_eq!(request["projectionGeneration"], "generation-paged");
+                    }
+                    let page = complete.then(|| {
+                        transcript_test_page(
+                            vec![transcript_test_block(
+                                "answer",
+                                1,
+                                12,
+                                TranscriptBlockBodyV1::AssistantText {
+                                    content: TranscriptTextContentV1::inline(
+                                        "Recovered history".into(),
+                                    ),
+                                    status: TranscriptBlockStatusV1::Completed,
+                                },
+                            )],
+                            None,
+                        )
+                    });
+                    json!({
+                        "schema": "transcript.page.rpc.v1",
+                        "projectionVersion": TRANSCRIPT_PROJECTION_VERSION_V1,
+                        "projectionGeneration": "generation-paged",
+                        "projectedSourceHighWater": if complete { "12" } else { "0" },
+                        "targetSourceHighWater": "12",
+                        "targetReached": complete,
+                        "page": page,
+                    })
+                }
+                "session/prompt" => {
+                    assert!(ready.load(Ordering::SeqCst));
+                    assert_eq!(request["sessionId"], "session-paged");
+                    assert!(request["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("wait for history"));
+                    assert_eq!(request["attachments"][0]["placeholder"], "[Image #1]");
+                    assert!(image.is_file());
+                    assert!(!sent.swap(true, Ordering::SeqCst));
+                    json!({"sessionId": "session-paged", "agentRunId": "after-load"})
+                }
+                other => panic!("unexpected resume request: {other}"),
+            }
+        }
+    }));
+
+    dashboard_key(&mut app, KeyCode::Enter);
+    wait_for_resume_text(&mut app, "Cold session");
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(app.session_picker.is_none());
+    assert!(resume_panel_text(&mut app).contains("Loading session…"));
+    handle_terminal_event(Event::Paste("wait for history ".into()), &mut app);
+    insert_draft_image(&mut app, image.clone());
+    dashboard_key(&mut app, KeyCode::Enter);
+    assert!(resume_panel_text(&mut app).contains("1 queued"));
+    assert!(app.session.input.is_empty());
+    assert!(image.is_file());
+    assert!(!dashboard::drain_replies(&mut app));
+
+    handle_terminal_event(Event::Paste("/new".into()), &mut app);
+    dashboard_key(&mut app, KeyCode::Enter);
+    handle_terminal_event(Event::Paste("New session draft".into()), &mut app);
+    assert!(app.session.active_session.is_none());
+    assert!(app.parked_sessions["session-paged"]
+        .pending_history
+        .is_some());
+    ready.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while app.parked_sessions["session-paged"]
+        .pending_history
+        .is_some()
+    {
+        session_transcript::poll_history(&mut app);
+        assert!(Instant::now() < deadline, "history did not complete");
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(dashboard::drain_replies(&mut app));
+    assert!(sent.load(Ordering::SeqCst));
+    assert!(!image.exists());
+    assert!(app.session.active_session.is_none());
+    assert_eq!(app.session.input, "New session draft");
+    session_views::restore(&mut app, "session-paged");
+    assert!(resume_panel_text(&mut app).contains("Recovered history"));
+    assert_eq!(
+        app.session.active_agent_run_id.as_deref(),
+        Some("after-load")
+    );
+    std::fs::remove_dir(dir).unwrap();
+}
+
+#[test]
+fn failed_history_open_releases_ownership_and_retry_preserves_the_draft() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("", path.clone(), path);
+    let released = Arc::new(AtomicBool::new(false));
+    app.runtime = Some(
+        RuntimeClient::from_test_request_handler_with_session_ownership({
+            let released = Arc::clone(&released);
+            move |frame| match frame["method"].as_str().unwrap() {
+                "_centaeris/session/claim-writer" => json!({"claimed": true}),
+                "_centaeris/session/agent-runs/attach" => {
+                    json!({"transitionReason": "viewer_attached"})
+                }
+                "_centaeris/session/agent-runs/detach" => json!({}),
+                "_centaeris/session/agent-runs" => json!({"agentRuns": []}),
+                "_centaeris/session/activate" => {
+                    dashboard_entry("session-paged", "Retry session", false)
+                }
+                "_centaeris/session/release-writer" => {
+                    released.store(true, Ordering::SeqCst);
+                    json!({})
+                }
+                "transcript/page" if !released.load(Ordering::SeqCst) => json!({}),
+                "transcript/page" => json!({
+                    "schema": "transcript.page.rpc.v1",
+                    "projectionVersion": TRANSCRIPT_PROJECTION_VERSION_V1,
+                    "projectionGeneration": "generation-paged",
+                    "projectedSourceHighWater": "12",
+                    "targetSourceHighWater": "12",
+                    "targetReached": true,
+                    "page": transcript_test_page(vec![transcript_test_block("answer", 1, 12,
+                        TranscriptBlockBodyV1::AssistantText {
+                            content: TranscriptTextContentV1::inline("Retry succeeded".into()),
+                            status: TranscriptBlockStatusV1::Completed,
+                        })], None),
+                }),
+                other => panic!("unexpected resume request: {other}"),
+            }
+        }),
+    );
+    let entry =
+        serde_json::from_value(dashboard_entry("session-paged", "Retry session", false)).unwrap();
+    session_picker::open_history(&mut app, &entry).unwrap();
+    handle_terminal_event(Event::Paste("Draft during loading".into()), &mut app);
+    wait_for_resume_text(&mut app, "Could not load session history");
+    assert!(released.load(Ordering::SeqCst));
+    assert!(app.session.read_only_session.is_some());
+    dashboard_key(&mut app, KeyCode::Char('r'));
+    wait_for_resume_text(&mut app, "Retry succeeded");
+    assert!(app.session.read_only_session.is_none());
+    assert_eq!(app.session.input, "Draft during loading");
+    assert!(!app.parked_sessions.contains_key("session-paged"));
+}
+
+#[test]
+fn resume_groups_current_workspace_first_and_skips_header_clicks() {
+    let path = PathBuf::from("D:/z/current");
+    let mut app = test_app("Keep draft", path.clone(), path);
+    app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
+        let request = &frame["params"]["request"];
+        assert_eq!(frame["method"], "session/catalog");
+        assert!(request["cwd"].is_null(), "resume can load other workspaces");
+        let items = if request["mode"] == "pinned" {
+            json!([{"id": "foreign", "title": "Other history", "cwd": "D:/a/other", "isPinned": true}])
+        } else {
+            json!([{"id": "local", "title": "Current history", "cwd": "D:/z/current", "isPinned": false}])
+        };
+        json!({"items": items, "nextCursor": null, "reset": false})
+    }));
+    session_picker::open(&mut app, "").unwrap();
+    wait_for_resume_text(&mut app, "Current history");
+    let view = resume_panel_text(&mut app);
+    let rows: Vec<_> = view.lines().collect();
+    let find_row = |text| rows.iter().position(|row| row.contains(text)).unwrap();
+    assert!(find_row("z-current") < find_row("a-other"));
+    let heading = find_row("a-other");
+    let column = rows[heading]
+        .split_once("a-other")
+        .unwrap()
+        .0
+        .chars()
+        .count();
+    handle_terminal_event(
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: column as u16,
+            row: heading as u16,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &mut app,
+    );
+    assert!(app.session_picker.is_some());
+    assert!(app.session.active_session.is_none());
+    assert_eq!(app.session.input, "Keep draft");
+}
+
+#[test]
+fn resume_search_discards_stale_hits_and_expands_and_opens_the_body_match() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("", path.clone(), path);
+    let (query_seen, queries) = mpsc::channel();
+    let (release_reply, replies) = mpsc::channel();
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
+        let request = &frame["params"]["request"];
+        match frame["method"].as_str().unwrap() {
+            "session/catalog" => {
+                let items = if request["mode"] == "recent" {
+                    json!([
+                        dashboard_entry("current-one", "Current first", false),
+                        dashboard_entry("current-two", "Current second", false),
+                    ])
+                } else {
+                    json!([])
+                };
+                json!({"items": items, "nextCursor": null, "reset": false})
+            }
+            "_centaeris/session/search" => {
+                assert_eq!(request["limit"], 20);
+                let query = request["query"].as_str().unwrap();
+                query_seen.send(query.to_owned()).unwrap();
+                replies.recv_timeout(Duration::from_secs(2)).unwrap();
+                if query == "obsolete" {
+                    return json!({"items":[
+                        {"id": "old", "title": "Obsolete hit", "cwd": "D:/workspace", "updatedAt": 1, "snippet": "Old answer"}
+                    ]});
+                }
+                assert_eq!(query, "current");
+                json!({"items":[
+                    {"id": "current-one", "title": "Current first", "cwd": "D:/workspace", "updatedAt": 1, "snippet": "Duplicate"},
+                    {"id": "body", "title": "Body-only history", "cwd": "D:/a/other", "updatedAt": 1, "snippet": "Marker from message body"}
+                ]})
+            }
+            "_centaeris/session/agent-runs/attach" => {
+                assert_eq!(request["sessionId"], "body");
+                json!({"transitionReason": "viewer_attached"})
+            }
+            "_centaeris/session/agent-runs" => json!({"agentRuns": []}),
+            "_centaeris/session/activate" => {
+                assert_eq!(request["sessionId"], "body");
+                json!({"id": "body", "title": "Body-only history", "cwd": "D:/a/other", "isPinned": false})
+            }
+            "transcript/page" => {
+                assert_eq!(request["sessionId"], "body");
+                json!({"schema": "transcript.page.rpc.v1", "projectionVersion": TRANSCRIPT_PROJECTION_VERSION_V1,
+                    "projectionGeneration": "body-gen", "projectedSourceHighWater": "0",
+                    "targetSourceHighWater": "0", "targetReached": true,
+                    "page": transcript_test_page(Vec::new(), None)})
+            }
+            other => panic!("unexpected resume search request: {other}"),
+        }
+    }));
+    session_picker::open(&mut app, "").unwrap();
+    wait_for_resume_text(&mut app, "Current second");
+    handle_paste(&mut app, "obsolete".into());
+    dashboard_toggle(&mut app, '/');
+    assert_eq!(
+        queries.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "obsolete"
+    );
+    dashboard_key(&mut app, KeyCode::Esc);
+    dashboard_key(&mut app, KeyCode::Esc);
+    handle_paste(&mut app, "current".into());
+    dashboard_key(&mut app, KeyCode::Down);
+    dashboard_key(&mut app, KeyCode::Down);
+    dashboard_toggle(&mut app, '/');
+    release_reply.send(()).unwrap();
+    assert_eq!(
+        queries.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "current"
+    );
+    session_picker::poll(&mut app);
+    assert!(!resume_panel_text(&mut app).contains("Obsolete hit"));
+    release_reply.send(()).unwrap();
+    wait_for_resume_text(&mut app, "Body-only history");
+    let list = resume_panel_text(&mut app);
+    assert_eq!(list.matches("Current first").count(), 1);
+    assert!(list.contains("Extended search results"));
+    assert!(list.contains("Body-only history match"));
+    assert!(!list.contains("Marker from message body"));
+    dashboard_key(&mut app, KeyCode::Char('d'));
+    assert!(resume_panel_text(&mut app).contains("Delete Current second?"));
+    dashboard_key(&mut app, KeyCode::Char('n'));
+    dashboard_key(&mut app, KeyCode::Down);
+    dashboard_key(&mut app, KeyCode::Right);
+    let expanded = resume_panel_text(&mut app);
+    assert!(expanded.contains("Marker from message body"));
+    assert!(expanded.contains("D:/a/other"));
+    dashboard_key(&mut app, KeyCode::Left);
+    let list = resume_panel_text(&mut app);
+    assert!(!list.contains("Marker from message body"));
+    let (column, row) = list
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.split_once("Body-only history")
+                .map(|(left, _)| (left.chars().count(), row))
+        })
+        .unwrap();
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        column as u16,
+        row as u16,
+    );
+    assert!(app.session_picker.is_none());
+    assert_eq!(app.session.active_session.as_ref().unwrap().id, "body");
+    assert_eq!(app.session.session_cwd, "D:/a/other");
 }
 
 #[test]
@@ -1529,20 +2497,21 @@ fn new_and_clear_leave_running_sessions_open() {
     for command in ["/new", "/clear"] {
         let path = PathBuf::from("D:/workspace");
         let mut app = test_app(command, path.clone(), path);
-        app.active_session = Some(TuiSession {
+        app.session.active_session = Some(TuiSession {
             id: "original".into(),
         });
-        app.active_agent_run_id = Some("working".into());
-        app.transcript
+        app.session.active_agent_run_id = Some("working".into());
+        app.session
+            .transcript
             .push(TranscriptLine::User("Earlier prompt".into()));
         handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
-        assert!(app.active_session.is_none());
-        assert!(!has_active_agent_run(&app));
-        assert!(app.input.is_empty() && app.transcript.is_empty());
+        assert!(app.session.active_session.is_none());
+        assert!(!has_active_agent_run(&app.session));
+        assert!(app.session.input.is_empty() && app.session.transcript.is_empty());
         session_views::restore(&mut app, "original");
-        assert_eq!(app.active_agent_run_id.as_deref(), Some("working"));
+        assert_eq!(app.session.active_agent_run_id.as_deref(), Some("working"));
         assert_eq!(
-            app.transcript,
+            app.session.transcript,
             vec![TranscriptLine::User("Earlier prompt".into())]
         );
     }
@@ -1623,7 +2592,8 @@ fn open_occupied_session(available: Arc<AtomicBool>, draft_image: Option<PathBuf
     handle_key(enter, &mut app);
     wait_for_resume_text(&mut app, "Original");
     handle_key(enter, &mut app);
-    assert!(app.read_only_session.is_some());
+    assert!(app.session.read_only_session.is_some());
+    wait_for_resume_text(&mut app, "Committed original history");
     app
 }
 
@@ -1640,16 +2610,19 @@ fn occupied_session_opens_read_only_until_retry_can_claim_it() {
         &mut app,
     );
     handle_terminal_event(Event::Paste("ignored paste".into()), &mut app);
-    assert!(app.input.is_empty());
+    assert!(app.session.input.is_empty());
 
     let retry = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
     handle_key(retry, &mut app);
-    assert!(app.read_only_session.is_some());
+    assert!(app.session.read_only_session.is_some());
     available.store(true, Ordering::SeqCst);
     handle_key(retry, &mut app);
-    assert!(app.read_only_session.is_none());
-    assert_eq!(app.active_session.as_ref().unwrap().id, "session-paged");
-    assert!(!has_active_agent_run(&app));
+    assert!(app.session.read_only_session.is_none());
+    assert_eq!(
+        app.session.active_session.as_ref().unwrap().id,
+        "session-paged"
+    );
+    assert!(!has_active_agent_run(&app.session));
     resume_panel_text(&mut app);
     assert!(app.input_area.is_some());
 }
@@ -1665,24 +2638,30 @@ fn occupied_session_fork_restores_editable_unsent_draft_and_image() {
         &mut app,
     );
 
-    assert!(app.read_only_session.is_none());
-    assert_eq!(app.active_session.as_ref().unwrap().id, "session-fork");
-    assert_eq!(app.input, "请检查 [Image #1]");
-    assert_eq!(app.input_cursor, app.input.len());
-    assert_eq!(app.draft_image_attachments.len(), 1);
-    let image = &app.draft_image_attachments[0];
-    assert_eq!(&app.input[image.start..image.end], "[Image #1]");
+    assert!(app.session.read_only_session.is_none());
+    assert_eq!(
+        app.session.active_session.as_ref().unwrap().id,
+        "session-fork"
+    );
+    assert_eq!(app.session.input, "请检查 [Image #1]");
+    assert_eq!(app.session.input_cursor, app.session.input.len());
+    assert_eq!(app.session.draft_image_attachments.len(), 1);
+    let image = &app.session.draft_image_attachments[0];
+    assert_eq!(&app.session.input[image.start..image.end], "[Image #1]");
     assert_eq!(image.local_path, image_path);
     assert!(image_path.is_file());
-    assert!(!has_active_agent_run(&app));
+    assert!(!has_active_agent_run(&app.session));
     let surface = resume_panel_text(&mut app);
     assert!(surface.contains("First answer"));
     assert!(!surface.contains("Committed original history"));
     let next_image_path = dir.join("next.png");
     image::RgbaImage::new(2, 2).save(&next_image_path).unwrap();
     insert_draft_image(&mut app, next_image_path.clone());
-    let next_image = &app.draft_image_attachments[1];
-    assert_eq!(&app.input[next_image.start..next_image.end], "[Image #2]");
+    let next_image = &app.session.draft_image_attachments[1];
+    assert_eq!(
+        &app.session.input[next_image.start..next_image.end],
+        "[Image #2]"
+    );
     clear_composer(&mut app);
     assert!(!image_path.exists());
     assert!(!next_image_path.exists());
@@ -1693,10 +2672,11 @@ fn occupied_session_fork_restores_editable_unsent_draft_and_image() {
 fn resume_deletes_only_after_explicit_confirmation_and_a_matching_receipt() {
     let path = PathBuf::from("D:/workspace");
     let mut app = test_app("/resume", path.clone(), path);
-    app.active_session = Some(TuiSession {
+    app.session.active_session = Some(TuiSession {
         id: "disposable".into(),
     });
-    app.transcript
+    app.session
+        .transcript
         .push(TranscriptLine::Summary("Visible history".into()));
     let (delete_seen, receipt_request) = mpsc::channel();
     let (send_receipt, receipt) = mpsc::channel();
@@ -1741,11 +2721,14 @@ fn resume_deletes_only_after_explicit_confirmation_and_a_matching_receipt() {
         "disposable"
     );
     assert!(resume_panel_text(&mut app).contains("Disposable session"));
-    assert_eq!(app.active_session.as_ref().unwrap().id, "disposable");
+    assert_eq!(
+        app.session.active_session.as_ref().unwrap().id,
+        "disposable"
+    );
     send_receipt.send(()).unwrap();
     wait_for_resume_text(&mut app, "No matching sessions");
-    assert!(app.active_session.is_none());
-    assert!(app.transcript.is_empty());
+    assert!(app.session.active_session.is_none());
+    assert!(app.session.transcript.is_empty());
 }
 
 #[test]
@@ -1803,27 +2786,28 @@ fn retired_slash_commands_fail_without_changing_the_chat() {
             let input = format!("{command}{suffix}");
             let path = PathBuf::from("D:/workspace");
             let mut app = test_app(&input, path.clone(), path);
-            app.active_session = Some(TuiSession {
+            app.session.active_session = Some(TuiSession {
                 id: "active".into(),
             });
-            app.active_agent_run_id = Some("running".into());
-            app.active_agent_run_ids.insert("running".into());
-            app.transcript
+            app.session.active_agent_run_id = Some("running".into());
+            app.session.active_agent_run_ids.insert("running".into());
+            app.session
+                .transcript
                 .push(TranscriptLine::Summary("Keep this answer".into()));
             assert!(!handle_key(
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 &mut app
             ));
             assert_eq!(
-                app.message,
+                app.session.message,
                 Some(format!("Unknown slash command: {command}"))
             );
-            assert_eq!(app.input, input);
-            assert_eq!(app.active_session.as_ref().unwrap().id, "active");
-            assert_eq!(app.active_agent_run_id.as_deref(), Some("running"));
-            assert!(app.active_agent_run_ids.contains("running"));
+            assert_eq!(app.session.input, input);
+            assert_eq!(app.session.active_session.as_ref().unwrap().id, "active");
+            assert_eq!(app.session.active_agent_run_id.as_deref(), Some("running"));
+            assert!(app.session.active_agent_run_ids.contains("running"));
             assert_eq!(
-                app.transcript,
+                app.session.transcript,
                 vec![TranscriptLine::Summary("Keep this answer".into())]
             );
             assert!(app.runtime.is_none());
@@ -1838,7 +2822,10 @@ fn help_opens_the_available_command_menu() {
     let mut app = test_app("/help", path.clone(), path);
     handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
     assert!(app.command_panel_open());
-    assert_eq!(matching_commands(&app.input).len(), SLASH_COMMANDS.len());
+    assert_eq!(
+        matching_commands(&app.session.input).len(),
+        SLASH_COMMANDS.len()
+    );
     let view = build_transcript_view(&app, 80);
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
     terminal
@@ -1877,7 +2864,7 @@ fn command_preview_descriptions_share_one_plain_text_column() {
 fn slash_menu_names_and_composer_share_a_column() {
     let path = PathBuf::from("D:/workspace");
     let mut app = test_app("/", path.clone(), path);
-    app.selected_command = 2;
+    app.session.selected_command = 2;
     for width in [42, 88] {
         let view = build_transcript_view(&app, width);
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
@@ -1887,6 +2874,8 @@ fn slash_menu_names_and_composer_share_a_column() {
         let input = app.input_area.unwrap();
         let menu = app.panel_area.unwrap();
         let buffer = terminal.backend().buffer();
+        assert_eq!(menu.x, 0);
+        assert_eq!(buffer[(0, input.y)].symbol(), "❯");
         assert_eq!(buffer[(input.x, input.y)].symbol(), "/");
         for y in menu.y..menu.bottom() {
             assert_eq!(buffer[(input.x, y)].symbol(), "/", "menu row {y}");
@@ -1977,7 +2966,7 @@ fn home_risk_combines_registered_and_session_workspaces() {
 fn home_risk_panel_opens_without_a_configured_workspace_and_preserves_the_draft() {
     let workspace = PathBuf::from("D:/home");
     let mut app = test_app("inspect this project", workspace.clone(), workspace);
-    app.home_risk_pending = true;
+    app.session.home_risk_pending = true;
     app.runtime = Some(RuntimeClient::from_test_request_handler(
         |frame| match frame["method"].as_str() {
             Some("workspace_get") => {
@@ -1992,8 +2981,8 @@ fn home_risk_panel_opens_without_a_configured_workspace_and_preserves_the_draft(
     ));
 
     handle_enter(&mut app);
-    assert!(app.message.is_none());
-    assert!(app.active_session.is_none());
+    assert!(app.session.message.is_none());
+    assert!(app.session.active_session.is_none());
     let view = build_transcript_view(&app, 80);
     let backend = ratatui::backend::TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -2022,12 +3011,12 @@ fn home_risk_panel_opens_without_a_configured_workspace_and_preserves_the_draft(
         .any(|row| row.contains("Continue in the home directory")));
 
     handle_home_risk_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
-    assert!(app.home_risk_panel.is_none());
-    assert_eq!(app.input, "inspect this project");
-    assert!(app.home_risk_pending);
+    assert!(app.session.home_risk_panel.is_none());
+    assert_eq!(app.session.input, "inspect this project");
+    assert!(app.session.home_risk_pending);
 
     handle_enter(&mut app);
-    assert!(app.home_risk_panel.is_some());
+    assert!(app.session.home_risk_panel.is_some());
 }
 
 #[test]
@@ -2057,12 +3046,12 @@ fn home_risk_selection_applies_workspace_activation_or_explicit_home_continue() 
         }),
     )
     .expect("apply workspace activation");
-    assert_eq!(app.session_cwd, "D:/Projects/example-workspace");
+    assert_eq!(app.session.session_cwd, "D:/Projects/example-workspace");
 
-    app.workspace_root = "D:/home".to_string();
-    app.session_cwd = "D:/home".to_string();
-    app.home_risk_pending = true;
-    app.home_risk_panel = Some(HomeRiskPanel {
+    app.session.workspace_root = "D:/home".to_string();
+    app.session.session_cwd = "D:/home".to_string();
+    app.session.home_risk_pending = true;
+    app.session.home_risk_panel = Some(HomeRiskPanel {
         workspaces: Vec::new(),
         selected: 0,
         notice: None,
@@ -2073,9 +3062,9 @@ fn home_risk_selection_applies_workspace_activation_or_explicit_home_continue() 
         command: ModelCommand::Refresh,
     });
     assert!(confirm_home_risk_selection(&mut app).is_err());
-    assert!(!app.home_risk_pending);
-    assert!(app.home_risk_panel.is_none());
-    assert_eq!(app.input, "inspect this project");
+    assert!(!app.session.home_risk_pending);
+    assert!(app.session.home_risk_panel.is_none());
+    assert_eq!(app.session.input, "inspect this project");
 }
 
 #[test]
@@ -2084,7 +3073,7 @@ fn tab_completion_accepts_selected_command_with_trailing_space() {
     let data_root = unique_test_dir("data-complete");
     let mut app = test_app("/mo", workspace.clone(), data_root.clone());
     complete_selected_command(&mut app);
-    assert_eq!(app.input, "/model ");
+    assert_eq!(app.session.input, "/model ");
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -2095,10 +3084,10 @@ fn welcome_stays_while_the_command_panel_uses_fullscreen_space() {
     let mut app = test_app("", workspace.clone(), workspace);
     assert_eq!(input_row_count(&app, 80), 1);
 
-    app.input = "/".to_string();
+    app.session.input = "/".to_string();
 
     assert_eq!(panel_height(&app, 20), SLASH_COMMANDS.len() as u16);
-    assert!(app.transcript.is_empty());
+    assert!(app.session.transcript.is_empty());
 }
 
 #[test]
@@ -2126,7 +3115,7 @@ fn slash_command_panel_opens_above_the_composer() {
         .expect("slash command panel row");
     let composer_row = rows
         .iter()
-        .rposition(|row| row.contains('│') && row.contains("/model"))
+        .rposition(|row| row.starts_with("❯ /model"))
         .expect("composer row");
 
     assert!(panel_row < composer_row);
@@ -2142,9 +3131,9 @@ fn user_message_leaves_one_row_before_assistant_text() {
         80,
     );
 
-    assert_eq!(rendered_line_text(&lines[0]), "  ❯ hello");
+    assert_eq!(rendered_line_text(&lines[0]), "❯ hello");
     assert!(rendered_line_text(&lines[1]).is_empty());
-    assert_eq!(rendered_line_text(&lines[2]), "  reply");
+    assert_eq!(rendered_line_text(&lines[2]), "reply");
 }
 
 #[test]
@@ -2163,8 +3152,9 @@ fn transcript_view_starts_at_the_live_bottom() {
     let workspace = PathBuf::from("D:/workspace");
     let mut app = test_app("", workspace.clone(), workspace);
 
-    assert!(app.transcript_follow_bottom);
-    app.transcript
+    assert!(app.session.transcript_follow_bottom);
+    app.session
+        .transcript
         .push(TranscriptLine::User("hello".to_string()));
     let view = build_transcript_view(&app, 80);
     assert!(view.total_rows > 0);
@@ -2209,7 +3199,7 @@ fn transcript_rendering_scale_baseline() {
         .into_iter()
         .map(|size| {
             let mut app = test_app("", workspace.clone(), workspace.clone());
-            app.transcript
+            app.session.transcript
                 .extend((0..size).map(|index| TranscriptLine::Summary(format!("line {index}"))));
             let started_at = Instant::now();
             let view = build_transcript_view(&app, 80);
@@ -2220,7 +3210,7 @@ fn transcript_rendering_scale_baseline() {
                 "size": size,
                 "elapsedMs": elapsed_ms,
                 "unchangedRedrawElapsedMs": unchanged_redraw_started_at.elapsed().as_secs_f64() * 1000.0,
-                "inputItems": app.transcript.len(),
+                "inputItems": app.session.transcript.len(),
                 "renderedLines": view.lines.len(),
                 "paragraphLineCountCalls": view.lines.len(),
                 "unchangedRedrawParagraphLineCountCalls": unchanged_view.lines.len(),
@@ -2231,14 +3221,15 @@ fn transcript_rendering_scale_baseline() {
 
     let mut boundary_app = test_app("", workspace.clone(), workspace.clone());
     boundary_app
+        .session
         .transcript
         .extend((0..70_000).map(|index| TranscriptLine::Summary(format!("row {index}"))));
     let boundary_view = build_transcript_view(&boundary_app, 80);
 
     let mut snapshot_app = test_app("", workspace.clone(), workspace);
-    let before = snapshot_app.transcript.len();
+    let before = snapshot_app.session.transcript.len();
     apply_session_event(
-        &mut snapshot_app,
+        &mut snapshot_app.session,
         &json!({
             "id": "runtime:model_snapshot:session:turn:1",
             "type": "ModelSnapshot",
@@ -2255,7 +3246,7 @@ fn transcript_rendering_scale_baseline() {
         }),
         Some("agent-run-1"),
     );
-    let snapshot_accepted = !snapshot_app.transcript[before..]
+    let snapshot_accepted = !snapshot_app.session.transcript[before..]
         .iter()
         .any(|line| matches!(line, TranscriptLine::Error(_)));
 
@@ -2265,7 +3256,7 @@ fn transcript_rendering_scale_baseline() {
             "schema": "transcript.rendering-baseline.tui.v1",
             "samples": samples,
             "u16Boundary": {
-                "inputItems": boundary_app.transcript.len(),
+                "inputItems": boundary_app.session.transcript.len(),
                 "reportedRows": boundary_view.total_rows,
                 "saturated": boundary_view.total_rows == u64::from(u16::MAX),
             },
@@ -2335,7 +3326,7 @@ fn restore_active_agent_runs_marks_waiting_user_as_running_task() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
     restore_active_agent_runs(
-        &mut app,
+        &mut app.session,
         vec![ActiveAgentRun {
             agent_run_id: "agent-run-question".to_string(),
             status: "waiting_user".to_string(),
@@ -2343,12 +3334,15 @@ fn restore_active_agent_runs_marks_waiting_user_as_running_task() {
     );
 
     assert_eq!(
-        app.active_agent_run_id.as_deref(),
+        app.session.active_agent_run_id.as_deref(),
         Some("agent-run-question")
     );
-    assert!(app.active_agent_run_ids.contains("agent-run-question"));
-    assert_eq!(app.process_state, RuntimeDisplayState::WaitingUser);
-    assert!(app.agent_run_started_at.is_some());
+    assert!(app
+        .session
+        .active_agent_run_ids
+        .contains("agent-run-question"));
+    assert_eq!(app.session.process_state, RuntimeDisplayState::WaitingUser);
+    assert!(app.session.agent_run_started_at.is_some());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -2368,10 +3362,10 @@ fn live_turn_supplement_renders_plain_supplement_line() {
         }
     });
 
-    apply_stream_payload(&mut app, &payload);
+    apply_stream_payload(&mut app.session, &payload);
 
     assert_eq!(
-        app.transcript,
+        app.session.transcript,
         vec![TranscriptLine::Supplement("再检查 tests".to_string())]
     );
     let _ = std::fs::remove_dir_all(workspace);
@@ -2385,7 +3379,7 @@ fn question_required_sets_pending_question_without_number_parsing() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -2407,7 +3401,7 @@ fn question_required_sets_pending_question_without_number_parsing() {
     );
 
     assert_eq!(
-        app.pending_question,
+        app.session.pending_question,
         Some(PendingQuestion {
             id: "q-1".to_string(),
             question: "Which branch should I inspect?".to_string(),
@@ -2416,7 +3410,7 @@ fn question_required_sets_pending_question_without_number_parsing() {
             required: true,
         })
     );
-    assert_eq!(app.process_state, RuntimeDisplayState::WaitingUser);
+    assert_eq!(app.session.process_state, RuntimeDisplayState::WaitingUser);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -2439,20 +3433,21 @@ fn agent_run_terminal_preserves_pending_question() {
     let workspace = unique_test_dir("workspace-question-terminal");
     let data_root = unique_test_dir("data-question-terminal");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.active_agent_run_id = Some("agent-run-question".to_string());
-    app.active_agent_run_ids
+    app.session.active_agent_run_id = Some("agent-run-question".to_string());
+    app.session
+        .active_agent_run_ids
         .insert("agent-run-question".to_string());
-    app.pending_question = Some(PendingQuestion {
+    app.session.pending_question = Some(PendingQuestion {
         id: "q-1".to_string(),
         question: "Which branch?".to_string(),
         options: Vec::new(),
         multi_select: false,
         required: true,
     });
-    app.process_state = RuntimeDisplayState::WaitingUser;
+    app.session.process_state = RuntimeDisplayState::WaitingUser;
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "agentRunId": "agent-run-question",
@@ -2467,10 +3462,10 @@ fn agent_run_terminal_preserves_pending_question() {
         }),
     );
 
-    assert!(app.active_agent_run_id.is_none());
-    assert!(app.active_agent_run_ids.is_empty());
-    assert!(app.pending_question.is_some());
-    assert_eq!(app.process_state, RuntimeDisplayState::WaitingUser);
+    assert!(app.session.active_agent_run_id.is_none());
+    assert!(app.session.active_agent_run_ids.is_empty());
+    assert!(app.session.pending_question.is_some());
+    assert_eq!(app.session.process_state, RuntimeDisplayState::WaitingUser);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -2480,7 +3475,7 @@ fn empty_question_answer_fails_without_clearing_pending_question() {
     let workspace = unique_test_dir("workspace-question-empty");
     let data_root = unique_test_dir("data-question-empty");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.pending_question = Some(PendingQuestion {
+    app.session.pending_question = Some(PendingQuestion {
         id: "q-1".to_string(),
         question: "Which branch?".to_string(),
         options: Vec::new(),
@@ -2491,9 +3486,45 @@ fn empty_question_answer_fails_without_clearing_pending_question() {
     let error = submit_question_answer(&mut app, "  ".to_string()).expect_err("empty");
 
     assert_eq!(error, "question answer cannot be empty");
-    assert!(app.pending_question.is_some());
+    assert!(app.session.pending_question.is_some());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
+}
+
+#[test]
+fn question_panel_only_accepts_clicks_on_rendered_options() {
+    let path = PathBuf::from("D:/workspace");
+    let mut app = test_app("", path.clone(), path);
+    app.session.pending_question = Some(PendingQuestion {
+        id: "question".into(),
+        question: "Choose options".into(),
+        options: ["First", "Second", "Third", "Fourth"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        multi_select: true,
+        required: true,
+    });
+    let view = build_transcript_view(&app, 44);
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(44, 10)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut app, &view))
+        .unwrap();
+    let panel = app.panel_area.unwrap();
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        panel.x,
+        panel.bottom() - 1,
+    );
+    assert!(app.session.input.is_empty());
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        panel.x,
+        panel.y + 2,
+    );
+    assert_eq!(app.session.input, "First");
 }
 
 #[test]
@@ -2527,15 +3558,15 @@ fn tool_event_uses_first_operation_title_and_bounds_result_lines() {
         }
     });
 
-    apply_stream_payload(&mut app, &payload);
-    assert!(!app.tool_projection.has_open_calls());
+    apply_stream_payload(&mut app.session, &payload);
+    assert!(!app.session.tool_projection.has_open_calls());
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(_)]
     ));
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -2545,10 +3576,10 @@ fn tool_event_uses_first_operation_title_and_bounds_result_lines() {
             }
         }),
     );
-    assert!(!app.tool_projection.has_open_calls());
-    assert_eq!(app.assistant_buffer, "done");
+    assert!(!app.session.tool_projection.has_open_calls());
+    assert_eq!(app.session.assistant_buffer, "done");
 
-    match app.transcript.first().expect("tool line") {
+    match app.session.transcript.first().expect("tool line") {
         TranscriptLine::Tool(tool) => {
             assert_eq!(tool.subject, "rg session/prompt ui");
             assert_eq!(
@@ -2659,10 +3690,10 @@ fn write_tool_diff_preview_uses_diff_block_with_line_numbers_and_cap() {
         }
     });
 
-    apply_stream_payload(&mut app, &payload);
-    seal_active_tool_calls(&mut app);
+    apply_stream_payload(&mut app.session, &payload);
+    seal_active_tool_calls(&mut app.session);
 
-    match app.transcript.first().expect("tool line") {
+    match app.session.transcript.first().expect("tool line") {
         TranscriptLine::Tool(tool) => match tool.result_blocks.as_slice() {
             [ToolResultBlock::Diff {
                 rows, hidden_lines, ..
@@ -2705,10 +3736,10 @@ fn replacement_diff_preview_projects_without_a_protocol_error() {
         }]),
     );
 
-    match app.transcript.as_slice() {
-        [TranscriptLine::Tool(ToolTranscriptLine { result_blocks, .. })] => {
+    match app.session.transcript.as_slice() {
+        [TranscriptLine::Tool(tool)] => {
             assert!(matches!(
-                result_blocks.as_slice(),
+                tool.result_blocks.as_slice(),
                 [ToolResultBlock::Diff { path, rows, .. }]
                     if path == "castle/index.html"
                         && rows.iter().all(|row| row.line_number.is_none())
@@ -2720,7 +3751,7 @@ fn replacement_diff_preview_projects_without_a_protocol_error() {
         }
         other => panic!("unexpected transcript: {other:?}"),
     }
-    assert!(!app.tool_protocol_error);
+    assert!(!app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -2743,7 +3774,7 @@ fn failed_edit_projects_its_error_without_requiring_a_diff() {
         }]),
     );
 
-    match app.transcript.as_slice() {
+    match app.session.transcript.as_slice() {
         [TranscriptLine::Tool(tool)] => {
             assert_eq!(stable_tool_title(tool), "Failed to edit files");
             assert_eq!(tool.result_states, vec![ToolResultState::Failed]);
@@ -2758,7 +3789,7 @@ fn failed_edit_projects_its_error_without_requiring_a_diff() {
         }
         other => panic!("unexpected transcript: {other:?}"),
     }
-    assert!(!app.tool_protocol_error);
+    assert!(!app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -2799,12 +3830,12 @@ fn write_tool_without_diff_preview_reports_protocol_error() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool), TranscriptLine::Error(error)]
             if tool.running
                 && error.contains("successful write operation missing diffPreview")
     ));
-    assert!(app.tool_protocol_error);
+    assert!(app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -2858,7 +3889,7 @@ fn bash_description_is_the_title_while_the_command_remains_visible() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
     apply_described_bash_call(&mut app, "call-1");
-    let TranscriptLine::Tool(running) = &app.transcript[0] else {
+    let TranscriptLine::Tool(running) = &app.session.transcript[0] else {
         panic!("expected running tool row");
     };
     assert_eq!(stable_tool_title(running), "Run focused tests");
@@ -2874,11 +3905,11 @@ fn bash_description_is_the_title_while_the_command_remains_visible() {
         "done",
         json!([{"callId": "call-1", "kind": "command"}]),
     );
-    let TranscriptLine::Tool(settled) = &app.transcript[0] else {
+    let TranscriptLine::Tool(settled) = &app.session.transcript[0] else {
         panic!("expected settled tool row");
     };
     assert_eq!(stable_tool_title(settled), "Run focused tests");
-    let rendered = transcript_to_lines(&app.transcript, 100);
+    let rendered = transcript_to_lines(&app.session.transcript, 100);
     assert!(rendered_lines_text(&rendered).contains("Ran cargo test -p centaeris-tui"));
 
     let _ = std::fs::remove_dir_all(workspace);
@@ -2914,11 +3945,11 @@ fn partial_read_shows_its_range_and_coverage_not_a_generic_truncation_label() {
             "startLine": 1,
             "endLine": 50,
             "totalLines": 1642,
-            "nextOffset": 50,
+            "nextOffset": 51,
             "truncatedBy": "lines"
         }]),
     );
-    let read = match app.transcript.first().expect("read line") {
+    let read = match app.session.transcript.first().expect("read line") {
         TranscriptLine::Tool(tool) => tool.clone(),
         other => panic!("unexpected line: {other:?}"),
     };
@@ -2984,7 +4015,7 @@ fn tool_call_missing_call_id_reports_protocol_error() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -2997,13 +4028,13 @@ fn tool_call_missing_call_id_reports_protocol_error() {
     );
 
     assert_eq!(
-        app.transcript,
+        app.session.transcript,
         vec![TranscriptLine::Error(
             "Protocol error: ToolCall evt-malformed-tool missing payload.callId".to_string()
         )]
     );
-    assert!(!app.tool_projection.has_open_calls());
-    assert!(app.tool_protocol_error);
+    assert!(!app.session.tool_projection.has_open_calls());
+    assert!(app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3023,13 +4054,13 @@ fn tool_result_without_call_reports_protocol_error() {
     );
 
     assert_eq!(
-        app.transcript,
+        app.session.transcript,
         vec![TranscriptLine::Error(
             "Protocol error: ToolResult evt-result-call-1 ToolResult without ToolCall: call-1"
                 .to_string()
         )]
     );
-    assert!(app.tool_protocol_error);
+    assert!(app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3050,13 +4081,13 @@ fn tool_result_unknown_call_id_loud_fails() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool), TranscriptLine::Error(error)]
             if tool.running
                 && error.contains("ToolResult without ToolCall: call-unknown")
     ));
-    assert!(app.tool_projection.has_open_calls());
-    assert!(app.tool_protocol_error);
+    assert!(app.session.tool_projection.has_open_calls());
+    assert!(app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3069,10 +4100,10 @@ fn tool_call_row_settles_in_place() {
 
     apply_tool_call(&mut app, "call-1", "bash");
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool)] if tool.running
     ));
-    assert!(app.tool_projection.has_open_calls());
+    assert!(app.session.tool_projection.has_open_calls());
 
     apply_tool_result(
         &mut app,
@@ -3081,9 +4112,9 @@ fn tool_call_row_settles_in_place() {
         "done",
         json!([{"callId": "call-1", "kind": "command", "commandPreview": "cargo fmt --check"}]),
     );
-    assert!(!app.tool_projection.has_open_calls());
+    assert!(!app.session.tool_projection.has_open_calls());
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool)]
             if tool.subject == "cargo fmt --check"
                 && tool.result_states == vec![ToolResultState::SuccessNoOutput]
@@ -3091,7 +4122,7 @@ fn tool_call_row_settles_in_place() {
     ));
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3102,10 +4133,10 @@ fn tool_call_row_settles_in_place() {
         }),
     );
 
-    assert!(!app.tool_projection.has_open_calls());
-    assert_eq!(app.assistant_buffer, "formatting checked");
+    assert!(!app.session.tool_projection.has_open_calls());
+    assert_eq!(app.session.assistant_buffer, "formatting checked");
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool)]
             if tool.subject == "cargo fmt --check"
                 && tool.result_states == vec![ToolResultState::SuccessNoOutput]
@@ -3168,15 +4199,15 @@ fn bash_runtime_summary_does_not_reopen_committed_tool_row() {
         "id":"answer-start", "type":"ModelTextDelta", "payload":{"delta":"Done"}
     }});
     for item in [call, result, summary_call, summary_result, next] {
-        apply_stream_payload_for_agent_run(&mut app, &item, Some("run"));
+        apply_stream_payload_for_agent_run(&mut app.session, &item, Some("run"));
     }
 
-    assert_eq!(app.assistant_buffer, "Done");
-    assert!(!app.tool_protocol_error);
-    assert!(!app.tool_projection.has_open_calls());
-    assert_eq!(app.transcript.len(), 1);
+    assert_eq!(app.session.assistant_buffer, "Done");
+    assert!(!app.session.tool_protocol_error);
+    assert!(!app.session.tool_projection.has_open_calls());
+    assert_eq!(app.session.transcript.len(), 1);
     assert!(matches!(
-        app.transcript[0].content(),
+        app.session.transcript[0].content(),
         TranscriptLine::Tool(tool)
             if !tool.running && !tool.interrupted && tool.command.as_deref() == Some(command)
                 && tool.exit_code == Some(0) && tool.full_text.as_deref() == Some("probe")
@@ -3219,10 +4250,10 @@ fn repeated_stream_event_ids_are_applied_once() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool)] if !tool.running && tool.subject == "castle/index.html"
     ));
-    assert!(!app.tool_protocol_error);
+    assert!(!app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3239,7 +4270,7 @@ fn tool_activity_events_render_the_current_step_until_result() {
         ("ToolProgress", "bash", "Running command"),
     ] {
         apply_stream_payload(
-            &mut app,
+            &mut app.session,
             &json!({
                 "type": "session_event",
                 "event": {
@@ -3262,10 +4293,10 @@ fn tool_activity_events_render_the_current_step_until_result() {
         json!([{"callId": "call-1", "kind": "command", "commandPreview": "cargo check"}]),
     );
 
-    assert!(!app.tool_projection.has_open_calls());
+    assert!(!app.session.tool_projection.has_open_calls());
     assert!(status_inline(&app).is_none());
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(_)]
     ));
     let _ = std::fs::remove_dir_all(workspace);
@@ -3279,7 +4310,7 @@ fn tool_activity_missing_tool_name_loud_fails() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3291,11 +4322,11 @@ fn tool_activity_missing_tool_name_loud_fails() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Error(error)]
             if error.contains("ToolCallReady evt-ready-missing-name missing event.toolName")
     ));
-    assert!(app.tool_protocol_error);
+    assert!(app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3309,7 +4340,7 @@ fn parallel_tool_calls_keep_individual_rows_in_call_order() {
     for call_id in ["call-1", "call-2"] {
         apply_tool_call(&mut app, call_id, "read");
     }
-    assert!(app.tool_projection.has_open_calls());
+    assert!(app.session.tool_projection.has_open_calls());
 
     for (index, call_id) in ["call-2", "call-1"].into_iter().enumerate() {
         apply_tool_result(
@@ -3325,19 +4356,19 @@ fn parallel_tool_calls_keep_individual_rows_in_call_order() {
             }]),
         );
         if index == 0 {
-            assert!(app.tool_projection.has_open_calls());
+            assert!(app.session.tool_projection.has_open_calls());
             assert!(matches!(
-                app.transcript.as_slice(),
+                app.session.transcript.as_slice(),
                 [TranscriptLine::Tool(first), TranscriptLine::Tool(second)]
                     if first.running && !second.running
             ));
         }
     }
 
-    seal_active_tool_calls(&mut app);
-    assert!(!app.tool_projection.has_open_calls());
+    seal_active_tool_calls(&mut app.session);
+    assert!(!app.session.tool_projection.has_open_calls());
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(first), TranscriptLine::Tool(second)]
             if first.operations[0].call_id == "call-1"
                 && second.operations[0].call_id == "call-2"
@@ -3364,13 +4395,13 @@ fn next_tool_call_keeps_its_own_row() {
     );
 
     apply_tool_call(&mut app, "call-2", "edit");
-    assert!(app.tool_projection.has_open_calls());
+    assert!(app.session.tool_projection.has_open_calls());
     assert!(matches!(
-        app.tool_projection.open_call_ids().as_slice(),
+        app.session.tool_projection.open_call_ids().as_slice(),
         [call_id] if *call_id == "call-2"
     ));
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(first), TranscriptLine::Tool(second)]
             if first.operations[0].call_id == "call-1"
                 && !first.interrupted
@@ -3389,9 +4420,9 @@ fn next_tool_call_keeps_its_own_row() {
             "diffPreview": "@@ -1 +1 @@\n-old\n+new"
         }]),
     );
-    seal_active_tool_calls(&mut app);
+    seal_active_tool_calls(&mut app.session);
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [
             TranscriptLine::Tool(first),
             TranscriptLine::Tool(second),
@@ -3412,7 +4443,7 @@ fn interrupted_calls_settle_individually_without_fabricating_result_state() {
     apply_tool_call(&mut app, "call-2", "bash");
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3424,7 +4455,7 @@ fn interrupted_calls_settle_individually_without_fabricating_result_state() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [
             TranscriptLine::Tool(first),
             TranscriptLine::Tool(second),
@@ -3436,7 +4467,7 @@ fn interrupted_calls_settle_individually_without_fabricating_result_state() {
             && first.operations.is_empty()
             && second.operations.is_empty()
     ));
-    assert!(!app.tool_projection.has_open_calls());
+    assert!(!app.session.tool_projection.has_open_calls());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3456,7 +4487,7 @@ fn agent_run_terminal_seals_calls_then_commits_buffer() {
         json!([{"callId": "call-1", "kind": "command", "commandPreview": "cargo build"}]),
     );
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3467,7 +4498,7 @@ fn agent_run_terminal_seals_calls_then_commits_buffer() {
         }),
     );
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "agentRunId": "agent-run-1",
@@ -3483,14 +4514,14 @@ fn agent_run_terminal_seals_calls_then_commits_buffer() {
     );
 
     assert!(matches!(
-        app.transcript.iter().filter(|line| !matches!(line, TranscriptLine::RunBoundary { .. })).map(TranscriptLine::content).collect::<Vec<_>>().as_slice(),
+        app.session.transcript.iter().filter(|line| !matches!(line, TranscriptLine::RunBoundary { .. })).map(TranscriptLine::content).collect::<Vec<_>>().as_slice(),
         [
             TranscriptLine::Tool(tool),
             TranscriptLine::LiveAssistant { markdown, .. },
         ] if !tool.interrupted
             && markdown == "built"
     ));
-    assert!(!app.tool_projection.has_open_calls());
+    assert!(!app.session.tool_projection.has_open_calls());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3502,7 +4533,7 @@ fn streaming_text_commits_before_each_tool_call() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3521,7 +4552,7 @@ fn streaming_text_commits_before_each_tool_call() {
         json!([{"callId": "call-1", "kind": "command", "commandPreview": "cargo build"}]),
     );
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3545,7 +4576,7 @@ fn streaming_text_commits_before_each_tool_call() {
         }]),
     );
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3556,7 +4587,7 @@ fn streaming_text_commits_before_each_tool_call() {
         }),
     );
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "agentRunId": "agent-run-1",
@@ -3572,7 +4603,7 @@ fn streaming_text_commits_before_each_tool_call() {
     );
 
     assert!(matches!(
-        app.transcript.iter().filter(|line| !matches!(line, TranscriptLine::RunBoundary { .. })).map(TranscriptLine::content).collect::<Vec<_>>().as_slice(),
+        app.session.transcript.iter().filter(|line| !matches!(line, TranscriptLine::RunBoundary { .. })).map(TranscriptLine::content).collect::<Vec<_>>().as_slice(),
         [
             TranscriptLine::LiveAssistant { markdown: first, .. },
             TranscriptLine::Tool(build),
@@ -3597,7 +4628,7 @@ fn subagent_lines_land_after_their_tool_call_settles() {
 
     apply_tool_call(&mut app, "call-agent", "agent");
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3608,7 +4639,7 @@ fn subagent_lines_land_after_their_tool_call_settles() {
         }),
     );
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool)] if tool.running
     ));
     apply_tool_result(
@@ -3619,7 +4650,7 @@ fn subagent_lines_land_after_their_tool_call_settles() {
         json!([{"callId": "call-agent", "kind": "tool", "toolName": "agent"}]),
     );
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3631,14 +4662,14 @@ fn subagent_lines_land_after_their_tool_call_settles() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [
             TranscriptLine::Tool(tool),
             TranscriptLine::Subagent(subagent),
         ] if !tool.interrupted
             && subagent.title == "Helper"
     ));
-    assert!(!app.tool_projection.has_open_calls());
+    assert!(!app.session.tool_projection.has_open_calls());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3659,13 +4690,13 @@ fn tool_result_operations_must_match_call_id() {
     );
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool), TranscriptLine::Error(error)]
             if tool.running
                 && error.contains("call-1 has operation with mismatched callId")
     ));
-    assert!(app.tool_projection.has_open_calls());
-    assert!(app.tool_protocol_error);
+    assert!(app.session.tool_projection.has_open_calls());
+    assert!(app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3680,11 +4711,11 @@ fn tool_result_empty_operations_reports_protocol_error() {
     apply_tool_result(&mut app, "call-1", "successNoOutput", "done", json!([]));
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Tool(tool), TranscriptLine::Error(error)]
             if tool.running && error.contains("payload.operations is empty")
     ));
-    assert!(app.tool_protocol_error);
+    assert!(app.session.tool_protocol_error);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -3696,7 +4727,7 @@ fn status_summary_replaces_streaming_buffer_without_duplication() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3706,10 +4737,10 @@ fn status_summary_replaces_streaming_buffer_without_duplication() {
             }
         }),
     );
-    assert_eq!(app.assistant_buffer, "Let me also看看");
+    assert_eq!(app.session.assistant_buffer, "Let me also看看");
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3720,9 +4751,9 @@ fn status_summary_replaces_streaming_buffer_without_duplication() {
         }),
     );
 
-    assert_eq!(app.assistant_buffer, "");
+    assert_eq!(app.session.assistant_buffer, "");
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::Summary(text)] if text == "Let me also看看"
     ));
     let _ = std::fs::remove_dir_all(workspace);
@@ -3735,8 +4766,8 @@ fn streaming_code_fence_renders_unclosed_block_in_live_area() {
     let data_root = unique_test_dir("data-fence");
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
-    app.assistant_buffer = "```rust\nfn main() {}".to_string();
-    let lines = build_assistant_live_lines(&app, 80);
+    app.session.assistant_buffer = "```rust\nfn main() {}".to_string();
+    let lines = build_assistant_live_lines(&app.session, 80);
     assert_eq!(lines.len(), 2);
     assert!(lines[1]
         .spans
@@ -3744,8 +4775,8 @@ fn streaming_code_fence_renders_unclosed_block_in_live_area() {
         .skip(1)
         .all(|span| span.style.bg == Some(theme().code_bg)));
 
-    replace_assistant_buffer(&mut app, "```rust\nfn main() {}\n```".to_string());
-    let lines = build_assistant_live_lines(&app, 80);
+    replace_assistant_buffer(&mut app.session, "```rust\nfn main() {}\n```".to_string());
+    let lines = build_assistant_live_lines(&app.session, 80);
     assert_eq!(lines.len(), 2);
     assert!(lines[0].spans.iter().all(|span| span.style.bg.is_none()));
     let _ = std::fs::remove_dir_all(workspace);
@@ -3761,21 +4792,21 @@ fn streaming_assistant_commits_closed_lines_and_keeps_only_tail_live() {
     let closed = (0..60)
         .map(|index| format!("line {index}\n"))
         .collect::<String>();
-    app.assistant_buffer = format!("{closed}line tail");
+    app.session.assistant_buffer = format!("{closed}line tail");
     materialize_assistant_prefix(&mut app);
 
-    assert_eq!(app.assistant_emitted_bytes, closed.len());
-    let static_markdown = match app.transcript.as_slice() {
+    assert_eq!(app.session.assistant_emitted_bytes, closed.len());
+    let static_markdown = match app.session.transcript.as_slice() {
         [TranscriptLine::LiveAssistant { markdown, .. }] => markdown,
         other => panic!("expected one materialized stream, got {other:?}"),
     };
     assert!(static_markdown.contains("line 0") && static_markdown.contains("line 59"));
-    let tail = build_assistant_live_lines(&app, 80);
-    assert_eq!(rendered_lines_text(&tail), "  line tail");
+    let tail = build_assistant_live_lines(&app.session, 80);
+    assert_eq!(rendered_lines_text(&tail), "line tail");
 
-    commit_assistant_buffer(&mut app);
-    assert!(app.assistant_buffer.is_empty());
-    assert!(transcript_to_lines(&app.transcript, 80)
+    commit_assistant_buffer(&mut app.session);
+    assert!(app.session.assistant_buffer.is_empty());
+    assert!(transcript_to_lines(&app.session.transcript, 80)
         .iter()
         .any(|line| rendered_line_text(line).contains("line tail")));
     let _ = std::fs::remove_dir_all(workspace);
@@ -3788,21 +4819,24 @@ fn source_backed_assistant_reflows_to_current_terminal_width() {
     let data_root = unique_test_dir("data-live-reflow");
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
-    app.assistant_buffer = "a deliberately long streamed sentence\n".to_string();
+    app.session.assistant_buffer = "a deliberately long streamed sentence\n".to_string();
     materialize_assistant_prefix(&mut app);
 
     assert!(matches!(
-        app.transcript.as_slice(),
+        app.session.transcript.as_slice(),
         [TranscriptLine::LiveAssistant { markdown, separator: false }]
             if markdown == "a deliberately long streamed sentence\n"
     ));
-    let wide = transcript_to_lines(&app.transcript, 80);
-    let narrow = transcript_to_lines(&app.transcript, 12);
+    let wide = transcript_to_lines(&app.session.transcript, 80);
+    let narrow = transcript_to_lines(&app.session.transcript, 12);
     assert!(paragraph_line_count(&narrow, 12) > paragraph_line_count(&wide, 80));
 
-    app.assistant_buffer.push_str("next source line\n");
+    app.session.assistant_buffer.push_str("next source line\n");
     materialize_assistant_prefix(&mut app);
-    assert!(!rendered_lines_text(&transcript_to_lines_from(&app.transcript, 1, 80)).contains("• "));
+    assert!(
+        !rendered_lines_text(&transcript_to_lines_from(&app.session.transcript, 1, 80))
+            .contains("• ")
+    );
 
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -3839,15 +4873,15 @@ fn transcript_scroll_disables_and_restores_bottom_following() {
     let workspace = unique_test_dir("workspace-owned-scroll");
     let data_root = unique_test_dir("data-owned-scroll");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.transcript_max_scroll = 20;
-    app.transcript_scroll = 20;
+    app.session.transcript_max_scroll = 20;
+    app.session.transcript_scroll = 20;
 
     scroll_transcript(&mut app, -3);
-    assert_eq!(app.transcript_scroll, 17);
-    assert!(!app.transcript_follow_bottom);
+    assert_eq!(app.session.transcript_scroll, 17);
+    assert!(!app.session.transcript_follow_bottom);
     scroll_transcript(&mut app, 3);
-    assert_eq!(app.transcript_scroll, 20);
-    assert!(app.transcript_follow_bottom);
+    assert_eq!(app.session.transcript_scroll, 20);
+    assert!(app.session.transcript_follow_bottom);
 
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -3857,7 +4891,8 @@ fn transcript_scroll_disables_and_restores_bottom_following() {
 fn transcript_view_keeps_global_rows_beyond_u16_and_slices_the_viewport() {
     let workspace = PathBuf::from("D:/workspace");
     let mut app = test_app("", workspace.clone(), workspace);
-    app.transcript
+    app.session
+        .transcript
         .extend((0..40_000).map(|index| TranscriptLine::Summary(format!("row {index}"))));
 
     let view = build_transcript_view(&app, 80);
@@ -3874,17 +4909,19 @@ fn transcript_view_keeps_global_rows_beyond_u16_and_slices_the_viewport() {
 fn composer_input_redraw_reuses_the_transcript_layout() {
     let workspace = PathBuf::from("D:/workspace");
     let mut app = test_app("", workspace.clone(), workspace);
-    app.transcript
+    app.session
+        .transcript
         .push(TranscriptLine::Summary("stable history".to_string()));
 
     let first = build_cached_transcript_view(&mut app, 80);
-    app.input.push('x');
+    app.session.input.push('x');
     let second = build_cached_transcript_view(&mut app, 80);
 
     assert_eq!(first.lines, second.lines);
     assert!(std::sync::Arc::ptr_eq(&first, &second));
     assert_eq!(
-        app.transcript_layout_cache
+        app.session
+            .transcript_layout_cache
             .as_ref()
             .expect("layout cache")
             .rebuilds,
@@ -3905,11 +4942,11 @@ fn model_text_replace_discards_materialized_attempt_before_redraw() {
     let data_root = unique_test_dir("data-live-replace");
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
-    app.assistant_buffer = "old attempt\n".to_string();
+    app.session.assistant_buffer = "old attempt\n".to_string();
     materialize_assistant_prefix(&mut app);
 
     apply_stream_payload(
-        &mut app,
+        &mut app.session,
         &json!({
             "type": "session_event",
             "event": {
@@ -3920,12 +4957,12 @@ fn model_text_replace_discards_materialized_attempt_before_redraw() {
         }),
     );
 
-    assert!(app.transcript.is_empty());
-    assert_eq!(app.assistant_buffer, "replacement");
-    assert_eq!(app.assistant_emitted_bytes, 0);
+    assert!(app.session.transcript.is_empty());
+    assert_eq!(app.session.assistant_buffer, "replacement");
+    assert_eq!(app.session.assistant_emitted_bytes, 0);
     assert_eq!(
-        rendered_lines_text(&build_assistant_live_lines(&app, 80)),
-        "  replacement"
+        rendered_lines_text(&build_assistant_live_lines(&app.session, 80)),
+        "replacement"
     );
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -3936,7 +4973,7 @@ fn status_line_omits_session_id() {
     let workspace = unique_test_dir("workspace-status");
     let data_root = unique_test_dir("data-status");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.active_session = Some(TuiSession {
+    app.session.active_session = Some(TuiSession {
         id: "chat-1800000000000-42".to_string(),
     });
 
@@ -3955,16 +4992,16 @@ fn status_indicator_header_maps_process_state_and_protocol_error() {
     let data_root = unique_test_dir("data-indicator");
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
-    app.process_state = RuntimeDisplayState::PendingPhase;
+    app.session.process_state = RuntimeDisplayState::PendingPhase;
     assert_eq!(status_header(&app), "");
-    app.process_state = RuntimeDisplayState::Thinking;
+    app.session.process_state = RuntimeDisplayState::Thinking;
     assert_eq!(status_header(&app), "Thinking...");
-    app.process_state = RuntimeDisplayState::ToolRunning;
+    app.session.process_state = RuntimeDisplayState::ToolRunning;
     assert_eq!(status_header(&app), "Running tools...");
-    app.process_state = RuntimeDisplayState::WaitingUser;
+    app.session.process_state = RuntimeDisplayState::WaitingUser;
     assert_eq!(status_header(&app), "Waiting for input");
 
-    app.tool_protocol_error = true;
+    app.session.tool_protocol_error = true;
     assert_eq!(status_header(&app), "Protocol error");
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -3975,11 +5012,11 @@ fn status_indicator_projects_deterministic_easter_eggs() {
     let workspace = unique_test_dir("workspace-easter-eggs");
     let data_root = unique_test_dir("data-easter-eggs");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.active_agent_run_id = Some("tachikoma-0".to_string());
-    app.process_state = RuntimeDisplayState::PendingPhase;
+    app.session.active_agent_run_id = Some("tachikoma-0".to_string());
+    app.session.process_state = RuntimeDisplayState::PendingPhase;
     for (index, subagent_id) in ["one", "two", "three"].into_iter().enumerate() {
         apply_session_event(
-            &mut app,
+            &mut app.session,
             &json!({
                 "id": format!("subagent-spawned-{index}"),
                 "type": "SubagentSpawned",
@@ -3991,7 +5028,7 @@ fn status_indicator_projects_deterministic_easter_eggs() {
     assert_eq!(status_header(&app), "Tachikoma ×3");
     for (index, subagent_id) in ["three", "two"].into_iter().enumerate() {
         apply_session_event(
-            &mut app,
+            &mut app.session,
             &json!({
                 "id": format!("subagent-result-{index}"),
                 "type": "SubagentResult",
@@ -4003,7 +5040,7 @@ fn status_indicator_projects_deterministic_easter_eggs() {
     }
     assert_eq!(status_header(&app), "Tachikoma ×1");
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({
             "id": "subagent-result-last",
             "type": "SubagentResult",
@@ -4042,7 +5079,7 @@ fn status_indicator_projects_deterministic_easter_eggs() {
         ),
     ] {
         let mut app = test_app("", workspace.clone(), data_root.clone());
-        app.active_agent_run_id = Some(run.into());
+        app.session.active_agent_run_id = Some(run.into());
         let phase_event = match phase {
             "thinking" => json!({"type":"ModelStatus","processState":"thinking"}),
             "responding" => json!({"type":"ModelTextDelta","payload":{"delta":"Answer"}}),
@@ -4052,16 +5089,16 @@ fn status_indicator_projects_deterministic_easter_eggs() {
         };
         let mut first = phase_event.clone();
         first["id"] = json!("first-phase");
-        apply_session_event(&mut app, &first, Some(run));
+        apply_session_event(&mut app.session, &first, Some(run));
         assert_eq!(status_header(&app), egg);
 
         if phase == "compaction" {
             run_event(&mut app, run, "compacted", "PromptCompaction", json!({}));
             assert_eq!(status_header(&app), "");
-            assert!(app.transcript.is_empty());
+            assert!(app.session.transcript.is_empty());
         } else {
             apply_session_event(
-                &mut app,
+                &mut app.session,
                 &json!({
                     "id":"wait", "type":"ModelStatus", "processState":"provider_waiting"
                 }),
@@ -4072,7 +5109,7 @@ fn status_indicator_projects_deterministic_easter_eggs() {
 
         let mut second = phase_event;
         second["id"] = json!("second-phase");
-        apply_session_event(&mut app, &second, Some(run));
+        apply_session_event(&mut app.session, &second, Some(run));
         assert_eq!(status_header(&app), normal);
     }
     let _ = std::fs::remove_dir_all(workspace);
@@ -4093,7 +5130,7 @@ fn model_request_start_and_status_update_live_projection_without_errors() {
     );
 
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({
             "id": "runtime:model-start",
             "type": "ModelRequestStart",
@@ -4106,9 +5143,9 @@ fn model_request_start_and_status_update_live_projection_without_errors() {
         }),
         Some("agent-run-1"),
     );
-    assert_eq!(app.process_state, RuntimeDisplayState::Thinking);
-    assert_eq!(app.assistant_buffer, "partial answer");
-    assert!(app.transcript.is_empty());
+    assert_eq!(app.session.process_state, RuntimeDisplayState::Thinking);
+    assert_eq!(app.session.assistant_buffer, "partial answer");
+    assert!(app.session.transcript.is_empty());
     assert_eq!(
         status_usage::context_label(&app).as_deref(),
         Some("1.2k / 128k")
@@ -4121,11 +5158,11 @@ fn model_request_start_and_status_update_live_projection_without_errors() {
         "ModelTextDelta",
         json!({"delta":" continues"}),
     );
-    assert_eq!(app.process_state, RuntimeDisplayState::Responding);
-    assert_eq!(app.assistant_buffer, "partial answer continues");
+    assert_eq!(app.session.process_state, RuntimeDisplayState::Responding);
+    assert_eq!(app.session.assistant_buffer, "partial answer continues");
 
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({
             "id": "runtime:model-status",
             "type": "ModelStatus",
@@ -4135,11 +5172,11 @@ fn model_request_start_and_status_update_live_projection_without_errors() {
         Some("agent-run-1"),
     );
     assert_eq!(
-        app.process_state,
+        app.session.process_state,
         RuntimeDisplayState::Waiting(WaitReason::Model)
     );
-    assert_eq!(app.assistant_buffer, "partial answer continues");
-    assert!(app.transcript.is_empty());
+    assert_eq!(app.session.assistant_buffer, "partial answer continues");
+    assert!(app.session.transcript.is_empty());
 
     apply_model_display(
         &mut app,
@@ -4165,7 +5202,7 @@ fn idle_surface_does_not_request_periodic_redraws() {
         .expect("earlier instant");
 
     assert!(!periodic_redraw_due(&app, last_draw_at, now));
-    app.active_agent_run_id = Some("agent-run-1".to_string());
+    app.session.active_agent_run_id = Some("agent-run-1".to_string());
     assert!(periodic_redraw_due(&app, last_draw_at, now));
 
     let _ = std::fs::remove_dir_all(workspace);
@@ -4238,14 +5275,14 @@ fn mouse_position_maps_to_wrapped_unicode_input_boundaries() {
 fn selected_composer_text_is_replaced_in_the_editor() {
     let workspace = PathBuf::from("D:/workspace");
     let mut app = test_app("hello world", workspace.clone(), workspace);
-    app.input_selection_anchor = Some(6);
-    app.input_cursor = 11;
+    app.session.input_selection_anchor = Some(6);
+    app.session.input_cursor = 11;
 
     insert_text_at_cursor(&mut app, "Rust");
 
-    assert_eq!(app.input, "hello Rust");
-    assert_eq!(app.input_cursor, app.input.len());
-    assert!(app.input_selection_anchor.is_none());
+    assert_eq!(app.session.input, "hello Rust");
+    assert_eq!(app.session.input_cursor, app.session.input.len());
+    assert!(app.session.input_selection_anchor.is_none());
 }
 
 #[test]
@@ -4282,8 +5319,8 @@ fn composer_mouse_drag_copies_once_and_keeps_the_selection() {
     }
 
     assert_eq!(input_selection_range(&app), Some(1..4));
-    assert!(app.transcript_selection.is_none());
-    assert!(app.message.is_none());
+    assert!(app.session.transcript_selection.is_none());
+    assert!(app.session.message.is_none());
     assert_eq!(&*copied.borrow(), &["bcd".to_string()]);
 }
 
@@ -4295,7 +5332,7 @@ fn clicking_image_placeholder_opens_pixel_preview_on_supported_protocols() {
 
 fn check_pixel_image_preview(protocol: ProtocolType, image_escape: &str) {
     fn pixels(app: &App) -> &PixelImagePreview {
-        let Some(ImagePreview::Pixels(preview)) = app.image_preview.as_ref() else {
+        let Some(ImagePreview::Pixels(preview)) = app.session.image_preview.as_ref() else {
             panic!("expected pixel preview");
         };
         preview
@@ -4306,12 +5343,14 @@ fn check_pixel_image_preview(protocol: ProtocolType, image_escape: &str) {
     let path = data_root.join("clipboard.png");
     std::fs::write(path.as_path(), test_png_bytes()).expect("write image fixture");
     let mut app = test_app("[Image #1]", workspace.clone(), data_root.clone());
-    app.image_picker.set_protocol_type(protocol);
-    app.draft_image_attachments.push(DraftImageAttachment {
-        start: 0,
-        end: app.input.len(),
-        local_path: path.clone(),
-    });
+    app.image_policy.picker.set_protocol_type(protocol);
+    app.session
+        .draft_image_attachments
+        .push(DraftImageAttachment {
+            start: 0,
+            end: app.session.input.len(),
+            local_path: path.clone(),
+        });
     let backend = ratatui::backend::TestBackend::new(180, 60);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let view = build_transcript_view(&app, 180);
@@ -4331,7 +5370,14 @@ fn check_pixel_image_preview(protocol: ProtocolType, image_escape: &str) {
     );
     terminal
         .draw(|frame| render(frame, &mut app, &view))
-        .expect("request image preview");
+        .expect("show image preview");
+    assert_eq!(
+        pixels(&app).generation,
+        0,
+        "drawing must not schedule a render"
+    );
+    let layout = FrameLayout::new(&app, Rect::new(0, 0, 180, 60));
+    prepare_image_preview_bounds(&mut app, layout.preview_history());
     assert!(test_buffer_text(terminal.backend().buffer()).contains("Loading preview…"));
     for _ in 0..1_000 {
         drain_image_preview(&mut app);
@@ -4419,7 +5465,7 @@ fn check_pixel_image_preview(protocol: ProtocolType, image_escape: &str) {
         },
         &mut app,
     );
-    assert!(app.image_preview.is_none());
+    assert!(app.session.image_preview.is_none());
 
     clear_composer(&mut app);
     let _ = std::fs::remove_dir_all(workspace);
@@ -4434,16 +5480,18 @@ fn clicking_image_placeholder_shows_details_without_graphics() {
     std::fs::write(&path, &bytes).unwrap();
     let draft = "before [Image #1] after";
     let mut app = test_app(draft, root.clone(), root.clone());
-    app.draft_image_attachments.push(DraftImageAttachment {
-        start: "before ".len(),
-        end: "before [Image #1]".len(),
-        local_path: path.clone(),
-    });
+    app.session
+        .draft_image_attachments
+        .push(DraftImageAttachment {
+            start: "before ".len(),
+            end: "before [Image #1]".len(),
+            local_path: path.clone(),
+        });
     let backend = ratatui::backend::TestBackend::new(100, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     let view = build_transcript_view(&app, 100);
     for protocol in [ProtocolType::Halfblocks, ProtocolType::Sixel] {
-        app.image_picker.set_protocol_type(protocol);
+        app.image_policy.picker.set_protocol_type(protocol);
         terminal
             .draw(|frame| render(frame, &mut app, &view))
             .unwrap();
@@ -4471,9 +5519,9 @@ fn clicking_image_placeholder_shows_details_without_graphics() {
             &mut app,
         );
         handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
-        assert!(app.image_preview.is_none());
-        assert_eq!(app.input, draft);
-        assert_eq!(app.draft_image_attachments[0].local_path, path);
+        assert!(app.session.image_preview.is_none());
+        assert_eq!(app.session.input, draft);
+        assert_eq!(app.session.draft_image_attachments[0].local_path, path);
     }
     clear_composer(&mut app);
     std::fs::remove_dir(&root).unwrap();
@@ -4493,72 +5541,211 @@ fn tool_result_execution_image_renders_inline_from_verified_workspace_bytes() {
         width_px: 2,
         height_px: 2,
     };
-    let decoded = decode_workspace_tool_image(
-        json!({
-            "root": display_path(workspace.as_path()),
-            "path": "generated.png",
-            "name": "generated.png",
-            "content": "",
-            "byteLen": bytes.len(),
-            "encoding": "base64",
-            "contentKind": "image",
-            "mimeType": "image/png",
-            "dataUrl": format!(
-                "data:image/png;base64,{}",
-                general_purpose::STANDARD.encode(bytes.as_slice())
-            )
-        }),
-        display_path(workspace.as_path()).as_str(),
-        &image,
-    )
-    .expect("verified workspace image");
     let mut app = test_app("", workspace.clone(), data_root.clone());
+    app.session.active_session = Some(TuiSession {
+        id: "image-session".into(),
+    });
+    let response = workspace_tool_image_response(&app.session.workspace_root, &image.path, &bytes);
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_reads = reads.clone();
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
+        handler_reads.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(frame["method"], "workspace_read_file");
+        let request = &frame["params"]["request"];
+        assert_eq!(request["sessionId"], "image-session");
+        assert_eq!(request["workspaceRoot"], response["root"]);
+        assert_eq!(request["path"], response["path"]);
+        response.clone()
+    }));
     let mut tool = test_tool_line(
         ToolActionKind::Read,
         "generated.png",
         vec![],
         vec![ToolResultState::SuccessWithOutput],
     );
-    tool.images.push(image.clone());
-    app.transcript.push(TranscriptLine::Tool(tool));
-    app.inline_images.insert(
-        image.key.clone(),
-        app.image_picker.new_resize_protocol(decoded),
+    tool.images.push(image);
+    app.session.transcript.push(TranscriptLine::tool(tool));
+    let text_view = build_transcript_view(&app, 80);
+    assert!(text_view.images.is_empty());
+    assert_eq!(
+        text_view
+            .lines
+            .iter()
+            .filter(|line| line.to_string().contains("[Open Image]"))
+            .count(),
+        1
     );
+    inline_images::prepare_visible(&mut app, &text_view, 32);
+    assert!(app.pending_inline_image.is_none());
+
+    enable_kitty_images(&mut app);
     let view = build_transcript_view(&app, 80);
     assert_eq!(view.images.len(), 1);
-    let backend = ratatui::backend::TestBackend::new(80, 24);
+    assert_eq!(
+        view.total_rows,
+        text_view.total_rows + u64::from(view.images[0].size.height)
+    );
+    assert_eq!(view.images[0].size.height, 20);
+    let backend = ratatui::backend::TestBackend::new(80, 32);
     let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app, &view))
+        .expect("render image placement");
+    let height = app.transcript_area.unwrap().height;
+    assert!(app.pending_inline_image.is_none());
+    inline_images::prepare_visible(&mut app, &view, height);
+    finish_inline_image(&mut app);
     terminal
         .draw(|frame| render(frame, &mut app, &view))
         .expect("render inline image");
     let rendered = test_buffer_text(terminal.backend().buffer());
-    assert!(rendered.contains("Path: generated.png"));
+    assert!(rendered.contains("[Open]") && rendered.contains("[Copy]"));
+    assert!(!rendered.contains("Path: generated.png"));
     assert!(
-        test_buffer_has_rgb_halfblock(terminal.backend().buffer()),
+        rendered.contains("\x1b_G"),
         "image anchor {}, scroll {}, transcript {:?}\n{rendered}",
         view.images[0].row,
-        app.transcript_scroll,
+        app.session.transcript_scroll,
         app.transcript_area
     );
     assert!(
-        app.text_layout
+        app.session
+            .text_layout
             .as_ref()
             .unwrap()
             .lines
             .iter()
-            .all(|row| !row.to_string().contains('▀')),
+            .all(|row| !row.to_string().contains('\u{10EEEE}')),
         "image cells must not leak into copied transcript text"
+    );
+
+    terminal.backend_mut().resize(36, 32);
+    let resized = build_transcript_view(&app, 36);
+    assert!(resized.images[0].size.height < view.images[0].size.height);
+    terminal
+        .draw(|frame| render(frame, &mut app, &resized))
+        .unwrap();
+    assert!(!test_buffer_text(terminal.backend().buffer()).contains("\u{10EEEE}"));
+    assert!(app.pending_inline_image.is_none());
+    let height = app.transcript_area.unwrap().height;
+    inline_images::prepare_visible(&mut app, &resized, height);
+    finish_inline_image(&mut app);
+    terminal
+        .draw(|frame| render(frame, &mut app, &resized))
+        .unwrap();
+    assert!(test_buffer_text(terminal.backend().buffer()).contains("\x1b_G"));
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        1,
+        "resize must reuse the verified source"
     );
 
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
 
+fn enable_kitty_images(app: &mut App) {
+    app.image_policy
+        .picker
+        .set_protocol_type(ProtocolType::Kitty);
+    app.image_policy.scrollback = true;
+}
+
+fn workspace_tool_image_response(root: &str, path: &str, bytes: &[u8]) -> Value {
+    json!({
+        "root": root,
+        "path": path,
+        "name": path,
+        "content": "",
+        "byteLen": bytes.len(),
+        "encoding": "base64",
+        "contentKind": "image",
+        "mimeType": "image/png",
+        "dataUrl": format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(bytes)),
+    })
+}
+
+fn finish_inline_image(app: &mut App) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while app.pending_inline_image.is_some() {
+        inline_images::poll(app);
+        assert!(Instant::now() < deadline, "inline image did not settle");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn pending_inline_image_is_discarded_when_its_session_or_source_changes() {
+    let path = PathBuf::from("D:/workspace");
+    let bytes = test_png_bytes();
+    let image = ToolImage {
+        key: "tool_image:call-image:0".into(),
+        path: "original.png".into(),
+        content_type: "image/png".into(),
+        sha256: format!("sha256:{:x}", Sha256::digest(&bytes)),
+        byte_length: bytes.len() as u64,
+        width_px: 2,
+        height_px: 2,
+    };
+    for (next_session, next_path) in [("B", "original.png"), ("A", "replacement.png")] {
+        let mut app = test_app("", path.clone(), path.clone());
+        enable_kitty_images(&mut app);
+        let (request_tx, request_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let bytes = bytes.clone();
+        app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
+            let request = &frame["params"]["request"];
+            request_tx.send(request.clone()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            workspace_tool_image_response(
+                request["workspaceRoot"].as_str().unwrap(),
+                request["path"].as_str().unwrap(),
+                &bytes,
+            )
+        }));
+        let mut source = image.clone();
+        for (session, image_path) in [("A", "original.png"), (next_session, next_path)] {
+            app.session.active_session = Some(TuiSession { id: session.into() });
+            source.path = image_path.into();
+            let mut tool = test_tool_line(
+                ToolActionKind::Read,
+                image_path,
+                vec![],
+                vec![ToolResultState::SuccessWithOutput],
+            );
+            tool.images.push(source.clone());
+            app.session.transcript = vec![TranscriptLine::tool(tool)];
+            if app.pending_inline_image.is_some() {
+                release_tx.send(()).unwrap();
+                assert!(inline_images::poll(&mut app));
+                assert!(app.inline_images.is_empty() && app.inline_image_errors.is_empty());
+            }
+            let view = build_transcript_view(&app, 80);
+            inline_images::prepare_visible(&mut app, &view, 24);
+            inline_images::poll(&mut app); // The test retained lookup replies immediately.
+            let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(request["sessionId"], session);
+            assert_eq!(request["path"], image_path);
+        }
+        release_tx.send(()).unwrap();
+        finish_inline_image(&mut app);
+        let entry = app.inline_images.get(&image.key).expect("current image");
+        assert!(entry.matches(
+            app.session.active_session.as_ref(),
+            &app.session.workspace_root,
+            &source
+        ));
+    }
+}
+
 #[test]
 fn execution_images_remain_visible_when_completed_tools_move_to_history() {
     let path = PathBuf::from("D:/workspace");
     let mut app = test_app("", path.clone(), path);
+    enable_kitty_images(&mut app);
+    app.session.active_session = Some(TuiSession {
+        id: "image-history".into(),
+    });
     let mut blocks = Vec::new();
     for (id, tool_name, sequence) in [("capture", "bash", 1), ("image-read", "read", 2)] {
         let mut tool = crate::tool_projection::transcript_page_tool_line(
@@ -4577,8 +5764,9 @@ fn execution_images_remain_visible_when_completed_tools_move_to_history() {
             width_px: 2,
             height_px: 2,
         });
-        app.transcript
-            .push(TranscriptLine::Tool(tool).for_run(Some("run"), false));
+        app.session
+            .transcript
+            .push(TranscriptLine::tool(tool).for_run(Some("run"), false));
         let mut block = run_block(
             &format!("tool:{id}"),
             sequence,
@@ -4605,17 +5793,140 @@ fn execution_images_remain_visible_when_completed_tools_move_to_history() {
             .into_iter()
             .skip(1),
     );
-    app.transcript_paging =
-        Some(TranscriptPagingState::open(transcript_test_page(blocks, None)).unwrap());
-    for _ in 0..2 {
+    let page = transcript_test_page(blocks, None);
+    app.session.transcript_paging = Some(TranscriptPagingState::open(page.clone()).unwrap());
+    for pass in 0..2 {
         sync_materialized_transcript_history(&mut app);
         let view = build_transcript_view(&app, 80);
         assert_eq!(view.images.len(), 2);
         let text = rendered_lines_text(&view.lines);
-        assert!(text.contains("Path: capture.png") && text.contains("Path: image-read.png"));
+        assert_eq!(
+            view.images
+                .iter()
+                .map(|item| item.image.path.as_str())
+                .collect::<Vec<_>>(),
+            ["capture.png", "image-read.png"]
+        );
         assert!(text.contains("Useful result"));
         assert!(!text.contains("command kept folded"));
+        if pass == 0 {
+            let rows = view
+                .images
+                .iter()
+                .map(|image| image.row)
+                .collect::<Vec<_>>();
+            session_views::park_foreground(&mut app);
+            session_views::restore(&mut app, "image-history");
+            let restored = build_transcript_view(&app, 80);
+            assert_eq!(
+                restored
+                    .images
+                    .iter()
+                    .map(|image| image.row)
+                    .collect::<Vec<_>>(),
+                rows
+            );
+        }
     }
+
+    // Reopening the projected history in a fresh app has no live tool results to copy.
+    let path = PathBuf::from("D:/workspace");
+    let mut reopened = test_app("", path.clone(), path);
+    reopened.session.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    sync_materialized_transcript_history(&mut reopened);
+    assert!(
+        !rendered_lines_text(&build_transcript_view(&reopened, 80).lines).contains("capture.png")
+    );
+
+    let image = centaeris_core::model::prepared_prompt::ExecutionModelInputImageRefV1 {
+        path: "capture.png".into(),
+        content_type: "image/png".into(),
+        sha256: format!("sha256:{:x}", Sha256::digest(test_png_bytes())),
+        byte_length: test_png_bytes().len() as u64,
+        width_px: 2,
+        height_px: 2,
+        placeholder: "[Image]".into(),
+    };
+    use centaeris_core::model::prepared_prompt::ModelInputImageSourceRefV1::ExecutionFile;
+    assert!(session_transcript::apply_history_media_refs(
+        &mut reopened.session,
+        vec![(
+            "capture".into(),
+            vec![ExecutionFile { image }],
+            vec!["clip.mp4".into()]
+        )],
+    )
+    .unwrap());
+    let text_fallback = build_transcript_view(&reopened, 80);
+    assert!(text_fallback.images.is_empty());
+    assert_eq!(
+        rendered_lines_text(&text_fallback.lines)
+            .matches("capture.png  [Open Image]")
+            .count(),
+        1
+    );
+    assert!(rendered_lines_text(&text_fallback.lines).contains("clip.mp4  [Open Video]"));
+    let surface = resume_panel_text(&mut reopened);
+    assert!(surface.contains("[Open Image]") && surface.contains("[Open Video]"));
+    enable_kitty_images(&mut reopened);
+    assert_eq!(build_transcript_view(&reopened, 80).images.len(), 1);
+}
+
+#[test]
+fn tool_image_open_uses_the_viewer_and_preserves_the_draft() {
+    let workspace = unique_test_dir("tool-image-open");
+    let path = workspace.join("generated.png");
+    let bytes = test_png_bytes();
+    std::fs::write(&path, &bytes).unwrap();
+    let mut app = test_app("Keep this draft", workspace.clone(), workspace.clone());
+    enable_kitty_images(&mut app);
+    let mut tool = test_tool_line(
+        ToolActionKind::Read,
+        "generated.png",
+        vec![],
+        vec![ToolResultState::SuccessWithOutput],
+    );
+    tool.images.push(ToolImage {
+        key: "tool_image:open:0".into(),
+        path: "generated.png".into(),
+        content_type: "image/png".into(),
+        sha256: format!("sha256:{:x}", Sha256::digest(&bytes)),
+        byte_length: bytes.len() as u64,
+        width_px: 2,
+        height_px: 2,
+    });
+    app.session.transcript.push(TranscriptLine::tool(tool));
+    let surface = resume_panel_text_at_height(&mut app, 32);
+    let (row, column) = surface
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.find("[Open]")
+                .map(|column| (row as u16, column as u16))
+        })
+        .expect("photo action");
+    send_mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.session.image_preview.is_none() && Instant::now() < deadline {
+        media::poll(&mut app);
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        matches!(app.session.image_preview, Some(ImagePreview::Pixels(_))),
+        "{:?}",
+        app.session.message
+    );
+    resume_panel_text_at_height(&mut app, 32);
+    send_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 0, 0);
+    assert!(app.session.image_preview.is_none());
+    assert_eq!(app.session.input, "Keep this draft");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_dir(&workspace).unwrap();
 }
 
 #[test]
@@ -4669,15 +5980,15 @@ fn command_panel_rows_accept_mouse_clicks() {
     handle_mouse(
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: area.x + 2,
+            column: area.x,
             row: area.y,
             modifiers: KeyModifiers::NONE,
         },
         &mut app,
     );
 
-    assert_eq!(app.input, "/help ");
-    assert_eq!(app.input_cursor, app.input.len());
+    assert_eq!(app.session.input, "/help ");
+    assert_eq!(app.session.input_cursor, app.session.input.len());
 }
 
 #[test]
@@ -4685,7 +5996,7 @@ fn user_message_and_composer_align_across_resizes_and_copy_cleanly() {
     let path = PathBuf::from("D:/workspace");
     let message = format!("你👩‍💻a\n好{}", "x".repeat(44));
     let mut app = test_app(&message, path.clone(), path);
-    app.transcript.extend([
+    app.session.transcript.extend([
         TranscriptLine::Summary("Earlier reply".into()),
         TranscriptLine::User(message.clone()),
         TranscriptLine::Summary("Later reply".into()),
@@ -4693,7 +6004,7 @@ fn user_message_and_composer_align_across_resizes_and_copy_cleanly() {
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(88, 24)).unwrap();
 
     for (width, height) in [(88, 24), (42, 24), (42, 16)] {
-        app.transcript_selection = None;
+        app.session.transcript_selection = None;
         terminal.backend_mut().resize(width, height);
         let view = build_transcript_view(&app, width);
         terminal
@@ -4709,25 +6020,22 @@ fn user_message_and_composer_align_across_resizes_and_copy_cleanly() {
         let (last_row, last_column) = view.layout.position(message_start + message.len());
         let last = history.y + last_row as u16;
         let last_composer_row = input.y + input.height - 1;
-        let bg = theme().user_prompt().bg.unwrap();
+        let bg = ratatui::style::Color::Reset;
         assert_eq!(history.x, 0);
-        assert_eq!(buffer[(history.x, input.y)].symbol(), "│");
-        assert_eq!(buffer[(width - 1, input.y)].symbol(), "│");
+        assert_eq!(buffer[(history.x, input.y)].symbol(), "❯");
+        assert_eq!(buffer[(width - 1, input.y)].symbol(), " ");
+        assert_eq!(buffer[(input.x, input.y)].bg, bg);
         for row in first..=last {
             assert_eq!(buffer[(history.x, row)].bg, bg);
             assert_eq!(buffer[(width - 2, row)].bg, bg);
         }
         for gap in [first - 1, last + 1] {
-            assert_ne!(buffer[(history.x, gap)].bg, bg);
-            assert_ne!(buffer[(width - 2, gap)].bg, bg);
             assert_eq!(buffer[(input.x, gap)].symbol(), " ");
         }
-        assert_eq!(buffer[(history.x + 2, first - 2)].symbol(), "E");
-        assert_eq!(buffer[(history.x + 2, last + 2)].symbol(), "L");
-        assert_ne!(buffer[(width - 1, first)].bg, bg);
+        assert_eq!(buffer[(history.x, first - 2)].symbol(), "E");
+        assert_eq!(buffer[(history.x, last + 2)].symbol(), "L");
         assert_eq!(input.x, history.x + text_column as u16);
         for row in [first, input.y] {
-            assert_eq!(buffer[(input.x - 3, row)].symbol(), " ");
             assert_eq!(buffer[(input.x - 2, row)].symbol(), "❯");
             assert_eq!(buffer[(input.x - 1, row)].symbol(), " ");
             assert_eq!(buffer[(input.x, row)].symbol(), "你");
@@ -4743,8 +6051,8 @@ fn user_message_and_composer_align_across_resizes_and_copy_cleanly() {
             .collect();
         assert_eq!(shortcut, "Enter send");
         assert_eq!(history.y, 1);
-        assert_eq!(shortcuts_row - last_composer_row, 2);
-        app.transcript_selection = Some(TextSelection {
+        assert_eq!(shortcuts_row - last_composer_row, 1);
+        app.session.transcript_selection = Some(TextSelection {
             anchor: view.layout.offset_at(text_row, text_column),
             head: view.layout.offset_at(last_row, last_column),
         });
@@ -4760,13 +6068,13 @@ fn input_height_uses_the_same_display_width_as_the_cursor() {
     let workspace = PathBuf::from("D:/workspace");
     let mut app = test_app("abc", workspace.clone(), workspace);
     assert_eq!(
-        input_row_count(&app, 8),
+        input_row_count(&app, 6),
         2,
         "the caret after a full row stays visible"
     );
 
-    app.input = "你好".to_string();
-    assert_eq!(input_row_count(&app, 8), 2, "wide text wraps by columns");
+    app.session.input = "你好".to_string();
+    assert_eq!(input_row_count(&app, 6), 2, "wide text wraps by columns");
 }
 
 #[test]
@@ -4786,11 +6094,16 @@ fn composer_rendering_uses_the_same_hard_wrap_as_mouse_mapping() {
 }
 
 #[test]
-fn composer_model_label_preserves_the_frame_after_resize() {
+fn footer_keeps_model_effort_and_shortcuts_after_resize() {
     let workspace = PathBuf::from("D:/workspace");
-    let mut app = test_app("first line\nsecond line", workspace.clone(), workspace);
+    let mut app = test_app(
+        "first line
+second line",
+        workspace.clone(),
+        workspace,
+    );
     app.model_effort = Some("low".to_string());
-    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 4)).unwrap();
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
 
     for (width, model) in [
         (80, Some("deepseek-flash")),
@@ -4798,28 +6111,28 @@ fn composer_model_label_preserves_the_frame_after_resize() {
         (32, None),
     ] {
         app.model_display = model.map(str::to_owned);
-        terminal.backend_mut().resize(width, 4);
+        terminal.backend_mut().resize(width, 16);
+        let view = build_transcript_view(&app, width);
         terminal
-            .draw(|frame| render_input(frame, frame.area(), &mut app))
+            .draw(|frame| render(frame, &mut app, &view))
             .unwrap();
-
         let buffer = terminal.backend().buffer();
-        let symbol = |column, row| buffer.cell((column, row)).unwrap().symbol();
-        assert_eq!(symbol(0, 0), "╭");
-        assert_eq!(symbol(width - 1, 0), "╮");
-        for row in 1..3 {
-            assert_eq!(symbol(0, row), "│");
-            assert_eq!(symbol(width - 1, row), "│");
-        }
-        assert_eq!(symbol(0, 3), "╰");
-        assert_eq!(symbol(width - 2, 3), "─");
-        assert_eq!(symbol(width - 1, 3), "╯");
+        let row_text = |row| {
+            (0..width)
+                .map(|col| buffer[(col, row)].symbol())
+                .collect::<String>()
+        };
+        let footer = row_text(15);
+        assert!(footer.starts_with("Enter send"));
         if model.is_some() {
-            let bottom: String = (1..width - 2).map(|column| symbol(column, 3)).collect();
-            assert!(bottom.contains("(low)"), "{bottom}");
-        } else {
-            assert!((1..width - 1).all(|column| symbol(column, 3) == "─"));
+            assert!(footer.trim_end().ends_with("(low)"));
         }
+        if width == 80 {
+            assert!(footer.contains("Shift+Enter newline"));
+            assert!(footer.contains("Ctrl+\\ Dashboard"));
+        }
+        assert!(row_text(14).contains("second line"));
+        assert_eq!(app.input_area.unwrap().bottom(), 15);
     }
 }
 
@@ -4840,14 +6153,14 @@ fn ctrl_c_closes_overlay_then_clears_input_then_exits_idle() {
     let workspace = unique_test_dir("workspace-ctrl-c");
     let data_root = unique_test_dir("data-ctrl-c");
     let mut app = test_app("draft", workspace.clone(), data_root.clone());
-    app.show_help = true;
+    app.session.show_help = true;
 
     assert!(!handle_ctrl_c(&mut app));
-    assert!(!app.show_help);
-    assert_eq!(app.input, "draft");
+    assert!(!app.session.show_help);
+    assert_eq!(app.session.input, "draft");
 
     assert!(!handle_ctrl_c(&mut app));
-    assert!(app.input.is_empty());
+    assert!(app.session.input.is_empty());
 
     assert!(handle_ctrl_c(&mut app));
     let _ = std::fs::remove_dir_all(workspace);
@@ -4861,8 +6174,8 @@ fn stop_command_is_silent_when_idle() {
     let mut app = test_app("/stop", workspace.clone(), data_root.clone());
 
     assert!(!handle_enter(&mut app));
-    assert!(app.input.is_empty());
-    assert!(app.message.is_none());
+    assert!(app.session.input.is_empty());
+    assert!(app.session.message.is_none());
     assert!(app.runtime.is_none());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
@@ -4873,13 +6186,14 @@ fn prepare_exit_does_not_locally_cancel_without_runtime() {
     let workspace = unique_test_dir("workspace-exit-running");
     let data_root = unique_test_dir("data-exit-running");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.active_agent_run_id = Some("agent-run-running".to_string());
-    app.active_agent_run_ids
+    app.session.active_agent_run_id = Some("agent-run-running".to_string());
+    app.session
+        .active_agent_run_ids
         .insert("agent-run-running".to_string());
 
     assert!(prepare_exit(&mut app));
     assert_eq!(
-        app.active_agent_run_id.as_deref(),
+        app.session.active_agent_run_id.as_deref(),
         Some("agent-run-running")
     );
     let _ = std::fs::remove_dir_all(workspace);
@@ -4904,20 +6218,25 @@ fn disconnected_runtime_allows_exit_without_waiting_for_a_response() {
 fn accepted_stop_keeps_observing_until_the_terminal_event() {
     let workspace = unique_test_dir("workspace-stop-accepted");
     let mut app = test_app("", workspace.clone(), workspace.clone());
-    app.active_session = Some(TuiSession {
+    app.session.active_session = Some(TuiSession {
         id: "session-running".into(),
     });
-    app.active_agent_run_id = Some("run-running".into());
-    app.active_agent_run_ids.insert("run-running".into());
-    app.process_state = RuntimeDisplayState::PendingPhase;
+    app.session.active_agent_run_id = Some("run-running".into());
+    app.session
+        .active_agent_run_ids
+        .insert("run-running".into());
+    app.session.process_state = RuntimeDisplayState::PendingPhase;
     app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
         assert_eq!(frame["method"], "_centaeris/session/agent-runs/cancel");
         json!({"cancelAccepted": true, "agentRun": {"agentRunId": "run-running", "status": "running"}})
     }));
     stop_active_agent_runs(&mut app, "tui_user_stop").expect("stop accepted");
-    assert_eq!(app.active_agent_run_id.as_deref(), Some("run-running"));
-    assert!(app.active_agent_run_ids.contains("run-running"));
-    assert_ne!(app.process_state, RuntimeDisplayState::Idle);
+    assert_eq!(
+        app.session.active_agent_run_id.as_deref(),
+        Some("run-running")
+    );
+    assert!(app.session.active_agent_run_ids.contains("run-running"));
+    assert_ne!(app.session.process_state, RuntimeDisplayState::Idle);
     run_event(
         &mut app,
         "run-running",
@@ -4925,8 +6244,8 @@ fn accepted_stop_keeps_observing_until_the_terminal_event() {
         "AgentRunInterrupted",
         json!({"reasonType": "cancelled"}),
     );
-    assert!(app.active_agent_run_id.is_none());
-    assert!(app.active_agent_run_ids.is_empty());
+    assert!(app.session.active_agent_run_id.is_none());
+    assert!(app.session.active_agent_run_ids.is_empty());
     let _ = std::fs::remove_dir_all(workspace);
 }
 
@@ -4934,15 +6253,18 @@ fn accepted_stop_keeps_observing_until_the_terminal_event() {
 fn terminal_stop_response_recovers_final_text_from_history_without_a_notification() {
     let workspace = unique_test_dir("workspace-stop-terminal-history");
     let mut app = test_app("", workspace.clone(), workspace.clone());
-    app.active_session = Some(TuiSession {
+    app.session.active_session = Some(TuiSession {
         id: "session-paged".into(),
     });
-    app.active_agent_run_id = Some("run-running".into());
-    app.active_agent_run_ids.insert("run-running".into());
-    app.process_state = RuntimeDisplayState::PendingPhase;
-    app.transcript
+    app.session.active_agent_run_id = Some("run-running".into());
+    app.session
+        .active_agent_run_ids
+        .insert("run-running".into());
+    app.session.process_state = RuntimeDisplayState::PendingPhase;
+    app.session
+        .transcript
         .push(TranscriptLine::Summary("Incomplete live text".into()));
-    app.pending_question = Some(PendingQuestion {
+    app.session.pending_question = Some(PendingQuestion {
         id: "old-question".into(),
         question: "Stale question".into(),
         options: Vec::new(),
@@ -4972,17 +6294,17 @@ fn terminal_stop_response_recovers_final_text_from_history_without_a_notificatio
     ));
     stop_active_agent_runs(&mut app, "tui_user_stop").expect("natural completion won");
     assert_eq!(
-        app.transcript,
+        app.session.transcript,
         vec![TranscriptLine::Summary(
             "Final answer from committed history".into()
         )]
     );
-    assert!(app.active_agent_run_id.is_none());
-    assert!(app.active_agent_run_ids.is_empty());
-    assert!(app.pending_question.is_none());
-    assert_eq!(app.process_state, RuntimeDisplayState::Idle);
+    assert!(app.session.active_agent_run_id.is_none());
+    assert!(app.session.active_agent_run_ids.is_empty());
+    assert!(app.session.pending_question.is_none());
+    assert_eq!(app.session.process_state, RuntimeDisplayState::Idle);
     assert!(
-        app.completed_agent_run_ids.is_empty(),
+        app.session.completed_agent_run_ids.is_empty(),
         "history refresh must not fabricate cancellation events"
     );
     let _ = std::fs::remove_dir_all(workspace);
@@ -4992,12 +6314,14 @@ fn terminal_stop_response_recovers_final_text_from_history_without_a_notificatio
 fn cancel_receipt_rejects_the_unsupported_cancelled_field() {
     let workspace = unique_test_dir("workspace-stop-accepted");
     let mut app = test_app("", workspace.clone(), workspace.clone());
-    app.active_session = Some(TuiSession {
+    app.session.active_session = Some(TuiSession {
         id: "session-running".into(),
     });
-    app.active_agent_run_id = Some("run-running".into());
-    app.active_agent_run_ids.insert("run-running".into());
-    app.process_state = RuntimeDisplayState::PendingPhase;
+    app.session.active_agent_run_id = Some("run-running".into());
+    app.session
+        .active_agent_run_ids
+        .insert("run-running".into());
+    app.session.process_state = RuntimeDisplayState::PendingPhase;
     app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
         assert_eq!(frame["method"], "_centaeris/session/agent-runs/cancel");
         json!({"cancelled": true, "agentRun": {"agentRunId": "run-running", "status": "running"}})
@@ -5012,20 +6336,28 @@ fn cancel_receipt_rejects_the_unsupported_cancelled_field() {
 fn failed_observation_refresh_preserves_unknown_state_and_can_retry() {
     let workspace = unique_test_dir("workspace-reconnect-refresh");
     let mut app = test_app("", workspace.clone(), workspace.clone());
-    app.active_session = Some(TuiSession {
+    app.session.active_session = Some(TuiSession {
         id: "session-paged".into(),
     });
-    app.active_agent_run_id = Some("run-running".into());
-    app.active_agent_run_ids.insert("run-running".into());
-    app.process_state = RuntimeDisplayState::ConnectionLost;
+    app.session.active_agent_run_id = Some("run-running".into());
+    app.session
+        .active_agent_run_ids
+        .insert("run-running".into());
+    app.session.process_state = RuntimeDisplayState::ConnectionLost;
     app.runtime = Some(RuntimeClient::from_test_request_handler(|_| json!({})));
     assert!(refresh_current_session_observation(&mut app).is_err());
     assert!(
         app.runtime.is_none(),
         "failed refresh must permit a fresh connection"
     );
-    assert_eq!(app.process_state, RuntimeDisplayState::ConnectionLost);
-    assert_eq!(app.active_agent_run_id.as_deref(), Some("run-running"));
+    assert_eq!(
+        app.session.process_state,
+        RuntimeDisplayState::ConnectionLost
+    );
+    assert_eq!(
+        app.session.active_agent_run_id.as_deref(),
+        Some("run-running")
+    );
     app.runtime = Some(RuntimeClient::from_test_request_handler(
         |frame| match frame["method"].as_str().unwrap() {
             "_centaeris/session/agent-runs/attach" => {
@@ -5043,9 +6375,9 @@ fn failed_observation_refresh_preserves_unknown_state_and_can_retry() {
     ));
     refresh_current_session_observation(&mut app).expect("authoritative refresh");
     assert!(app.runtime.is_some());
-    assert_eq!(app.process_state, RuntimeDisplayState::Idle);
-    assert!(app.active_agent_run_id.is_none());
-    assert!(app.active_agent_run_ids.is_empty());
+    assert_eq!(app.session.process_state, RuntimeDisplayState::Idle);
+    assert!(app.session.active_agent_run_id.is_none());
+    assert!(app.session.active_agent_run_ids.is_empty());
     let _ = std::fs::remove_dir_all(workspace);
 }
 
@@ -5056,11 +6388,12 @@ fn runtime_disconnect_keeps_run_identity_and_marks_observation_unknown() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     app.runtime = Some(RuntimeClient::from_test_event_receiver(event_rx, true));
-    app.active_agent_run_id = Some("agent-run-disconnected".to_string());
-    app.active_agent_run_ids
+    app.session.active_agent_run_id = Some("agent-run-disconnected".to_string());
+    app.session
+        .active_agent_run_ids
         .insert("agent-run-disconnected".to_string());
-    app.agent_run_started_at = Some(Instant::now());
-    app.process_state = RuntimeDisplayState::Thinking;
+    app.session.agent_run_started_at = Some(Instant::now());
+    app.session.process_state = RuntimeDisplayState::Thinking;
     event_tx
         .send(RuntimeEvent::Error(
             "Runtime Server connection closed".to_string(),
@@ -5070,14 +6403,17 @@ fn runtime_disconnect_keeps_run_identity_and_marks_observation_unknown() {
     assert!(drain_runtime_events(&mut app));
     assert!(app.runtime.is_none(), "next command must reconnect");
     assert_eq!(
-        app.active_agent_run_id.as_deref(),
+        app.session.active_agent_run_id.as_deref(),
         Some("agent-run-disconnected")
     );
-    assert!(app.active_agent_run_ids.contains("agent-run-disconnected"));
-    assert!(app.agent_run_started_at.is_some());
-    assert_ne!(app.process_state, RuntimeDisplayState::Idle);
+    assert!(app
+        .session
+        .active_agent_run_ids
+        .contains("agent-run-disconnected"));
+    assert!(app.session.agent_run_started_at.is_some());
+    assert_ne!(app.session.process_state, RuntimeDisplayState::Idle);
     assert!(matches!(
-        app.transcript.last(),
+        app.session.transcript.last(),
         Some(TranscriptLine::Error(message)) if message == "Runtime Server connection closed"
     ));
 
@@ -5090,18 +6426,25 @@ fn esc_sets_confirmation_while_running_and_any_key_cancels_it() {
     let workspace = unique_test_dir("workspace-esc-confirm");
     let data_root = unique_test_dir("data-esc-confirm");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.active_agent_run_id = Some("agent-run-running".to_string());
-    app.active_agent_run_ids
+    app.session.active_agent_run_id = Some("agent-run-running".to_string());
+    app.session
+        .active_agent_run_ids
         .insert("agent-run-running".to_string());
 
     handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
-    assert!(app.pending_esc_stop, "first Esc must arm the confirmation");
+    assert!(
+        app.session.pending_esc_stop,
+        "first Esc must arm the confirmation"
+    );
 
     handle_key(
         KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         &mut app,
     );
-    assert!(!app.pending_esc_stop, "any other key must disarm it");
+    assert!(
+        !app.session.pending_esc_stop,
+        "any other key must disarm it"
+    );
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -5111,25 +6454,27 @@ fn esc_twice_while_running_stops_without_exiting() {
     let workspace = unique_test_dir("workspace-esc-stop");
     let data_root = unique_test_dir("data-esc-stop");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.active_agent_run_id = Some("agent-run-running".to_string());
-    app.active_agent_run_ids
+    app.session.active_agent_run_id = Some("agent-run-running".to_string());
+    app.session
+        .active_agent_run_ids
         .insert("agent-run-running".to_string());
 
     handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
-    assert!(app.pending_esc_stop);
+    assert!(app.session.pending_esc_stop);
     handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
     assert!(
-        !app.pending_esc_stop,
+        !app.session.pending_esc_stop,
         "second Esc must consume the confirmation"
     );
     assert!(
-        app.message
+        app.session
+            .message
             .as_deref()
             .is_some_and(|message| message.contains("session")),
         "stop failure without runtime must surface a message"
     );
     assert_eq!(
-        app.active_agent_run_id.as_deref(),
+        app.session.active_agent_run_id.as_deref(),
         Some("agent-run-running")
     );
     let _ = std::fs::remove_dir_all(workspace);
@@ -5143,8 +6488,8 @@ fn esc_while_idle_is_a_no_op() {
     let mut app = test_app("", workspace.clone(), data_root.clone());
 
     handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
-    assert!(!app.pending_esc_stop);
-    assert!(app.message.is_none());
+    assert!(!app.session.pending_esc_stop);
+    assert!(app.session.message.is_none());
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -5170,9 +6515,9 @@ fn transcript_to_lines_renders_closed_turn_for_owned_viewport() {
     assert_eq!(
         rendered,
         vec![
-            "  ❯ build".to_string(),
+            "❯ build".to_string(),
             String::new(),
-            "  searched files".to_string(),
+            "searched files".to_string(),
             String::new(),
             "  └ 再检查 tests".to_string(),
             "  Error: boom".to_string(),
@@ -5249,13 +6594,14 @@ fn markdown_table_aligns_columns_and_retains_copyable_cells_when_narrow() {
 fn streaming_table_holds_its_header_until_rows_can_be_laid_out_together() {
     let path = PathBuf::from("D:/workspace");
     let mut app = test_app("", path.clone(), path);
-    app.assistant_buffer = "| Header | State |\n".into();
+    app.session.assistant_buffer = "| Header | State |\n".into();
     assert!(!materialize_assistant_prefix(&mut app));
-    app.assistant_buffer
+    app.session
+        .assistant_buffer
         .push_str("| --- | --- |\n| Editor | Ready |\n");
     assert!(!materialize_assistant_prefix(&mut app));
-    assert!(rendered_lines_text(&build_assistant_live_lines(&app, 80)).contains("┼"));
-    app.assistant_buffer.push('\n');
+    assert!(rendered_lines_text(&build_assistant_live_lines(&app.session, 80)).contains("┼"));
+    app.session.assistant_buffer.push('\n');
     assert!(materialize_assistant_prefix(&mut app));
     let settled = rendered_lines_text(&build_transcript_view(&app, 80).lines);
     assert_eq!(settled.matches("Header").count(), 1);
@@ -5288,16 +6634,16 @@ fn assistant_text_is_the_tool_group_boundary() {
         vec![ToolResultState::SuccessNoOutput],
     );
     third.key = "tool_call:third".to_string();
-    app.transcript = vec![
-        TranscriptLine::Tool(first),
+    app.session.transcript = vec![
+        TranscriptLine::tool(first),
         TranscriptLine::Subagent(SubagentTranscriptLine {
             title: "research".to_string(),
             summary: "done".to_string(),
             status: "result".to_string(),
         }),
-        TranscriptLine::Tool(second),
+        TranscriptLine::tool(second),
         TranscriptLine::Summary("Next step".to_string()),
-        TranscriptLine::Tool(third),
+        TranscriptLine::tool(third),
     ];
 
     let view = build_transcript_view(&app, 80);
@@ -5323,8 +6669,10 @@ fn tui_consumes_core_committed_turn_projection() {
         let mut app = test_app("", workspace.clone(), data_root.clone());
         let turn_id = format!("turn-{suffix}");
         let agent_run_id = format!("agent-run-{suffix}");
-        app.active_agent_run_id = Some(agent_run_id.clone());
-        app.active_agent_run_ids.insert(agent_run_id.clone());
+        app.session.active_agent_run_id = Some(agent_run_id.clone());
+        app.session
+            .active_agent_run_ids
+            .insert(agent_run_id.clone());
         for projection in [
             json!({
                 "type": "session_event",
@@ -5370,13 +6718,13 @@ fn tui_consumes_core_committed_turn_projection() {
                 }
             }),
         ] {
-            apply_stream_payload(&mut app, &projection);
+            apply_stream_payload(&mut app.session, &projection);
         }
-        assert!(app.transcript.iter().any(|line| matches!(
+        assert!(app.session.transcript.iter().any(|line| matches!(
             line.content(),
             TranscriptLine::LiveAssistant { markdown, .. } if markdown == "answer"
         )));
-        assert!(app.active_agent_run_id.is_none());
+        assert!(app.session.active_agent_run_id.is_none());
         let _ = std::fs::remove_dir_all(workspace);
         let _ = std::fs::remove_dir_all(data_root);
     }
@@ -5395,29 +6743,33 @@ fn inline_image_placeholder_is_atomic_and_serializes_in_body_order() {
     let second_image_path = data_root.join("second.png");
     std::fs::write(first_image_path.as_path(), b"first").expect("first image fixture");
     std::fs::write(second_image_path.as_path(), b"second").expect("second image fixture");
-    app.draft_image_attachments.push(DraftImageAttachment {
-        start: 12,
-        end: 22,
-        local_path: second_image_path,
-    });
-    app.draft_image_attachments.push(DraftImageAttachment {
-        start: 1,
-        end: 11,
-        local_path: first_image_path,
-    });
-    app.input_cursor = 11;
+    app.session
+        .draft_image_attachments
+        .push(DraftImageAttachment {
+            start: 12,
+            end: 22,
+            local_path: second_image_path,
+        });
+    app.session
+        .draft_image_attachments
+        .push(DraftImageAttachment {
+            start: 1,
+            end: 11,
+            local_path: first_image_path,
+        });
+    app.session.input_cursor = 11;
 
     move_cursor_left(&mut app);
-    assert_eq!(app.input_cursor, 1);
+    assert_eq!(app.session.input_cursor, 1);
     move_cursor_right(&mut app);
-    assert_eq!(app.input_cursor, 11);
+    assert_eq!(app.session.input_cursor, 11);
 
     let request = build_prompt_request(
         &TuiSession {
             id: "session-image".to_string(),
         },
-        app.input.as_str(),
-        app.draft_image_attachments.as_slice(),
+        app.session.input.as_str(),
+        app.session.draft_image_attachments.as_slice(),
         "session-prompt:image-action",
     );
     assert_eq!(request["message"], "a[Image #2]b[Image #1]c");
@@ -5425,10 +6777,10 @@ fn inline_image_placeholder_is_atomic_and_serializes_in_body_order() {
     assert_eq!(request["attachments"][1]["placeholder"], "[Image #1]");
 
     backspace_at_cursor(&mut app);
-    assert_eq!(app.input, "ab[Image #1]c");
-    assert_eq!(app.draft_image_attachments.len(), 1);
+    assert_eq!(app.session.input, "ab[Image #1]c");
+    assert_eq!(app.session.draft_image_attachments.len(), 1);
     clear_composer(&mut app);
-    assert_eq!(app.next_image_number, 1);
+    assert_eq!(app.session.next_image_number, 1);
     let _ = std::fs::remove_dir_all(workspace);
     let _ = std::fs::remove_dir_all(data_root);
 }
@@ -5461,97 +6813,15 @@ fn command_requests_keep_the_user_actions_operation_identity() {
 }
 
 fn test_app(input: &str, workspace_root: PathBuf, _data_root: PathBuf) -> App {
-    App {
-        workspace_root: display_path(workspace_root.as_path()),
-        session_cwd: display_path(workspace_root.as_path()),
-        model_provider_id: None,
-        model_display: None,
-        model_effort: None,
-        runtime: None,
-        pending_model_request: None,
-        runtime_config_refresh_pending: false,
-        model_credential_prompt: None,
-        model_panel: None,
-        model_catalog: Vec::new(),
-        model_saved_composer: None,
-        model_saved_panel: None,
-        model_provider_hit_regions: Vec::new(),
-        model_list_area: None,
-        model_list_offset: 0,
-        session_picker: None,
-        home_risk_pending: false,
-        home_risk_panel: None,
-        input: input.to_string(),
-        input_cursor: input.len(),
-        input_selection_anchor: None,
-        input_area: None,
-        input_layout: None,
-        input_scroll: 0,
-        input_scroll_override: false,
-        edit_history: editing::History::default(),
-        retired_image_paths: HashSet::new(),
-        mouse_state: mouse::State::default(),
-        clipboard: Box::<TestClipboard>::default(),
-        panel_area: None,
-        draft_image_attachments: Vec::new(),
-        next_image_number: 1,
-        image_picker: halfblock_image_picker(),
-        output_preview: HashMap::new(),
-        expanded_bash_tools: HashSet::new(),
-        image_preview: None,
-        image_preview_area: None,
-        inline_images: HashMap::new(),
-        inline_image_cache_order: VecDeque::new(),
-        inline_image_cache_bytes: 0,
-        inline_image_errors: HashMap::new(),
-        pending_esc_stop: false,
-        message: None,
-        show_help: false,
-        selected_command: 0,
-        active_session: None,
-        parked_sessions: HashMap::new(),
-        read_only_session: None,
-        transcript: Vec::new(),
-        transcript_paging: None,
-        transcript_history_len: 0,
-        transcript_revision: 0,
-        transcript_layout_cache: None,
-        transcript_scroll: 0,
-        transcript_max_scroll: 0,
-        transcript_follow_bottom: true,
-        snapshot_revisions: HashMap::new(),
-        transcript_area: None,
-        text_layout: None,
-        text_scroll: 0,
-        transcript_viewport: None,
-        transcript_selection: None,
-        mouse_drag: None,
-        tool_projection: ToolProjection::default(),
-        pending_subagent_lines: Vec::new(),
-        assistant_buffer: String::new(),
-        assistant_emitted_bytes: 0,
-        assistant_tail_in_code_block: false,
-        assistant_stream_started: false,
-        assistant_stream_start: None,
-        presentation_run_id: None,
-        assistant_run_id: None,
-        assistant_is_final: false,
-        run_activity: HashMap::new(),
-        render_width: 80,
-        active_tool_label: None,
-        active_agent_run_id: None,
-        active_agent_run_ids: HashSet::new(),
-        completed_agent_run_ids: HashSet::new(),
-        seen_subagent_ids: HashSet::new(),
-        live_subagent_ids: HashSet::new(),
-        seen_stream_event_ids: HashSet::new(),
-        agent_run_started_at: None,
-        process_state: RuntimeDisplayState::Idle,
-        status_usage: status_usage::StatusUsage::default(),
-        status_easter_egg: StatusEasterEgg::Available,
-        pending_question: None,
-        tool_protocol_error: false,
-    }
+    let mut app = App::new(AppConfig {
+        session_cwd: display_path(&workspace_root),
+        workspace_root,
+        warn_home_on_first_prompt: false,
+    });
+    app.clipboard = Box::<TestClipboard>::default();
+    app.session.input = input.to_owned();
+    app.session.input_cursor = input.len();
+    app
 }
 
 fn rendered_lines_text(lines: &[Line<'static>]) -> String {
@@ -5588,14 +6858,6 @@ fn test_buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
         .join("\n")
 }
 
-fn test_buffer_has_rgb_halfblock(buffer: &ratatui::buffer::Buffer) -> bool {
-    buffer.content.iter().any(|cell| {
-        cell.symbol() == "▀"
-            && (matches!(cell.fg, ratatui::style::Color::Rgb(_, _, _))
-                || matches!(cell.bg, ratatui::style::Color::Rgb(_, _, _)))
-    })
-}
-
 fn unique_test_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "centaeris-tui-main-{label}-{}-{}",
@@ -5620,7 +6882,7 @@ fn reasoning_stays_hidden_across_final_and_updates() {
         })
     };
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &reasoning("r1", "private process text"),
         Some("run"),
     );
@@ -5628,21 +6890,22 @@ fn reasoning_stays_hidden_across_final_and_updates() {
     assert!(!rendered_lines_text(&first.lines).contains("Thoughts"));
     assert!(first.source_rows.is_empty());
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"f", "type":"Final", "payload":{"content":"Answer"}}),
         Some("run"),
     );
     assert!(!rendered_lines_text(&build_transcript_view(&app, 80).lines)
         .contains("private process text"));
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &reasoning("r2", "updated process text"),
         Some("run"),
     );
     assert!(!rendered_lines_text(&build_transcript_view(&app, 80).lines)
         .contains("updated process text"));
-    assert!(app.transcript.iter().any(|line| matches!(line, TranscriptLine::Reasoning { text, .. } if text == "updated process text")));
+    assert!(app.session.transcript.iter().any(|line| matches!(line, TranscriptLine::Reasoning { text, .. } if text == "updated process text")));
     assert!(!app
+        .session
         .transcript
         .iter()
         .any(|line| matches!(line, TranscriptLine::Error(_))));
@@ -5653,17 +6916,18 @@ fn model_snapshot_restores_reasoning_and_answer_without_an_unsupported_event() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"snapshot", "type":"ModelSnapshot", "turnId":"turn", "payload":{
             "revision":1,"text":"restored answer", "reasoning":{"blockId":"reasoning:req","requestId":"req","text":"restored thought"}
         }}),
         Some("run"),
     );
-    assert_eq!(app.assistant_buffer, "restored answer");
+    assert_eq!(app.session.assistant_buffer, "restored answer");
     assert!(
         !rendered_lines_text(&build_transcript_view(&app, 80).lines).contains("restored thought")
     );
     assert!(!app
+        .session
         .transcript
         .iter()
         .any(|line| matches!(line, TranscriptLine::Error(_))));
@@ -5697,7 +6961,7 @@ fn historical_reasoning_has_no_rows_or_focus_after_projection_refresh() {
         ],
         None,
     );
-    app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    app.session.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
     sync_materialized_transcript_history(&mut app);
     let view = build_transcript_view(&app, 80);
     assert!(!rendered_lines_text(&view.lines).contains("history thought"));
@@ -5714,7 +6978,7 @@ fn reasoning_cannot_receive_tool_keyboard_focus() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"r","type":"Reasoning","payload":{
             "blockId":"reasoning:req","requestId":"req","text":"reading thought","status":"streaming"
         }}),
@@ -5723,7 +6987,7 @@ fn reasoning_cannot_receive_tool_keyboard_focus() {
     let view = build_transcript_view(&app, 80);
     assert!(view.source_rows.is_empty());
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"final","type":"Final","payload":{"content":"answer"}}),
         Some("run"),
     );
@@ -5745,18 +7009,18 @@ fn stale_model_snapshot_cannot_overwrite_newer_text_and_unknown_fields_fail() {
             None,
         )
         .unwrap();
-        apply_stream_payload_for_agent_run(&mut app, &event, Some("run"));
+        apply_stream_payload_for_agent_run(&mut app.session, &event, Some("run"));
     }
-    assert_eq!(app.assistant_buffer, "new");
+    assert_eq!(app.session.assistant_buffer, "new");
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"bad","type":"Reasoning","payload":{
             "blockId":"reasoning:req","requestId":"req","text":"bad","status":"streaming","unexpected":true
         }}),
         Some("run"),
     );
     assert!(matches!(
-        app.transcript.last(),
+        app.session.transcript.last(),
         Some(TranscriptLine::Error(_))
     ));
 }
@@ -5766,7 +7030,7 @@ fn hidden_reasoning_does_not_split_tools_or_leave_spacing() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
     let make = |id: &str| {
-        TranscriptLine::Tool(crate::tool_projection::transcript_page_tool_line(
+        TranscriptLine::tool(crate::tool_projection::transcript_page_tool_line(
             id,
             "read",
             TranscriptBlockStatusV1::Completed,
@@ -5774,7 +7038,7 @@ fn hidden_reasoning_does_not_split_tools_or_leave_spacing() {
             None,
         ))
     };
-    app.transcript = vec![
+    app.session.transcript = vec![
         make("a"),
         TranscriptLine::Reasoning {
             key: "r".into(),
@@ -5784,7 +7048,7 @@ fn hidden_reasoning_does_not_split_tools_or_leave_spacing() {
         make("b"),
     ];
     let with = build_transcript_view(&app, 80);
-    app.transcript.remove(1);
+    app.session.transcript.remove(1);
     let without = build_transcript_view(&app, 80);
     assert_eq!(with.lines, without.lines);
     assert_eq!(with.source_rows, without.source_rows);
@@ -5816,7 +7080,8 @@ fn automatic_tools_preserve_follow_mode_through_layout_and_new_output() {
     for following in [true, false] {
         let path = PathBuf::from("D:/presentation-test");
         let mut app = test_app("", path.clone(), path);
-        app.transcript
+        app.session
+            .transcript
             .push(TranscriptLine::Summary("previous output\n".repeat(40)));
         let tool = test_tool_line(
             ToolActionKind::Read,
@@ -5824,13 +7089,14 @@ fn automatic_tools_preserve_follow_mode_through_layout_and_new_output() {
             vec![],
             vec![ToolResultState::SuccessNoOutput],
         );
-        app.transcript.push(TranscriptLine::Tool(tool));
-        app.transcript_follow_bottom = following;
-        app.transcript_scroll = 3;
+        app.session.transcript.push(TranscriptLine::tool(tool));
+        app.session.transcript_follow_bottom = following;
+        app.session.transcript_scroll = 3;
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 10)).unwrap();
         for _ in 0..2 {
-            assert_eq!(app.transcript_follow_bottom, following);
-            app.transcript
+            assert_eq!(app.session.transcript_follow_bottom, following);
+            app.session
+                .transcript
                 .push(TranscriptLine::Summary("new output\n".repeat(4)));
             terminal
                 .draw(|frame| {
@@ -5838,11 +7104,14 @@ fn automatic_tools_preserve_follow_mode_through_layout_and_new_output() {
                     render_transcript(frame, frame.area(), &mut app, &view);
                 })
                 .unwrap();
-            assert_eq!(app.transcript_follow_bottom, following);
+            assert_eq!(app.session.transcript_follow_bottom, following);
             if following {
-                assert_eq!(app.transcript_scroll, app.transcript_max_scroll);
+                assert_eq!(
+                    app.session.transcript_scroll,
+                    app.session.transcript_max_scroll
+                );
             } else {
-                assert_eq!(app.transcript_scroll, 3);
+                assert_eq!(app.session.transcript_scroll, 3);
             }
         }
     }
@@ -5859,32 +7128,33 @@ fn automatic_preview_resize_preserves_detached_reading_anchor() {
         vec![ToolResultState::SuccessWithOutput],
     );
     tool.full_text = Some("中".repeat(30000));
-    app.transcript.push(TranscriptLine::Tool(tool));
-    app.transcript
+    app.session.transcript.push(TranscriptLine::tool(tool));
+    app.session
+        .transcript
         .push(TranscriptLine::Summary("reading anchor\n".repeat(4)));
-    app.transcript_follow_bottom = false;
+    app.session.transcript_follow_bottom = false;
     let old = build_cached_transcript_view(&mut app, 80);
     let at = old
         .lines
         .iter()
         .position(|l| rendered_lines_text(std::slice::from_ref(l)).contains("reading anchor"))
         .unwrap();
-    app.transcript_scroll = old.lines[..at]
+    app.session.transcript_scroll = old.lines[..at]
         .iter()
         .map(|l| u64::from(paragraph_line_count(std::slice::from_ref(l), 80)))
         .sum();
-    invalidate_transcript_layout(&mut app);
+    invalidate_transcript_layout(&mut app.session);
     let next = build_cached_transcript_view(&mut app, 80);
-    assert!(
-        rendered_lines_text(&transcript_render_window(&next, app.transcript_scroll, 1).lines)
-            .contains("reading anchor")
-    );
-    let resized = build_cached_transcript_view(&mut app, 45);
     assert!(rendered_lines_text(
-        &transcript_render_window(&resized, app.transcript_scroll, 1).lines
+        &transcript_render_window(&next, app.session.transcript_scroll, 1).lines
     )
     .contains("reading anchor"));
-    assert!(!app.transcript_follow_bottom);
+    let resized = build_cached_transcript_view(&mut app, 45);
+    assert!(rendered_lines_text(
+        &transcript_render_window(&resized, app.session.transcript_scroll, 1).lines
+    )
+    .contains("reading anchor"));
+    assert!(!app.session.transcript_follow_bottom);
 }
 
 #[test]
@@ -5898,16 +7168,16 @@ fn automatic_preview_poll_preserves_reading() {
         vec![ToolResultState::SuccessWithOutput],
     );
     tool.full_text = Some((0..4000).map(|i| format!("中文 output {i:04}\n")).collect());
-    app.transcript.push(TranscriptLine::Tool(tool));
-    app.transcript_follow_bottom = false;
-    invalidate_transcript_layout(&mut app);
+    app.session.transcript.push(TranscriptLine::tool(tool));
+    app.session.transcript_follow_bottom = false;
+    invalidate_transcript_layout(&mut app.session);
     let old = build_cached_transcript_view(&mut app, 80);
-    app.transcript_scroll = 0;
-    let old_scroll = app.transcript_scroll;
+    app.session.transcript_scroll = 0;
+    let old_scroll = app.session.transcript_scroll;
     assert!(!output_preview::poll(&mut app));
     let next = build_cached_transcript_view(&mut app, 80);
     assert_eq!(next.total_rows, old.total_rows);
-    assert!(app.transcript_scroll.abs_diff(old_scroll) <= 2);
+    assert!(app.session.transcript_scroll.abs_diff(old_scroll) <= 2);
 }
 
 #[test]
@@ -5923,8 +7193,8 @@ fn automatic_preview_hides_machine_framing() {
     tool.full_text = Some("machine header\n正文\nContinuation: complete".into());
     tool.readable_range = Some((15, 6));
     tool.duration_ms = Some(250);
-    app.transcript.push(TranscriptLine::Tool(tool));
-    invalidate_transcript_layout(&mut app);
+    app.session.transcript.push(TranscriptLine::tool(tool));
+    invalidate_transcript_layout(&mut app.session);
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
     let draw = |terminal: &mut Terminal<ratatui::backend::TestBackend>, app: &mut App| {
         terminal
@@ -5946,7 +7216,7 @@ fn automatic_preview_hides_machine_framing() {
     assert!(!screen.contains("Finished") && !screen.contains("0.25s"));
     let preview = output_preview::preview_lines(
         &app,
-        match app.transcript[0].content() {
+        match app.session.transcript[0].content() {
             TranscriptLine::Tool(tool) => tool,
             _ => panic!(),
         },
@@ -5970,7 +7240,7 @@ fn referenced_tool_renders_only_its_title_without_preview_hint_row() {
         "Read README.md".into(),
         Some("4230"),
     );
-    let lines = transcript_to_lines(&[TranscriptLine::Tool(tool)], 100);
+    let lines = transcript_to_lines(&[TranscriptLine::tool(tool)], 100);
     let visible: Vec<_> = lines
         .iter()
         .filter(|line| {
@@ -5993,7 +7263,7 @@ fn tool_visual_hierarchy_marks_outcome_and_emphasizes_action() {
         (ToolResultState::Denied, ratatui::style::Color::Red),
     ] {
         let tool = test_tool_line(ToolActionKind::Read, "src/main.rs", vec![], vec![state]);
-        let lines = transcript_to_lines(&[TranscriptLine::Tool(tool)], 100);
+        let lines = transcript_to_lines(&[TranscriptLine::tool(tool)], 100);
         assert_eq!(lines[0].spans[1].style.fg, Some(color));
         assert!(lines[0]
             .spans
@@ -6006,7 +7276,7 @@ fn tool_visual_hierarchy_marks_outcome_and_emphasizes_action() {
 fn agent_run_completion_folds_process_but_keeps_final_answer() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
-    app.active_agent_run_id = Some("run-a".into());
+    app.session.active_agent_run_id = Some("run-a".into());
     for (id, kind, payload) in [
         (
             "stage",
@@ -6016,7 +7286,7 @@ fn agent_run_completion_folds_process_but_keeps_final_answer() {
         ("answer", "Final", json!({"content":"The result is ready"})),
     ] {
         apply_session_event(
-            &mut app,
+            &mut app.session,
             &json!({"id":id,"type":kind,"payload":payload}),
             Some("run-a"),
         );
@@ -6024,7 +7294,7 @@ fn agent_run_completion_folds_process_but_keeps_final_answer() {
     let running = rendered_lines_text(&build_transcript_view(&app, 80).lines);
     assert!(running.contains("Inspecting source"));
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"complete","type":"AgentRunCompleted","payload":{}}),
         Some("run-a"),
     );
@@ -6036,7 +7306,7 @@ fn agent_run_completion_folds_process_but_keeps_final_answer() {
 
 fn run_event(app: &mut App, run: &str, id: &str, kind: &str, payload: Value) {
     apply_session_event(
-        app,
+        &mut app.session,
         &json!({"id":id,"type":kind,"payload":payload}),
         Some(run),
     );
@@ -6063,7 +7333,7 @@ fn run_terminal_states_keep_results_and_do_not_require_final() {
         for final_first in [true, false] {
             let path = PathBuf::from("D:/presentation-test");
             let mut app = test_app("", path.clone(), path);
-            app.active_agent_run_id = Some("run".into());
+            app.session.active_agent_run_id = Some("run".into());
             run_event(
                 &mut app,
                 "run",
@@ -6086,7 +7356,7 @@ fn run_terminal_states_keep_results_and_do_not_require_final() {
             if let Some(expected) = expected {
                 assert!(before.contains(expected), "{before}");
             }
-            assert!(!has_active_agent_run(&app));
+            assert!(!has_active_agent_run(&app.session));
             assert!(!before.contains("└─"), "{before}");
             assert!(!before.contains("Working"), "{before}");
             assert!(before.contains("Inspecting source"));
@@ -6116,8 +7386,8 @@ fn run_terminal_states_keep_results_and_do_not_require_final() {
 fn child_completion_does_not_fold_parent_and_waiting_is_not_completion() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
-    app.active_agent_run_id = Some("parent".into());
-    app.active_agent_run_ids = HashSet::from(["parent".into(), "child".into()]);
+    app.session.active_agent_run_id = Some("parent".into());
+    app.session.active_agent_run_ids = HashSet::from(["parent".into(), "child".into()]);
     for run in ["parent", "child"] {
         run_event(
             &mut app,
@@ -6135,7 +7405,7 @@ fn child_completion_does_not_fold_parent_and_waiting_is_not_completion() {
         json!({}),
     );
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"waiting-parent","type":"ModelStatus","processState":"waiting_user","payload":{}}),
         Some("parent"),
     );
@@ -6220,7 +7490,7 @@ fn historical_runs_use_authoritative_terminal_state_and_preserve_user_disclosure
     for terminal in [None, Some("agent_run_completed"), Some("agent_run_failed")] {
         let path = PathBuf::from("D:/presentation-test");
         let mut app = test_app("", path.clone(), path);
-        app.transcript_paging =
+        app.session.transcript_paging =
             Some(TranscriptPagingState::open(history_run_page(terminal)).unwrap());
         sync_materialized_transcript_history(&mut app);
         let text = rendered_lines_text(&build_transcript_view(&app, 80).lines);
@@ -6261,7 +7531,7 @@ fn run_failure_display_matches_web_for_history_and_repeated_sync() {
         {
             *content = TranscriptTextContentV1::inline(reason.into());
         }
-        app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+        app.session.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
         for _ in 0..2 {
             sync_materialized_transcript_history(&mut app);
             let text = rendered_lines_text(&build_transcript_view(&app, 240).lines);
@@ -6299,8 +7569,8 @@ fn run_terminal_notices_match_in_live_and_restored_history() {
     ] {
         let path = PathBuf::from("D:/presentation-test");
         let mut app = test_app("", path.clone(), path);
-        app.active_agent_run_id = Some("run".into());
-        app.transcript_paging =
+        app.session.active_agent_run_id = Some("run".into());
+        app.session.transcript_paging =
             Some(TranscriptPagingState::open(transcript_test_page(vec![], None)).unwrap());
         run_event(
             &mut app,
@@ -6310,7 +7580,7 @@ fn run_terminal_notices_match_in_live_and_restored_history() {
             json!({"message":"provider_timeout"}),
         );
         assert!(
-            has_active_agent_run(&app),
+            has_active_agent_run(&app.session),
             "runtime error must await the durable terminal event"
         );
         run_event(
@@ -6355,7 +7625,7 @@ fn run_terminal_notices_match_in_live_and_restored_history() {
         } else {
             message.into()
         });
-        app.transcript_paging = Some(TranscriptPagingState::open(history).unwrap());
+        app.session.transcript_paging = Some(TranscriptPagingState::open(history).unwrap());
         sync_materialized_transcript_history(&mut app);
         let after = rendered_lines_text(&build_transcript_view(&app, 240).lines);
         assert!(after.contains("Useful result"));
@@ -6429,7 +7699,7 @@ fn referenced_run_failure_reads_all_pages_and_rejects_stale_or_invalid_content()
             "revision":"1","byteLength":body.len().to_string(),"startOffset":start.to_string(),"endOffset":end.to_string(),
             "content":&body[start..end],"hasMore":end<body.len()})
     }));
-    app.transcript_paging = Some(TranscriptPagingState::open(page.clone()).unwrap());
+    app.session.transcript_paging = Some(TranscriptPagingState::open(page.clone()).unwrap());
     sync_materialized_transcript_history(&mut app);
     let initial = build_transcript_view(&app, 80);
     assert!(rendered_lines_text(&initial.lines).contains("Loading error details"));
@@ -6457,7 +7727,7 @@ fn referenced_run_failure_reads_all_pages_and_rejects_stale_or_invalid_content()
         .collect();
     assert_eq!(restored, reason);
     page.projection_generation = "replacement-generation".into();
-    app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    app.session.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
     sync_materialized_transcript_history(&mut app);
     assert_eq!(output_preview::run_error_text(&app, "run:run"), None);
     assert!(output_preview::poll(&mut app));
@@ -6481,7 +7751,7 @@ fn referenced_run_failure_reads_all_pages_and_rejects_stale_or_invalid_content()
 fn final_promotes_already_materialized_stream_without_duplicate_or_hidden_answer() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
-    app.active_agent_run_id = Some("run".into());
+    app.session.active_agent_run_id = Some("run".into());
     run_event(
         &mut app,
         "run",
@@ -6509,9 +7779,10 @@ fn completed_run_structure_survives_older_page() {
     let mut tail = history_run_page(Some("agent_run_completed"));
     tail.older_cursor = Some("older".into());
     tail.has_older = true;
-    app.transcript_paging = Some(TranscriptPagingState::open(tail).unwrap());
+    app.session.transcript_paging = Some(TranscriptPagingState::open(tail).unwrap());
     sync_materialized_transcript_history(&mut app);
-    app.transcript_paging
+    app.session
+        .transcript_paging
         .as_mut()
         .unwrap()
         .apply_older_page(transcript_test_page(
@@ -6542,9 +7813,9 @@ fn completed_run_structure_survives_older_page() {
 fn prepending_history_preserves_live_stream_replacement_boundary() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
-    app.transcript_paging =
+    app.session.transcript_paging =
         Some(TranscriptPagingState::open(transcript_test_page(vec![], Some("older"))).unwrap());
-    app.active_agent_run_id = Some("live".into());
+    app.session.active_agent_run_id = Some("live".into());
     run_event(
         &mut app,
         "live",
@@ -6553,7 +7824,8 @@ fn prepending_history_preserves_live_stream_replacement_boundary() {
         json!({"delta":"draft\n"}),
     );
     materialize_assistant_prefix(&mut app);
-    app.transcript_paging
+    app.session
+        .transcript_paging
         .as_mut()
         .unwrap()
         .apply_older_page(transcript_test_page(
@@ -6586,15 +7858,15 @@ fn prepending_history_preserves_live_stream_replacement_boundary() {
 fn runtime_wait_and_resume_keep_run_open_with_truthful_status() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
-    app.active_agent_run_id = Some("run".into());
+    app.session.active_agent_run_id = Some("run".into());
     for (id, status, expected) in [("wait", "waiting", "Waiting..."), ("resume", "resumed", "")] {
         apply_session_event(
-            &mut app,
+            &mut app.session,
             &json!({"id":id,"type":"RuntimeWaitChanged","visibility":"user","processState":"waiting","payload":{"status":status}}),
             Some("run"),
         );
         assert_eq!(status_header(&app), expected);
-        assert!(has_active_agent_run(&app));
+        assert!(has_active_agent_run(&app.session));
     }
 }
 
@@ -6602,11 +7874,11 @@ fn runtime_wait_and_resume_keep_run_open_with_truthful_status() {
 fn child_wait_does_not_change_parent_run_status() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
-    app.active_agent_run_id = Some("parent".into());
-    app.active_agent_run_ids = HashSet::from(["parent".into(), "child".into()]);
-    app.process_state = RuntimeDisplayState::PendingPhase;
+    app.session.active_agent_run_id = Some("parent".into());
+    app.session.active_agent_run_ids = HashSet::from(["parent".into(), "child".into()]);
+    app.session.process_state = RuntimeDisplayState::PendingPhase;
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"wait-child","type":"RuntimeWaitChanged","processState":"waiting","payload":{"status":"waiting"}}),
         Some("child"),
     );
@@ -6625,7 +7897,7 @@ fn child_wait_does_not_change_parent_run_status() {
 fn active_tools_show_six_line_preview_without_an_empty_completion_rule() {
     let path = PathBuf::from("D:/presentation-test");
     let mut app = test_app("", path.clone(), path);
-    app.active_agent_run_id = Some("run".into());
+    app.session.active_agent_run_id = Some("run".into());
     let mut tool = test_tool_line(
         ToolActionKind::Read,
         "README.md",
@@ -6633,9 +7905,9 @@ fn active_tools_show_six_line_preview_without_an_empty_completion_rule() {
         vec![ToolResultState::SuccessWithOutput],
     );
     tool.full_text = Some((0..20).map(|i| format!("body {i}\n")).collect());
-    app.transcript = vec![
+    app.session.transcript = vec![
         TranscriptLine::Summary("Checking the project".into()).for_run(Some("run"), false),
-        TranscriptLine::Tool(tool).for_run(Some("run"), false),
+        TranscriptLine::tool(tool).for_run(Some("run"), false),
     ];
     let running = rendered_lines_text(&build_transcript_view(&app, 80).lines);
     assert!(running.contains("body 0"), "{running}");
@@ -6683,25 +7955,25 @@ fn automatic_referenced_previews_only_load_visible_tools_without_collapsing_prev
             )
         })
         .collect();
-    app.transcript_paging =
+    app.session.transcript_paging =
         Some(TranscriptPagingState::open(transcript_test_page(blocks, None)).unwrap());
     sync_materialized_transcript_history(&mut app);
-    app.transcript_follow_bottom = false;
+    app.session.transcript_follow_bottom = false;
     let view = build_transcript_view(&app, 80);
     let (first, row) = view.source_rows[0].clone();
-    app.transcript_scroll = row;
+    app.session.transcript_scroll = row;
     output_preview::prepare_visible(&mut app, &view, 1);
-    assert_eq!(app.output_preview.len(), 1);
-    assert!(app.output_preview.contains_key(&first));
+    assert_eq!(app.session.output_preview.len(), 1);
+    assert!(app.session.output_preview.contains_key(&first));
     let (last, row) = view.source_rows.last().unwrap().clone();
-    app.transcript_scroll = row;
+    app.session.transcript_scroll = row;
     output_preview::prepare_visible(&mut app, &view, 1);
-    assert_eq!(app.output_preview.len(), 2);
-    assert!(app.output_preview.contains_key(&last));
-    assert!(app.output_preview.contains_key(&first));
-    app.transcript_paging = None;
+    assert_eq!(app.session.output_preview.len(), 2);
+    assert!(app.session.output_preview.contains_key(&last));
+    assert!(app.session.output_preview.contains_key(&first));
+    app.session.transcript_paging = None;
     assert!(output_preview::poll(&mut app));
-    assert!(app.output_preview.is_empty());
+    assert!(app.session.output_preview.is_empty());
 }
 
 #[test]
@@ -6715,7 +7987,7 @@ fn retired_tool_shortcuts_do_not_change_the_transcript_or_insert_control_charact
         vec![ToolResultState::SuccessWithOutput],
     );
     tool.full_text = Some("visible body".into());
-    app.transcript.push(TranscriptLine::Tool(tool));
+    app.session.transcript.push(TranscriptLine::tool(tool));
     let before = rendered_lines_text(&build_transcript_view(&app, 80).lines);
     for key in [
         KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
@@ -6723,7 +7995,7 @@ fn retired_tool_shortcuts_do_not_change_the_transcript_or_insert_control_charact
     ] {
         handle_key(key, &mut app);
     }
-    assert!(app.input.is_empty());
+    assert!(app.session.input.is_empty());
     assert_eq!(
         rendered_lines_text(&build_transcript_view(&app, 80).lines),
         before
@@ -6734,7 +8006,7 @@ fn retired_tool_shortcuts_do_not_change_the_transcript_or_insert_control_charact
             &mut app,
         );
     }
-    assert_eq!(app.input, "npvq");
+    assert_eq!(app.session.input, "npvq");
 }
 
 #[test]
@@ -6758,10 +8030,10 @@ fn transcript_visual_contract_marks_messages_once_and_colors_code() {
         .map(rendered_line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.starts_with("  ❯ inspect"));
-    assert!(text.contains("  Checking Cargo.toml"));
-    assert!(text.contains("  First line\n  Second line"));
-    assert!(text.contains("  Finished"));
+    assert!(text.starts_with("❯ inspect"));
+    assert!(text.contains("\nChecking Cargo.toml"));
+    assert!(text.contains("\nFirst line\nSecond line"));
+    assert!(text.contains("\nFinished"));
     let code = lines
         .iter()
         .flat_map(|line| &line.spans)
@@ -6788,7 +8060,7 @@ fn command_visual_contract_uses_command_not_description_and_single_connector() {
             TextResultLine::Text("second".into()),
         ],
     }];
-    let lines = transcript_to_lines(&[TranscriptLine::Tool(tool.clone())], 100);
+    let lines = transcript_to_lines(&[TranscriptLine::tool(tool.clone())], 100);
     let text = lines
         .iter()
         .map(rendered_line_text)
@@ -6807,7 +8079,7 @@ fn command_visual_contract_uses_command_not_description_and_single_connector() {
         .any(|s| s.content.contains("-LiteralPath") && s.style.fg.is_some()));
     let root = unique_test_dir("visual-contract");
     let mut app = test_app("", root.clone(), root.clone());
-    app.transcript.push(TranscriptLine::Tool(tool));
+    app.session.transcript.push(TranscriptLine::tool(tool));
     let view = build_transcript_view(&app, 100);
     let actual = view
         .lines
@@ -6821,11 +8093,11 @@ fn command_visual_contract_uses_command_not_description_and_single_connector() {
 }
 
 #[test]
-fn assistant_visual_contract_wraps_with_hanging_indent() {
+fn assistant_visual_contract_wraps_without_left_padding() {
     let lines =
         text_layout::TextLayout::new(render_summary_lines("abcdefghijklmnop", 8), 8, true).lines;
     let text: Vec<_> = lines.iter().map(rendered_line_text).collect();
-    assert_eq!(text, ["  abcdef", "  ghijkl", "  mnop"]);
+    assert_eq!(text, ["abcdefgh", "ijklmnop"]);
 }
 
 #[test]
@@ -6861,13 +8133,15 @@ fn visualization_tui_preserves_information_in_summary_and_stream() {
     let workspace = unique_test_dir("visualization-workspace");
     let data_root = unique_test_dir("visualization-data");
     let mut app = test_app("", workspace.clone(), data_root.clone());
-    app.assistant_buffer = format!("Before\n\n{fence}centaeris_visual\n{source}");
+    app.session.assistant_buffer = format!("Before\n\n{fence}centaeris_visual\n{source}");
     materialize_assistant_prefix(&mut app);
-    let pending = rendered_lines_text(&build_assistant_live_lines(&app, 80));
+    let pending = rendered_lines_text(&build_assistant_live_lines(&app.session, 80));
     assert!(!pending.contains("elements"));
-    app.assistant_buffer.push_str(&format!("\n{fence}\n"));
+    app.session
+        .assistant_buffer
+        .push_str(&format!("\n{fence}\n"));
     materialize_assistant_prefix(&mut app);
-    let complete = rendered_lines_text(&transcript_to_lines(&app.transcript, 80));
+    let complete = rendered_lines_text(&transcript_to_lines(&app.session.transcript, 80));
     assert!(complete.contains("Run A") && complete.contains("Run B"));
     assert!(!complete.contains("elements"));
     let _ = std::fs::remove_dir_all(workspace);
@@ -6916,7 +8190,7 @@ fn visualization_referenced_tui_answer_loads_all_pages_and_restores_reading_orde
             "projectionGeneration":request["projectionGeneration"],"refId":"answer-ref","revision":"1","byteLength":body.len().to_string(),
             "startOffset":start.to_string(),"endOffset":end.to_string(),"content":&body[start..end],"hasMore":end<body.len()})
     }));
-    app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    app.session.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
     sync_materialized_transcript_history(&mut app);
     let initial = build_transcript_view(&app, 100);
     assert!(rendered_lines_text(&initial.lines).contains("Loading answer"));
@@ -6959,7 +8233,7 @@ fn visualization_referenced_answer_rejects_oversized_body_before_reading() {
         requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         json!(null)
     }));
-    app.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
+    app.session.transcript_paging = Some(TranscriptPagingState::open(page).unwrap());
     sync_materialized_transcript_history(&mut app);
     let initial = build_transcript_view(&app, 80);
     output_preview::prepare_visible(&mut app, &initial, 100);
@@ -7030,12 +8304,12 @@ fn unicode_editing_and_undo_keep_whole_graphemes() {
         KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
         &mut app,
     );
-    assert_eq!(app.input, "Ae\u{301}B");
+    assert_eq!(app.session.input, "Ae\u{301}B");
     handle_key(
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
         &mut app,
     );
-    assert_eq!(app.input, "Ae\u{301}👩‍💻B");
+    assert_eq!(app.session.input, "Ae\u{301}👩‍💻B");
     handle_key(
         KeyEvent::new(
             KeyCode::Char('z'),
@@ -7043,9 +8317,12 @@ fn unicode_editing_and_undo_keep_whole_graphemes() {
         ),
         &mut app,
     );
-    assert_eq!(app.input, "Ae\u{301}B");
+    assert_eq!(app.session.input, "Ae\u{301}B");
     handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT), &mut app);
-    assert_eq!(&app.input[input_selection_range(&app).unwrap()], "e\u{301}");
+    assert_eq!(
+        &app.session.input[input_selection_range(&app).unwrap()],
+        "e\u{301}"
+    );
 }
 
 #[cfg(windows)]
@@ -7059,7 +8336,7 @@ fn altgr_text_does_not_trigger_control_shortcuts() {
             &mut app,
         );
     }
-    assert_eq!(app.input, "vcgz");
+    assert_eq!(app.session.input, "vcgz");
 }
 
 #[test]
@@ -7071,7 +8348,7 @@ fn dragging_outside_a_long_draft_scrolls_until_keyboard_input_ends_capture() {
         .collect::<Vec<_>>()
         .join("\n");
     handle_paste(&mut app, text);
-    app.input_cursor = 0;
+    app.session.input_cursor = 0;
     draw_for_mouse(&mut app, 60, 30);
     let area = app.input_area.unwrap();
     send_mouse(
@@ -7088,12 +8365,12 @@ fn dragging_outside_a_long_draft_scrolls_until_keyboard_input_ends_capture() {
     );
     assert!(mouse::drag_scroll_tick(&mut app));
     draw_for_mouse(&mut app, 60, 30);
-    assert_eq!(app.input_scroll, 1);
-    assert!(app.input_cursor > "draft line 0\n".len());
+    assert_eq!(app.session.input_scroll, 1);
+    assert!(app.session.input_cursor > "draft line 0\n".len());
     handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &mut app);
-    let scroll = app.input_scroll;
+    let scroll = app.session.input_scroll;
     assert!(!mouse::drag_scroll_tick(&mut app));
-    assert_eq!(app.input_scroll, scroll);
+    assert_eq!(app.session.input_scroll, scroll);
 }
 
 #[test]
@@ -7103,25 +8380,25 @@ fn image_undo_keeps_owned_bytes_until_the_draft_is_cleared() {
     std::fs::write(&source, test_png_bytes()).unwrap();
     let mut app = test_app("", root.clone(), root.clone());
     handle_paste(&mut app, source.to_string_lossy().into_owned());
-    let owned = app.draft_image_attachments[0].local_path.clone();
+    let owned = app.session.draft_image_attachments[0].local_path.clone();
     handle_key(
         KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
         &mut app,
     );
-    assert_eq!(app.input, "[Image #1]");
-    assert_eq!(app.draft_image_attachments.len(), 1);
+    assert_eq!(app.session.input, "[Image #1]");
+    assert_eq!(app.session.draft_image_attachments.len(), 1);
     handle_key(
         KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
         &mut app,
     );
-    assert!(app.draft_image_attachments.is_empty());
+    assert!(app.session.draft_image_attachments.is_empty());
     assert!(owned.exists());
     handle_key(
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
         &mut app,
     );
-    assert_eq!(app.draft_image_attachments[0].local_path, owned);
-    assert_eq!(app.input, "[Image #1]");
+    assert_eq!(app.session.draft_image_attachments[0].local_path, owned);
+    assert_eq!(app.session.input, "[Image #1]");
     clear_composer(&mut app);
     assert!(!owned.exists());
     assert!(source.exists());
@@ -7129,20 +8406,20 @@ fn image_undo_keeps_owned_bytes_until_the_draft_is_cleared() {
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
         &mut app,
     );
-    assert!(app.input.is_empty());
+    assert!(app.session.input.is_empty());
     handle_paste(&mut app, source.to_string_lossy().into_owned());
-    let undone = app.draft_image_attachments[0].local_path.clone();
+    let undone = app.session.draft_image_attachments[0].local_path.clone();
     handle_key(
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
         &mut app,
     );
-    assert!(app.draft_image_attachments.is_empty());
+    assert!(app.session.draft_image_attachments.is_empty());
     assert!(undone.exists());
     handle_key(
         KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
         &mut app,
     );
-    assert_eq!(app.draft_image_attachments[0].local_path, undone);
+    assert_eq!(app.session.draft_image_attachments[0].local_path, undone);
     handle_key(
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
         &mut app,
@@ -7198,25 +8475,25 @@ fn credential_input_stays_in_place_and_selection_never_copies_or_survives_cancel
     );
     assert_eq!(input_selection_range(&app), Some(0..6));
     assert_eq!(&*copied.borrow(), &["clipboard baseline"]);
-    assert_eq!(app.input, "/test-token");
+    assert_eq!(app.session.input, "/test-token");
     handle_key(
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
         &mut app,
     );
-    assert_eq!(app.input, "/test-token");
+    assert_eq!(app.session.input, "/test-token");
     handle_key(
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         &mut app,
     );
     assert!(app.model_credential_prompt.is_none());
     assert!(app.model_panel.is_some());
-    assert_eq!(app.input, "draft!");
+    assert_eq!(app.session.input, "draft!");
     close_model_panel(&mut app);
     handle_key(
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
         &mut app,
     );
-    assert_eq!(app.input, "draft");
+    assert_eq!(app.session.input, "draft");
 }
 
 #[test]
@@ -7224,11 +8501,13 @@ fn transcript_triple_click_copies_a_logical_line_and_survives_resize() {
     let path = PathBuf::from("D:/workspace");
     let mut app = test_app("", path.clone(), path);
     let text = "alpha 中文👩‍💻 beta and a long sentence across terminal rows";
-    app.transcript.push(TranscriptLine::User(text.into()));
+    app.session
+        .transcript
+        .push(TranscriptLine::User(text.into()));
     let copied = record_clipboard(&mut app);
     draw_for_mouse(&mut app, 40, 24);
     let area = app.transcript_area.unwrap();
-    let (row_in_alpha, column_in_alpha) = app.text_layout.as_ref().unwrap().position(1);
+    let (row_in_alpha, column_in_alpha) = app.session.text_layout.as_ref().unwrap().position(1);
     for _ in 0..3 {
         send_mouse(
             &mut app,
@@ -7254,9 +8533,9 @@ fn bash_fold_stays_on_the_same_call_through_result_and_run_completion() {
     let path = PathBuf::from("D:/workspace");
     let mut app = test_app("", path.clone(), path);
     let clipboard = record_clipboard(&mut app);
-    app.active_agent_run_id = Some("run".into());
+    app.session.active_agent_run_id = Some("run".into());
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"start","type":"ToolCall","toolName":"bash","status":"running","payload":{
             "callId":"bash-probe","displayTarget":"Run focused checks","description":"Run focused checks",
             "command":"printf 'probe'"
@@ -7274,7 +8553,7 @@ fn bash_fold_stays_on_the_same_call_through_result_and_run_completion() {
     draw_for_mouse(&mut app, 80, 24);
     let area = app.transcript_area.unwrap();
     click(&mut app, area.right() - 1, area.y);
-    assert!(app.expanded_bash_tools.is_empty());
+    assert!(app.session.expanded_bash_tools.is_empty());
     click(&mut app, area.x + 5, area.y);
     let expanded = build_transcript_view(&app, 80);
     assert!(rendered_lines_text(&expanded.lines).contains("$ printf 'probe'"));
@@ -7282,7 +8561,7 @@ fn bash_fold_stays_on_the_same_call_through_result_and_run_completion() {
 
     let output: String = (1..=9).map(|i| format!("probe line {i}\n")).collect();
     apply_session_event(
-        &mut app,
+        &mut app.session,
         &json!({"id":"result","type":"ToolResult","toolName":"bash","status":"error","payload":{
             "callId":"bash-probe","resultState":"failed","modelContent":output,"modelInputImages":[],
             "operations":[{"kind":"command","toolName":"bash","callId":"bash-probe","status":"error","exitCode":7}]
@@ -7332,7 +8611,7 @@ fn bash_fold_stays_on_the_same_call_through_result_and_run_completion() {
     assert_eq!(clipboard.borrow().last().map(String::as_str), Some("probe"));
 
     click(&mut app, area.x + 5, output_row);
-    assert!(!app.expanded_bash_tools.is_empty());
+    assert!(!app.session.expanded_bash_tools.is_empty());
     click(&mut app, area.right() - 1, output_row + 1);
     assert_eq!(clipboard.borrow().len(), 1);
     let collapsed_view = build_transcript_view(&app, 22);
@@ -7361,23 +8640,22 @@ fn transcript_spacing_stacks_collapsed_tools_and_separates_the_reply() {
         tool.key = key.into();
         tool.is_bash = true;
         tool.command = Some(format!("printf '{key}'"));
-        app.transcript.push(TranscriptLine::Tool(tool));
+        app.session.transcript.push(TranscriptLine::tool(tool));
     }
-    app.assistant_buffer = "Final answer".into();
+    app.session.assistant_buffer = "Final answer".into();
     let collapsed = build_transcript_view(&app, 80);
     assert_eq!(collapsed.source_rows[1].1, collapsed.source_rows[0].1 + 1);
     let reply_row = collapsed.source_rows[1].1 as usize + 2;
     assert!(rendered_line_text(&collapsed.lines[reply_row - 1]).is_empty());
     assert_eq!(
         rendered_line_text(&collapsed.lines[reply_row]),
-        "  Final answer"
+        "Final answer"
     );
-    assert!(collapsed
-        .layout
-        .text
-        .contains("second check\n  Final answer"));
+    assert!(collapsed.layout.text.contains("second check\nFinal answer"));
 
-    app.expanded_bash_tools.insert("second check".into());
+    app.session
+        .expanded_bash_tools
+        .insert("second check".into());
     draw_for_mouse(&mut app, 80, 24);
     let expanded = build_transcript_view(&app, 80);
     let area = app.transcript_area.unwrap();
@@ -7386,7 +8664,7 @@ fn transcript_spacing_stacks_collapsed_tools_and_separates_the_reply() {
     let reply_row = expanded
         .lines
         .iter()
-        .position(|line| rendered_line_text(line) == "  Final answer")
+        .position(|line| rendered_line_text(line) == "Final answer")
         .unwrap();
     for gap in [expanded_row - 1, reply_row - 1] {
         assert!(rendered_line_text(&expanded.lines[gap]).is_empty());
@@ -7398,27 +8676,28 @@ fn transcript_spacing_stacks_collapsed_tools_and_separates_the_reply() {
             send_mouse(&mut app, kind, area.x, area.y + gap as u16);
         }
     }
-    assert_eq!(app.expanded_bash_tools.len(), 1);
-    assert!(app.expanded_bash_tools.contains("second check"));
+    assert_eq!(app.session.expanded_bash_tools.len(), 1);
+    assert!(app.session.expanded_bash_tools.contains("second check"));
 }
 
 #[test]
 fn panel_hover_and_wheel_are_isolated_from_the_transcript() {
     let path = PathBuf::from("D:/workspace");
     let mut app = test_app("/", path.clone(), path);
-    app.transcript
+    app.session
+        .transcript
         .extend((0..80).map(|row| TranscriptLine::User(format!("row {row}"))));
-    app.transcript_follow_bottom = false;
-    app.transcript_scroll = 5;
+    app.session.transcript_follow_bottom = false;
+    app.session.transcript_scroll = 5;
     draw_for_mouse(&mut app, 80, 24);
     let area = app.panel_area.unwrap();
     send_mouse(&mut app, MouseEventKind::Moved, area.x + 3, area.y + 1);
-    assert_eq!(app.selected_command, 0);
-    assert_eq!(app.input, "/");
+    assert_eq!(app.session.selected_command, 0);
+    assert_eq!(app.session.input, "/");
     send_mouse(&mut app, MouseEventKind::ScrollDown, area.x + 3, area.y + 1);
-    assert_eq!(app.selected_command, 1);
-    assert_eq!(app.transcript_scroll, 5);
-    app.home_risk_panel = Some(HomeRiskPanel {
+    assert_eq!(app.session.selected_command, 1);
+    assert_eq!(app.session.transcript_scroll, 5);
+    app.session.home_risk_panel = Some(HomeRiskPanel {
         workspaces: Vec::new(),
         selected: 0,
         notice: None,
@@ -7426,8 +8705,8 @@ fn panel_hover_and_wheel_are_isolated_from_the_transcript() {
     draw_for_mouse(&mut app, 80, 24);
     let area = app.panel_area.unwrap();
     send_mouse(&mut app, MouseEventKind::ScrollDown, area.x + 3, area.y + 2);
-    assert!(app.home_risk_panel.is_some());
-    assert_eq!(app.transcript_scroll, 5);
+    assert!(app.session.home_risk_panel.is_some());
+    assert_eq!(app.session.transcript_scroll, 5);
     assert!(app.runtime.is_none());
 }
 
@@ -7443,13 +8722,13 @@ fn command_list_distinguishes_hover_from_the_current_selection() {
         .iter()
         .position(|command| command.name == "/help")
         .unwrap();
-    app.selected_command = selected;
+    app.session.selected_command = selected;
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
     let view = build_transcript_view(&app, 80);
     terminal
         .draw(|frame| render(frame, &mut app, &view))
         .unwrap();
-    let area = mouse::embedded_area(&app).unwrap();
+    let area = app.panel_area.unwrap();
     let x = area.x;
     let selected_y = area.y + selected as u16;
     let hover_y = area.y + hovered as u16;
@@ -7469,7 +8748,7 @@ fn command_list_distinguishes_hover_from_the_current_selection() {
         .intersects(Modifier::REVERSED | Modifier::BOLD | Modifier::UNDERLINED));
     assert_ne!(hover.bg, current.bg);
     assert_eq!(
-        app.selected_command, selected,
+        app.session.selected_command, selected,
         "hover does not move the keyboard selection"
     );
     let selected_style = current.style();
@@ -7495,7 +8774,7 @@ fn command_list_distinguishes_hover_from_the_current_selection() {
     send_mouse(&mut app, MouseEventKind::Moved, x + 3, hover_y);
     handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut app);
     assert_eq!(
-        app.input, "/effort ",
+        app.session.input, "/effort ",
         "confirmation still uses the selected item"
     );
 }
@@ -7542,16 +8821,17 @@ fn model_and_effort_pages_keep_one_selection_while_hovering_another_row() {
         assert_eq!(model_picker::selection(&app), selected as usize);
     }
     assert_eq!(app.model_display.as_deref(), Some("model-a"));
-    assert_eq!(app.input, "draft");
+    assert_eq!(app.session.input, "draft");
 }
 
 #[test]
 fn scrollbar_drag_has_the_same_bounds_as_the_viewport_and_resize_ends_capture() {
     let path = PathBuf::from("D:/workspace");
     let mut app = test_app("", path.clone(), path);
-    app.transcript
+    app.session
+        .transcript
         .extend((0..100).map(|row| TranscriptLine::User(format!("row {row}"))));
-    app.transcript_follow_bottom = false;
+    app.session.transcript_follow_bottom = false;
     draw_for_mouse(&mut app, 80, 24);
     let area = app.transcript_viewport.unwrap();
     let x = area.right() - 1;
@@ -7563,11 +8843,14 @@ fn scrollbar_drag_has_the_same_bounds_as_the_viewport_and_resize_ends_capture() 
         x,
         area.bottom() - 1,
     );
-    assert_eq!(app.transcript_scroll, app.transcript_max_scroll);
+    assert_eq!(
+        app.session.transcript_scroll,
+        app.session.transcript_max_scroll
+    );
     mouse::cancel_capture(&mut app);
-    let current = app.transcript_scroll;
+    let current = app.session.transcript_scroll;
     send_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), x, area.y);
-    assert_eq!(app.transcript_scroll, current);
+    assert_eq!(app.session.transcript_scroll, current);
 }
 
 #[test]
@@ -7601,8 +8884,11 @@ fn clipboard_failure_keeps_the_draft_and_reports_the_error() {
         area.x + 3,
         area.y,
     );
-    assert_eq!(app.input, "abcdef");
-    assert_eq!(app.message.as_deref(), Some("clipboard unavailable"));
+    assert_eq!(app.session.input, "abcdef");
+    assert_eq!(
+        app.session.message.as_deref(),
+        Some("clipboard unavailable")
+    );
 }
 
 fn model_picker_config() -> Value {
@@ -7703,7 +8989,7 @@ fn model_picker_chains_to_effort_and_escape_preserves_the_draft_without_writing(
     );
     handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
     assert!(app.model_panel.is_none());
-    assert_eq!(app.input, "draft 👩‍💻");
+    assert_eq!(app.session.input, "draft 👩‍💻");
     assert!(writes.lock().unwrap().is_empty());
 }
 
@@ -7756,7 +9042,7 @@ fn model_picker_mouse_and_enter_apply_model_and_effort_in_one_request() {
         assert!(app.model_panel.is_none());
         assert_eq!(app.model_display.as_deref(), Some("model-b"));
         assert_eq!(app.model_effort.as_deref(), Some("high"));
-        assert_eq!(app.input, "unsent draft");
+        assert_eq!(app.session.input, "unsent draft");
     }
 }
 
@@ -7787,7 +9073,7 @@ fn clicking_model_commands_opens_the_picker_without_applying_a_setting() {
         );
         finish_model_requests(&mut app);
         assert_eq!(app.model_panel.as_ref().unwrap().stage, stage);
-        assert!(app.input.is_empty());
+        assert!(app.session.input.is_empty());
         assert!(!app.command_panel_open());
         assert!(writes.lock().unwrap().is_empty());
         draw_for_mouse(&mut app, 80, 24);
@@ -7806,13 +9092,13 @@ fn clicking_model_commands_opens_the_picker_without_applying_a_setting() {
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
             &mut app,
         );
-        assert_eq!(app.input, "x");
+        assert_eq!(app.session.input, "x");
         handle_key(
             KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
             &mut app,
         );
         assert!(
-            app.input.is_empty(),
+            app.session.input.is_empty(),
             "undo must not restore a consumed command"
         );
     }
@@ -7896,7 +9182,7 @@ fn model_and_effort_columns_stay_aligned_as_the_selection_moves() {
                 handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
             }
         }
-        assert_eq!(app.input, "draft");
+        assert_eq!(app.session.input, "draft");
     }
 }
 
@@ -7912,7 +9198,7 @@ fn command_list_enter_opens_the_highlighted_model_or_effort_picker() {
     ] {
         let path = PathBuf::from("D:/workspace");
         let mut app = test_app(input, path.clone(), path);
-        app.show_help = input.is_empty();
+        app.session.show_help = input.is_empty();
         let writes = attach_model_runtime(&mut app, model_picker_config());
         let row = matching_commands(input)
             .iter()
@@ -7921,11 +9207,11 @@ fn command_list_enter_opens_the_highlighted_model_or_effort_picker() {
         for _ in 0..row {
             handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
         }
-        assert_eq!(app.selected_command, row);
+        assert_eq!(app.session.selected_command, row);
         handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
         finish_model_requests(&mut app);
         assert_eq!(app.model_panel.as_ref().unwrap().stage, stage);
-        assert!(app.input.is_empty());
+        assert!(app.session.input.is_empty());
         assert!(!app.command_panel_open());
         assert!(writes.lock().unwrap().is_empty());
         handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
@@ -7939,25 +9225,25 @@ fn command_list_enter_confirms_commands_and_preserves_modified_newlines() {
     for input in ["/", "/st", ""] {
         let path = PathBuf::from("D:/workspace");
         let mut app = test_app(input, path.clone(), path);
-        app.show_help = input.is_empty();
-        app.selected_command = matching_commands(input)
+        app.session.show_help = input.is_empty();
+        app.session.selected_command = matching_commands(input)
             .iter()
             .position(|item| item.name == "/stop")
             .unwrap();
         handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
-        assert!(app.input.is_empty());
+        assert!(app.session.input.is_empty());
         assert!(!app.command_panel_open());
         assert!(app.runtime.is_none());
     }
     for modifiers in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
         let path = PathBuf::from("D:/workspace");
         let mut app = test_app("/", path.clone(), path);
-        app.selected_command = matching_commands("/")
+        app.session.selected_command = matching_commands("/")
             .iter()
             .position(|item| item.name == "/model")
             .unwrap();
         handle_key(KeyEvent::new(KeyCode::Enter, modifiers), &mut app);
-        assert_eq!(app.input, "/\n");
+        assert_eq!(app.session.input, "/\n");
         assert!(app.pending_model_request.is_none());
         assert!(app.model_panel.is_none());
         assert!(app.runtime.is_none());
@@ -7979,11 +9265,11 @@ fn model_commands_complete_only_the_name_then_open_the_picker() {
         let writes = attach_model_runtime(&mut app, config);
         assert!(app.command_panel_open());
         handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut app);
-        assert_eq!(app.input, command);
+        assert_eq!(app.session.input, command);
         assert!(!app.command_panel_open());
         handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut app);
         assert_eq!(
-            app.input, command,
+            app.session.input, command,
             "Tab must not expand model or effort arguments"
         );
         assert!(writes.lock().unwrap().is_empty());
@@ -7991,7 +9277,7 @@ fn model_commands_complete_only_the_name_then_open_the_picker() {
         finish_model_requests(&mut app);
         assert_eq!(app.model_panel.as_ref().unwrap().stage, stage);
         assert!(
-            app.input.is_empty(),
+            app.session.input.is_empty(),
             "picker navigation must not construct a command line"
         );
         assert!(writes.lock().unwrap().is_empty());
@@ -8005,7 +9291,7 @@ fn model_command_keeps_manually_entered_model_and_effort_arguments() {
     let writes = attach_model_runtime(&mut app, model_picker_config());
     assert!(!app.command_panel_open());
     handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut app);
-    assert_eq!(app.input, "/model test/model-b low");
+    assert_eq!(app.session.input, "/model test/model-b low");
     handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
     finish_model_requests(&mut app);
     assert_eq!(
@@ -8057,6 +9343,7 @@ fn model_without_selectable_effort_skips_the_step_and_never_invents_a_level() {
     assert!(app.model_panel.is_none());
     assert!(writes.lock().unwrap().is_empty());
     assert!(app
+        .session
         .message
         .as_deref()
         .unwrap()
@@ -8077,23 +9364,23 @@ fn model_credential_cancel_restores_draft_images_and_undo_without_the_secret() {
     std::fs::write(&source, test_png_bytes()).unwrap();
     let mut app = test_app("draft ", root.clone(), root.clone());
     handle_paste(&mut app, source.to_string_lossy().into_owned());
-    let text = app.input.clone();
-    let owned = app.draft_image_attachments[0].local_path.clone();
+    let text = app.session.input.clone();
+    let owned = app.session.draft_image_attachments[0].local_path.clone();
     open_model_panel(&mut app, &model_picker_config()).unwrap();
     select_model_provider(&mut app, 1);
     activate_selected_model(&mut app).unwrap();
     assert!(owned.exists());
     handle_paste(&mut app, "secret-key".into());
     handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
-    assert_eq!(app.input, text);
-    assert_eq!(app.draft_image_attachments[0].local_path, owned);
+    assert_eq!(app.session.input, text);
+    assert_eq!(app.session.draft_image_attachments[0].local_path, owned);
     assert!(owned.exists());
     close_model_panel(&mut app);
     handle_key(
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
         &mut app,
     );
-    assert_eq!(app.input, "draft ");
+    assert_eq!(app.session.input, "draft ");
     clear_composer(&mut app);
     assert!(!owned.exists());
     std::fs::remove_dir_all(root).unwrap();
@@ -8119,6 +9406,11 @@ fn model_apply_error_keeps_the_selected_effort_and_does_not_claim_success() {
         model_picker::Stage::ModelEffort(2)
     );
     assert_eq!(app.model_effort.as_deref(), Some("high"));
-    assert_eq!(app.input, "draft");
-    assert!(app.message.as_deref().unwrap().contains("channel closed"));
+    assert_eq!(app.session.input, "draft");
+    assert!(app
+        .session
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("channel closed"));
 }

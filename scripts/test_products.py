@@ -16,11 +16,11 @@ class ProductEntryTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_local_products_do_not_install_python_or_build_hosted_images(self):
-        for product in ("core", "runtime", "tui", "desktop"):
+        for product in ("core", "runtime", "tui"):
             commands = self.plan(product)
             self.assertFalse(any(command[0] in ("uv", "docker") for command in commands))
         self.assertEqual(self.plan("runtime"), [
-            ["cargo", "build", "--locked", "-p", "centaeris-desktop-services"],
+            ["cargo", "build", "--locked", "-p", "centaeris-cli-runtime"],
         ])
         self.assertEqual(self.plan("tui"), [
             ["cargo", "build", "--locked", "-p", "centaeris-tui"],

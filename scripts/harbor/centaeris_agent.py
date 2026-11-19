@@ -108,7 +108,7 @@ class CentaerisAgent(BaseInstalledAgent):
             await self.exec_as_root(environment, command=(
                 f"chown -R {shlex.quote(str(environment.default_user))} "
                 f"{shlex.quote(self.remote)} {shlex.quote(self.remote_logs)}"))
-        await environment.upload_file(self.binary, self.remote + "/centaeris-runtime")
+        await environment.upload_file(self.binary, self.remote + "/cet")
         await environment.upload_file(Path(__file__).with_name("runner.py"), self.remote + "/runner.py")
         network_dir = '/installed-agent/centaeris-network'
         result = await self.exec_as_root(environment, command=f'mkdir -p {network_dir}')
@@ -122,11 +122,10 @@ class CentaerisAgent(BaseInstalledAgent):
         await environment.upload_dir(skills, self.remote + "/system-skills")
         result = await self.exec_as_root(environment, command=(
             f"chmod -R a+rX {shlex.quote(self.remote)}; "
-            f"chmod a+x {shlex.quote(self.remote + '/centaeris-runtime')}"))
+            f"chmod a+x {shlex.quote(self.remote + '/cet')}"))
         if result.return_code:
             raise RuntimeError("setting installed runtime permissions failed")
-        preflight = ["env", "-i", "CENTAERIS_DESKTOP_DATA_DIR=/tmp/centaeris-preflight-" + self.attempt,
-                     self.remote + "/centaeris-runtime", "--runtime-server-endpoint"]
+        preflight = ["env", "-i", self.remote + "/cet", "--version"]
         result = await environment.exec(command=shlex.join(preflight), cwd="/", timeout_sec=30)
         if result.return_code:
             raise RuntimeError(
@@ -160,7 +159,7 @@ class CentaerisAgent(BaseInstalledAgent):
         await self.exec_as_root(environment, command=(
             "chmod a+r " + shlex.quote(self.remote + "/instruction.txt")))
         runner = ["python3", self.remote + "/runner.py", "run", "--logs", self.remote_logs,
-                  "--runtime", self.remote + "/centaeris-runtime", "--attempt", self.attempt,
+                  "--runtime", self.remote + "/cet", "--attempt", self.attempt,
                   "--instruction", self.remote + "/instruction.txt", "--model", self.model_name,
                   "--provider", self.provider, "--credential-env", self.credential_env,
                   "--context-tokens", str(self.context_tokens), "--output-tokens", str(self.output_tokens),

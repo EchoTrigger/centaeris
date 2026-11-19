@@ -81,7 +81,7 @@ pub(crate) fn image_from_pasted_text(text: &str) -> Result<Option<PathBuf>, Stri
     write_temp_png(image).map(Some)
 }
 
-fn write_temp_png(image: image::DynamicImage) -> Result<PathBuf, String> {
+pub(crate) fn write_temp_png(image: image::DynamicImage) -> Result<PathBuf, String> {
     let mut encoded = Vec::new();
     image
         .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)

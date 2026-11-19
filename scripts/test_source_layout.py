@@ -20,10 +20,17 @@ class SourceLayoutTests(unittest.TestCase):
 
     def test_all_node_products_share_the_root_lock(self):
         self.assertTrue((ROOT / "pnpm-lock.yaml").is_file())
+        shell = ROOT / "packages/electron-shell"
         for manifest in [*(ROOT / "packages").glob("*/package.json"), *(ROOT / "packages/workspace").glob("*/package.json")]:
             for name in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock"):
+                if manifest.parent == shell and name == "pnpm-lock.yaml":
+                    continue
                 self.assertFalse((manifest.parent / name).exists(), str(manifest.parent / name))
         self.assertFalse((ROOT / "package-lock.json").exists())
+        self.assertTrue((shell / "pnpm-lock.yaml").is_file())
+        self.assertTrue((shell / "pnpm-workspace.yaml").is_file())
+        self.assertNotIn("packages/electron-shell", (ROOT / "pnpm-workspace.yaml").read_text())
+        self.assertNotIn("packages/electron-shell", (ROOT / "pnpm-lock.yaml").read_text())
 
     def test_package_manager_selection_matches_the_root_manifest(self):
         manifest = json.loads((ROOT / "package.json").read_text())

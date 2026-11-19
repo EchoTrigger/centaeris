@@ -454,7 +454,10 @@ impl AsyncJobStorePort for SqliteJobStore {
         })
         .await
     }
-    async fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, JobStoreError> {
+    async fn subagent_job_cancellation_requested(
+        &self,
+        job_id: &str,
+    ) -> Result<bool, JobStoreError> {
         let job_id = job_id.to_owned();
         self.execute(JobStoreOperation::Read, move |conn, _| {
             sqlite_reliability::subagent_job_cancellation_requested_conn(conn, &job_id)

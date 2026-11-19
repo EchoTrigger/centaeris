@@ -5,7 +5,8 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY packages/agent/Cargo.toml packages/agent/Cargo.toml
 COPY packages/agent/src/lib.rs packages/agent/src/lib.rs
 COPY packages/cli/Cargo.toml packages/cli/Cargo.toml
-COPY packages/desktop/src/services/Cargo.toml packages/desktop/src/services/Cargo.toml
+COPY packages/cli/runtime/Cargo.toml packages/cli/runtime/Cargo.toml
+COPY packages/cli/runtime/src/lib.rs packages/cli/runtime/src/lib.rs
 COPY packages/core packages/core
 COPY packages/model-catalog packages/model-catalog
 COPY packages/model-http packages/model-http

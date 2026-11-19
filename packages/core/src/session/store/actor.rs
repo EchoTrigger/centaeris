@@ -26,9 +26,10 @@ use crate::session::reliability::{
     FailRuntimeJobRequest, ListDeadLettersRequest, ListRuntimeJobsRequest,
     MarkDeadLetterReplayedRequest, MarkDeadLetterReplayingRequest, ReleaseResourceClaimRequest,
     RenewRuntimeJobLeaseRequest, ReplayDeadLetterRequest, ReplayDeadLetterResult,
-    RequestSubagentJobCancellation, ResourceClaimRecord, ResourceClaimStorePort, RuntimeJobRecord, RuntimeJobStorePort,
-    ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult, StartRuntimeJobRequest,
-    SubagentJobCancellationReceipt, WakeRuntimeJobDisposition, WakeRuntimeJobRequest, YieldRuntimeJobRequest,
+    RequestSubagentJobCancellation, ResourceClaimRecord, ResourceClaimStorePort, RuntimeJobRecord,
+    RuntimeJobStorePort, ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult,
+    StartRuntimeJobRequest, SubagentJobCancellationReceipt, WakeRuntimeJobDisposition,
+    WakeRuntimeJobRequest, YieldRuntimeJobRequest,
 };
 use crate::session::transcript::{
     TranscriptPageReadRequestV1, TranscriptPageReadResultV1, TranscriptPatchReadRequestV1,
@@ -1136,12 +1137,16 @@ impl RuntimeJobStorePort for RuntimeStoreActor {
         &self,
         req: RequestSubagentJobCancellation,
     ) -> Result<SubagentJobCancellationReceipt, String> {
-        self.send_blocking(|reply| RuntimeStoreActorCommand::RequestSubagentJobCancellation { req, reply })
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::RequestSubagentJobCancellation { req, reply },
+        )
     }
 
     fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, String> {
         let job_id = job_id.to_owned();
-        self.send_blocking(|reply| RuntimeStoreActorCommand::SubagentJobCancellationRequested { job_id, reply })
+        self.send_blocking(
+            |reply| RuntimeStoreActorCommand::SubagentJobCancellationRequested { job_id, reply },
+        )
     }
 
     fn reclaim_expired_runtime_job_leases(&self, now_ms: TimestampMs) -> Result<usize, String> {

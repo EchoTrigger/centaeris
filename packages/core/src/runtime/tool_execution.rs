@@ -37,6 +37,14 @@ pub(super) struct ToolExecutionIntentV1 {
 }
 
 impl ToolExecutionIntentV1 {
+    fn migrated_contract_digest(&self) -> &str {
+        crate::tool::migrate_recorded_tool_digest(
+            &self.source_tool_name,
+            &self.provider_id,
+            &self.tool_contract_digest,
+        )
+    }
+
     fn matches_model_arguments(&self, args_json: &str) -> bool {
         if self.model_args_digest == sha256_digest(args_json.as_bytes()) {
             return true;
@@ -1453,7 +1461,7 @@ impl<
                     || intent.tool_call_id != call.id
                     || intent.source_tool_name != call.name
                     || intent.provider_id != provider_id
-                    || intent.tool_contract_digest != tool_contract_digest
+                    || intent.migrated_contract_digest() != tool_contract_digest
                     || intent.agent_run_identity.as_ref() != agent_run_identity
                 {
                     return Err(format!(
@@ -1473,7 +1481,7 @@ impl<
                     intent.agent_run_identity.as_ref(),
                     &effective_call,
                     provider_id,
-                    tool_contract_digest.as_str(),
+                    intent.tool_contract_digest.as_str(),
                     intent.recorded_at_ms,
                 )?;
                 if let Some(receipt) = execution_facts.receipts.get(call.id.as_str()) {

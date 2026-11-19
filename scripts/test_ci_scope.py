@@ -42,12 +42,12 @@ class ScopeTests(unittest.TestCase):
             selected = select_products([path])
             self.assertEqual({key for key, value in selected.items() if value}, {"workspacePython"})
 
-    def test_api_and_desktop_changes_include_their_contract_consumers(self):
+    def test_api_and_cli_changes_include_their_contract_consumers(self):
         api = select_products(["packages/workspace/api/app_core/http/messages.py"])
         self.assertTrue(api["workspacePython"] and api["workspaceRust"] and api["docker"])
-        ui = select_products(["packages/desktop/src/renderer/components/chat/messageScroll.ts"])
-        self.assertEqual({key for key, value in ui.items() if value}, {"localNode"})
-        services = select_products(["packages/desktop/src/services/schedules.rs"])
+        ui = select_products(["packages/electron-shell/windowShell.mjs"])
+        self.assertEqual({key for key, value in ui.items() if value}, set())
+        services = select_products(["packages/cli/runtime/src/schedules.rs"])
         self.assertEqual({key for key, value in services.items() if value}, {"coreRust", "localNode"})
 
     def test_visualization_changes_check_both_consumers_and_web_image(self):

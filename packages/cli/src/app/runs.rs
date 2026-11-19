@@ -39,11 +39,11 @@ impl RunState {
     }
 }
 
-pub(super) fn record_activity(app: &mut App, event: &Value, run_id: Option<&str>) {
+pub(super) fn record_activity(state: &mut SessionState, event: &Value, run_id: Option<&str>) {
     let Some(run_id) = run_id else {
         return;
     };
-    let state = if event["type"] == "RuntimeWaitChanged" {
+    let activity = if event["type"] == "RuntimeWaitChanged" {
         match event.pointer("/payload/status").and_then(Value::as_str) {
             Some("waiting") => Some(RunState::Waiting),
             Some("resumed" | "abandoned") => Some(RunState::Running),
@@ -61,26 +61,28 @@ pub(super) fn record_activity(app: &mut App, event: &Value, run_id: Option<&str>
                 _ => RunState::Running,
             })
     };
-    if let Some(state) = state {
-        app.run_activity.insert(run_id.into(), state);
+    if let Some(activity) = activity {
+        state.run_activity.insert(run_id.into(), activity);
     }
 }
 
 fn states(app: &App) -> HashMap<&str, (RunState, &str)> {
     let mut states = HashMap::new();
     for run_id in app
+        .session
         .active_agent_run_ids
         .iter()
-        .chain(app.active_agent_run_id.iter())
+        .chain(app.session.active_agent_run_id.iter())
     {
         let state = app
+            .session
             .run_activity
             .get(run_id)
             .copied()
             .unwrap_or(RunState::Running);
         states.insert(run_id.as_str(), (state, ""));
     }
-    for line in &app.transcript {
+    for line in &app.session.transcript {
         if let TranscriptLine::RunBoundary {
             run_id,
             state,
@@ -105,7 +107,7 @@ pub(super) fn process_visible(app: &App, run_id: &str) -> bool {
 pub(super) fn visible_transcript(app: &App) -> Vec<TranscriptLine> {
     let states = states(app);
     let mut visible = Vec::new();
-    for item in &app.transcript {
+    for item in &app.session.transcript {
         match item {
             TranscriptLine::RunItem {
                 run_id,
@@ -146,8 +148,9 @@ pub(super) fn visible_transcript(app: &App) -> Vec<TranscriptLine> {
             }
         }
     }
-    let active = active_agent_run_ids(app);
+    let active = active_agent_run_ids(&app.session);
     let primary = app
+        .session
         .active_agent_run_id
         .as_deref()
         .or_else(|| active.first().map(String::as_str));

@@ -25,22 +25,22 @@ struct Snapshot {
     reasoning: Option<SnapshotReasoning>,
 }
 
-fn replace_reasoning(app: &mut App, key: String, text: String) {
-    if let Some(TranscriptLine::Reasoning { text: previous, .. }) = app.transcript.iter_mut().find(
+fn replace_reasoning(state: &mut SessionState, key: String, text: String) {
+    if let Some(TranscriptLine::Reasoning { text: previous, .. }) = state.transcript.iter_mut().find(
         |line| matches!(line, TranscriptLine::Reasoning { key: existing, .. } if existing == &key),
     ) {
         *previous = text;
     } else {
-        app.transcript.push(TranscriptLine::Reasoning {
+        state.transcript.push(TranscriptLine::Reasoning {
             key,
             text,
             final_started: false,
         });
     }
-    invalidate_transcript_layout(app);
+    invalidate_transcript_layout(state);
 }
 
-pub(super) fn apply_reasoning(app: &mut App, payload: &Value) -> Result<(), String> {
+pub(super) fn apply_reasoning(state: &mut SessionState, payload: &Value) -> Result<(), String> {
     let value: ReasoningPayload = serde_json::from_value(payload.clone())
         .map_err(|_| "Reasoning payload fields are invalid".to_string())?;
     if value.request_id.is_empty()
@@ -49,12 +49,12 @@ pub(super) fn apply_reasoning(app: &mut App, payload: &Value) -> Result<(), Stri
     {
         return Err("Reasoning identity or status is invalid".to_string());
     }
-    replace_reasoning(app, value.block_id, value.text);
+    replace_reasoning(state, value.block_id, value.text);
     Ok(())
 }
 
 pub(super) fn apply_snapshot(
-    app: &mut App,
+    state: &mut SessionState,
     event: &Value,
     run: Option<&str>,
 ) -> Result<(), String> {
@@ -73,17 +73,17 @@ pub(super) fn apply_snapshot(
         return Err("ModelSnapshot revision or reasoning identity is invalid".to_string());
     }
     let identity = format!("{}:{turn}", run.unwrap_or_default());
-    if app
+    if state
         .snapshot_revisions
         .get(&identity)
         .is_some_and(|revision| *revision >= value.revision)
     {
         return Ok(());
     }
-    app.snapshot_revisions.insert(identity, value.revision);
+    state.snapshot_revisions.insert(identity, value.revision);
     if let Some(reasoning) = value.reasoning {
-        replace_reasoning(app, reasoning.block_id, reasoning.text);
+        replace_reasoning(state, reasoning.block_id, reasoning.text);
     }
-    replace_assistant_buffer(app, value.text);
+    replace_assistant_buffer(state, value.text);
     Ok(())
 }

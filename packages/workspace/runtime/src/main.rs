@@ -6001,7 +6001,9 @@ fn tool_display_target(
         "bash" => tool_name.to_string(),
         "write" | "edit" => required_tool_input_string(input, "path", tool_name)?.to_string(),
         "web_search" => required_tool_input_string(input, "query", tool_name)?.to_string(),
-        "agent" | "spawn_agent" | "followup_task" => required_tool_input_string(input, "description", tool_name)?.to_string(),
+        "agent" | "spawn_agent" | "followup_task" => {
+            required_tool_input_string(input, "description", tool_name)?.to_string()
+        }
         _ => tool_name.to_string(),
     };
     Ok(target.chars().take(256).collect())

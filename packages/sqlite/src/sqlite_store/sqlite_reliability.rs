@@ -3,21 +3,20 @@ use centaeris_core::runtime::contracts::{EventVisibility, RuntimeEvent};
 use centaeris_core::runtime::subagent::SUBAGENT_RUN_JOB_KIND;
 use centaeris_core::session::reliability::{
     subagent_cancel_request_id, AcquireResourceClaimDisposition, AcquireResourceClaimRequest,
-    AcquireResourceClaimResult,
-    CancelRuntimeJobRequest, ClaimDueRuntimeJobsRequest, CompleteRuntimeJobRequest,
-    CreateDeadLetterDisposition, CreateDeadLetterRequest, CreateDeadLetterResult, DeadLetterRecord,
-    DeadLetterReplayPolicy, DeadLetterStatus, DeadLetterStorePort, DismissDeadLetterRequest,
-    FailRuntimeJobRequest, ListDeadLettersRequest, ListRuntimeJobsRequest,
-    MarkDeadLetterReplayedRequest, MarkDeadLetterReplayingRequest, ReleaseResourceClaimRequest,
-    RenewRuntimeJobLeaseRequest, ReplayDeadLetterRequest, ReplayDeadLetterResult,
-    RequestSubagentJobCancellation, ResourceClaimRecord, ResourceClaimStorePort, RuntimeBackoffPolicy,
-    RuntimeJobFailureDisposition, RuntimeJobLeaseReclaimPolicy, RuntimeJobOutboxPort,
-    RuntimeJobOutboxPublishDisposition, RuntimeJobOutboxRecord, RuntimeJobRecord, RuntimeJobStatus,
-    RuntimeJobStorePort, ScheduleRuntimeJobDisposition, ScheduleRuntimeJobRequest,
-    ScheduleRuntimeJobResult, StartRuntimeJobRequest, SubagentJobCancellationReceipt,
-    WakeRuntimeJobDisposition, WakeRuntimeJobRequest, YieldRuntimeJobRequest,
-    RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT, RUNTIME_JOB_TERMINAL_EVENT, SUBAGENT_CANCEL_REASON,
-    SUBAGENT_CANCEL_REQUESTED_EVENT,
+    AcquireResourceClaimResult, CancelRuntimeJobRequest, ClaimDueRuntimeJobsRequest,
+    CompleteRuntimeJobRequest, CreateDeadLetterDisposition, CreateDeadLetterRequest,
+    CreateDeadLetterResult, DeadLetterRecord, DeadLetterReplayPolicy, DeadLetterStatus,
+    DeadLetterStorePort, DismissDeadLetterRequest, FailRuntimeJobRequest, ListDeadLettersRequest,
+    ListRuntimeJobsRequest, MarkDeadLetterReplayedRequest, MarkDeadLetterReplayingRequest,
+    ReleaseResourceClaimRequest, RenewRuntimeJobLeaseRequest, ReplayDeadLetterRequest,
+    ReplayDeadLetterResult, RequestSubagentJobCancellation, ResourceClaimRecord,
+    ResourceClaimStorePort, RuntimeBackoffPolicy, RuntimeJobFailureDisposition,
+    RuntimeJobLeaseReclaimPolicy, RuntimeJobOutboxPort, RuntimeJobOutboxPublishDisposition,
+    RuntimeJobOutboxRecord, RuntimeJobRecord, RuntimeJobStatus, RuntimeJobStorePort,
+    ScheduleRuntimeJobDisposition, ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult,
+    StartRuntimeJobRequest, SubagentJobCancellationReceipt, WakeRuntimeJobDisposition,
+    WakeRuntimeJobRequest, YieldRuntimeJobRequest, RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT,
+    RUNTIME_JOB_TERMINAL_EVENT, SUBAGENT_CANCEL_REASON, SUBAGENT_CANCEL_REQUESTED_EVENT,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, OptionalExtension};
@@ -1417,7 +1416,9 @@ pub(super) fn reclaim_expired_runtime_job_leases_conn(
                 .map_err(|error| format!("decode expired leases failed: {error}"))?
         };
         let policy = RuntimeJobLeaseReclaimPolicy::default();
-        for (job_id, session_id, lease_owner, previous_count, status, prior_error, job_kind) in &expired {
+        for (job_id, session_id, lease_owner, previous_count, status, prior_error, job_kind) in
+            &expired
+        {
             let prior_status =
                 runtime_job_status_from_db(status).map_err(|error| error.to_string())?;
             if job_kind == SUBAGENT_RUN_JOB_KIND
@@ -1706,8 +1707,8 @@ pub(super) fn request_subagent_job_cancellation_conn(
             ).optional().map_err(|error| format!("read subagent job to cancel failed: {error}"))?
                 .ok_or("subagent job not found in session")?;
             let status = runtime_job_status_from_db(&status)?;
-            let already_requested = !status.is_terminal()
-                && subagent_job_cancellation_requested_conn(tx, &req.job_id)?;
+            let already_requested =
+                !status.is_terminal() && subagent_job_cancellation_requested_conn(tx, &req.job_id)?;
             let receipt = SubagentJobCancellationReceipt::decide(status, already_requested);
             if !receipt.accepted {
                 return Ok(receipt);

@@ -33,12 +33,10 @@ def source_revision(clean=True):
 
 def build_commands(product, release=False):
     pnpm = "pnpm.cmd" if os.name == "nt" else "pnpm"
-    rust = {"core": "centaeris-core", "runtime": "centaeris-desktop-services", "tui": "centaeris-tui",
+    rust = {"core": "centaeris-core", "runtime": "centaeris-cli-runtime", "tui": "centaeris-tui",
             "runtime-server": "runtime_server", "hosted-execution": "hosted_execution"}
     if product in rust:
         return [["cargo", "build", "--locked", "-p", rust[product], *(["--release"] if release else [])]]
-    if product == "desktop":
-        return [["pwsh", "-NoProfile", "-File", "scripts/build-desktop.ps1"]]
     if product == "web":
         return [[pnpm, "--filter", "web...", "--filter", "centaeris", "install", "--frozen-lockfile"],
                 [pnpm, "--filter", "web", "run", "build"]]
@@ -53,7 +51,7 @@ def build_commands(product, release=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("build",))
-    parser.add_argument("product", choices=("core", "runtime", "tui", "desktop", "runtime-server", "hosted-execution",
+    parser.add_argument("product", choices=("core", "runtime", "tui", "runtime-server", "hosted-execution",
                                            "web", "api", "document-processor", "workspace-images"))
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

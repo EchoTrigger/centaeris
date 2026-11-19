@@ -26,7 +26,7 @@ def run_command(args, capture=False):
     return result.stdout or ""
 
 
-def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False, format_checked=False):
+def run_gate(stage, run=run_command, platform=sys.platform, format_checked=False):
     if stage not in ("Rust", "Node", "Source"):
         raise ValueError(f"Unknown source gate: {stage}")
     run([sys.executable, "-B", "scripts/test_product_licensing.py"])
@@ -40,7 +40,7 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
         for args in (
             ["check", "--locked", *package_flags()],
             ["clippy", "--all-targets", "--locked", *package_flags(), "--", "-D", "warnings"],
-            ["run", "--locked", "-p", "centaeris-desktop-services", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"],
+            ["run", "--locked", "-p", "centaeris-cli-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"],
         ):
             run(["cargo", *args])
         run(["node", "scripts/visualization-contract.mjs", "--check"])
@@ -53,29 +53,20 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
         run(["cargo", "test", "--locked", *package_flags()])
     if stage in ("Node", "Source"):
         run([sys.executable, "-B", "scripts/test_system_skills.py"])
-        run(["node", "--test", "packages/desktop/src/main/services/systemSkills.test.mjs"])
+        run(["node", "--test", "scripts/system-skills.test.mjs", "scripts/product-licenses.test.mjs"])
         run([pnpm, "install", "--frozen-lockfile"])
         run([pnpm, "--filter", "@centaeris/sdk", "run", "typecheck"])
         run([pnpm, "--filter", "@centaeris/sdk", "run", "test"])
         run([pnpm, "--filter", "@centaeris/ui", "run", "typecheck"])
         run([pnpm, "--filter", "@centaeris/visuals", "run", "typecheck"])
-        if frontend_tests:
-            run([pnpm, "--filter", "@centaeris/electron-host", "run", "gate:renderer"])
-            run([pnpm, "--filter", "@centaeris/electron-host", "run", "check"])
-        else:
-            for script in ("build:renderer", "lint:source"):
-                run([pnpm, "--filter", "@centaeris/electron-host", "run", script])
-            for script in ("check:syntax", "check:host-parity"):
-                run([pnpm, "--filter", "@centaeris/electron-host", "run", script])
-        run([pnpm, "--filter", "@centaeris/electron-host", "run", "test:third-party-licenses"])
+        run([pnpm, "run", "lint:ui"])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", nargs="?", choices=("Rust", "Node", "Source"), default="Source")
-    parser.add_argument("--frontend-tests", action="store_true")
     parser.add_argument("--format-checked", action="store_true",
                         help="Use the required formatting result from the same CI checkout")
     args = parser.parse_args()
     run_command([sys.executable, "-B", "scripts/test_ci.py"])
-    run_gate(args.stage, frontend_tests=args.frontend_tests, format_checked=args.format_checked)
+    run_gate(args.stage, format_checked=args.format_checked)

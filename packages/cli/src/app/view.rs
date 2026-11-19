@@ -1,6 +1,5 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::widgets::{Block, BorderType, Borders};
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -8,8 +7,8 @@ use super::*;
 
 pub(super) const COMMAND_NAME_WIDTH: usize = 16;
 const SHORT_TERMINAL_ROWS: u16 = 18;
-const USER_PROMPT_PREFIX: &str = "  ❯ ";
-const USER_PROMPT_CONTINUATION: &str = "    ";
+const USER_PROMPT_PREFIX: &str = "❯ ";
+const USER_PROMPT_CONTINUATION: &str = "  ";
 const PROMPT_TEXT_COLUMN: u16 = USER_PROMPT_CONTINUATION.len() as u16;
 
 pub(super) struct TranscriptView {
@@ -17,14 +16,17 @@ pub(super) struct TranscriptView {
     line_start_rows: Vec<u64>,
     pub(super) source_rows: Vec<(String, u64)>,
     bash_block_rows: Vec<(String, Range<u64>)>,
+    subagent_link_rows: Vec<(String, u64)>,
     pub(super) images: Vec<TranscriptImagePlacement>,
+    pub(super) media: Vec<media::Placement>,
     pub(super) total_rows: u64,
     pub(super) layout: Arc<text_layout::TextLayout>,
 }
 
 pub(super) struct TranscriptImagePlacement {
-    pub(super) key: String,
+    pub(super) image: ToolImage,
     pub(super) row: u64,
+    pub(super) size: Rect,
 }
 
 pub(super) struct TranscriptRenderWindow {
@@ -35,41 +37,45 @@ pub(super) struct TranscriptRenderWindow {
 pub(super) struct TranscriptLayoutCache {
     width: u16,
     revision: u64,
+    subagent_revision: u64,
     transcript_len: usize,
     view: Arc<TranscriptView>,
     pub(super) rebuilds: u64,
 }
 
 pub(super) fn build_cached_transcript_view(app: &mut App, width: u16) -> Arc<TranscriptView> {
-    if let Some(cache) = app.transcript_layout_cache.as_ref() {
+    if let Some(cache) = app.session.transcript_layout_cache.as_ref() {
         if cache.width == width
-            && cache.revision == app.transcript_revision
-            && cache.transcript_len == app.transcript.len()
+            && cache.revision == app.session.transcript_revision
+            && cache.subagent_revision == app.session.subagents.terminal_revision()
+            && cache.transcript_len == app.session.transcript.len()
         {
             return Arc::clone(&cache.view);
         }
     }
     let view = Arc::new(build_transcript_view(app, width));
-    if !app.transcript_follow_bottom {
-        if let Some(cache) = app.transcript_layout_cache.as_ref() {
-            app.transcript_scroll = restore_reading_row(
+    if !app.session.transcript_follow_bottom {
+        if let Some(cache) = app.session.transcript_layout_cache.as_ref() {
+            app.session.transcript_scroll = restore_reading_row(
                 &cache.view,
                 &view,
-                app.transcript_scroll,
+                app.session.transcript_scroll,
                 cache.width,
                 width,
             );
         }
     }
     let rebuilds = app
+        .session
         .transcript_layout_cache
         .as_ref()
         .map(|cache| cache.rebuilds.saturating_add(1))
         .unwrap_or(1);
-    app.transcript_layout_cache = Some(TranscriptLayoutCache {
+    app.session.transcript_layout_cache = Some(TranscriptLayoutCache {
         width,
-        revision: app.transcript_revision,
-        transcript_len: app.transcript.len(),
+        revision: app.session.transcript_revision,
+        subagent_revision: app.session.subagents.terminal_revision(),
+        transcript_len: app.session.transcript.len(),
         view: Arc::clone(&view),
         rebuilds,
     });
@@ -146,155 +152,296 @@ fn restore_reading_row(
     scroll
 }
 
-pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &TranscriptView) {
-    mouse::prepare_frame(app);
-    render_content(frame, app, transcript_view);
-    mouse::decorate(frame, app);
+pub(super) enum FrameLayout {
+    SubagentDetail(Rect),
+    Dashboard(Rect),
+    SessionPicker(Rect),
+    Settings(Rect),
+    TooSmall(Rect),
+    ModelPicker(Rect),
+    ReadOnly {
+        history: Rect,
+        notice: Rect,
+        hints: Rect,
+        error: Rect,
+        status: Rect,
+    },
+    Main {
+        header: Rect,
+        history: Rect,
+        status: Rect,
+        panel: Rect,
+        dock: Rect,
+        input: ComposerLayout,
+        footer: Rect,
+        has_timeline: bool,
+    },
 }
 
-fn render_content(frame: &mut Frame, app: &mut App, transcript_view: &TranscriptView) {
-    let area = frame.area();
-    app.input_area = None;
-    app.panel_area = None;
-    app.transcript_area = None;
-    app.image_preview_area = None;
-    app.transcript_viewport = None;
-    app.model_provider_hit_regions.clear();
-    app.model_list_area = None;
-    app.model_list_offset = 0;
-    if app.session_picker.is_some() {
-        session_picker::render(frame, area, app);
-        return;
-    }
-    if area.width < 32 || area.height < 10 {
-        let paragraph =
-            Paragraph::new("Terminal too small.").style(Style::default().fg(theme().muted));
-        frame.render_widget(paragraph, area);
-        render_image_preview(frame, app, area);
-        return;
-    }
-
-    if app.model_panel.is_some() {
-        render_model_panel(frame, area, app);
-        return;
-    }
-    if app.read_only_session.is_some() {
-        render_read_only_session(frame, area, app, transcript_view);
-        return;
-    }
-
-    let has_timeline = !app.transcript.is_empty()
-        || app.tool_projection.has_open_calls()
-        || app.active_tool_label.is_some()
-        || !app.assistant_buffer.trim().is_empty();
-    let status_rows = u16::from(
-        has_active_agent_run(app)
-            || app.pending_question.is_some()
-            || app.process_state == RuntimeDisplayState::ConnectionLost,
-    );
-    // One row each for the workspace, transcript and shortcuts, plus two composer borders.
-    let available = area.height.saturating_sub(status_rows + 5);
-    let input_rows = input_row_count(app, area.width).min(available);
-    let panel_space = if app.home_risk_panel.is_some() || app.pending_question.is_some() {
-        available.saturating_sub(1)
-    } else {
-        available.saturating_sub(input_rows)
-    };
-    let panel_rows = panel_height(app, panel_space).min(panel_space);
-    let input_rows = input_rows.min(available.saturating_sub(panel_rows));
-    let input_gap = u16::from(
-        area.height > SHORT_TERMINAL_ROWS
-            && available > input_rows
-            && has_timeline
-            && status_rows == 0
-            && panel_rows == 0,
-    );
-    let panel_above_input = app.command_panel_open() || app.home_risk_panel.is_some();
-    let (above_rows, below_rows) = if panel_above_input {
-        (panel_rows, 0)
-    } else {
-        (0, panel_rows)
-    };
-    let [header, history, status, above_input, _, input, below_input, shortcuts] =
-        Layout::vertical([
+impl FrameLayout {
+    pub(super) fn new(app: &App, area: Rect) -> Self {
+        if app.session.subagents.detail_open() {
+            return Self::SubagentDetail(area);
+        }
+        if app.session_picker.is_some() {
+            return Self::SessionPicker(area);
+        }
+        if dashboard::visible(app) {
+            return Self::Dashboard(area);
+        }
+        if area.width < 32 || area.height < 10 {
+            return Self::TooSmall(area);
+        }
+        if app.model_panel.is_some() {
+            return Self::ModelPicker(area);
+        }
+        if settings::visible(app) {
+            return Self::Settings(area);
+        }
+        if app.session.read_only_session.is_some() {
+            let [history, notice, hints, error, status] = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(u16::from(app.session.message.is_some())),
+                Constraint::Length(1),
+            ])
+            .areas(area);
+            return Self::ReadOnly {
+                history,
+                notice,
+                hints,
+                error,
+                status,
+            };
+        }
+        let has_timeline = app.session.pending_history.is_some()
+            || !app.session.transcript.is_empty()
+            || app.session.subagents.terminal_links().next().is_some()
+            || app.session.tool_projection.has_open_calls()
+            || app.session.active_tool_label.is_some()
+            || !app.session.assistant_buffer.trim().is_empty();
+        let status_rows = u16::from(
+            has_active_agent_run(&app.session)
+                || app.session.pending_question.is_some()
+                || app.session.process_state == RuntimeDisplayState::ConnectionLost,
+        );
+        let available = area.height.saturating_sub(status_rows + 3);
+        let text = composer_layout(app, composer_text_width(area.width));
+        let input_rows = composer_rows(app, &text).min(available);
+        let panel_space =
+            if app.session.home_risk_panel.is_some() || app.session.pending_question.is_some() {
+                available.saturating_sub(1)
+            } else {
+                available.saturating_sub(input_rows)
+            };
+        let panel_rows = panel_height(app, panel_space).min(panel_space);
+        let input_rows = input_rows.min(available.saturating_sub(panel_rows));
+        let dock_rows = if panel_rows == 0 && !app.secret_input_active() {
+            app.session
+                .subagents
+                .row_budget(available.saturating_sub(input_rows))
+        } else {
+            0
+        };
+        let input_gap = u16::from(
+            area.height > SHORT_TERMINAL_ROWS
+                && available > input_rows
+                && has_timeline
+                && status_rows == 0
+                && panel_rows == 0
+                && dock_rows == 0,
+        );
+        let panel_above_input = app.command_panel_open() || app.session.home_risk_panel.is_some();
+        let [header, history, status, dock, above, _, input, below, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(status_rows),
-            Constraint::Length(above_rows),
+            Constraint::Length(dock_rows),
+            Constraint::Length(if panel_above_input { panel_rows } else { 0 }),
             Constraint::Length(input_gap),
-            Constraint::Length(input_rows + 2),
-            Constraint::Length(below_rows),
+            Constraint::Length(input_rows),
+            Constraint::Length(if panel_above_input { 0 } else { panel_rows }),
             Constraint::Length(1),
         ])
         .areas(area);
-    render_workspace_header(frame, header, app);
-    if has_timeline {
-        render_transcript(frame, history, app, transcript_view);
-    } else {
-        render_welcome(frame, history);
-        app.transcript_scroll = 0;
-        app.transcript_max_scroll = 0;
-        app.transcript_selection = None;
+        Self::Main {
+            header,
+            history,
+            status,
+            panel: if panel_above_input { above } else { below },
+            dock,
+            input: ComposerLayout::new(app, input, text),
+            footer,
+            has_timeline,
+        }
     }
-    if status_rows > 0 {
-        render_status_indicator(frame, status, app);
+
+    pub(super) fn preview_history(&self) -> Option<Rect> {
+        match *self {
+            Self::Main { history, .. }
+            | Self::ReadOnly { history, .. }
+            | Self::TooSmall(history) => Some(history),
+            Self::SubagentDetail(_)
+            | Self::Dashboard(_)
+            | Self::SessionPicker(_)
+            | Self::Settings(_)
+            | Self::ModelPicker(_) => None,
+        }
     }
-    if panel_rows > 0 {
-        let panel_area = if panel_above_input {
-            above_input
-        } else {
-            below_input
-        };
-        app.panel_area = Some(panel_area);
-        render_panel(frame, panel_area, app);
-    }
-    render_input(frame, input, app);
-    render_shortcuts(frame, shortcuts, app);
-    render_image_preview(frame, app, history);
 }
 
-fn render_read_only_session(
+#[cfg(test)]
+pub(super) fn render(frame: &mut Frame, app: &mut App, transcript_view: &TranscriptView) {
+    let layout = FrameLayout::new(app, frame.area());
+    if let Some(caret) = render_prepared(frame, app, transcript_view, layout) {
+        frame.set_cursor_position(caret);
+    }
+}
+
+pub(super) fn render_prepared(
     frame: &mut Frame,
-    area: Rect,
     app: &mut App,
     transcript_view: &TranscriptView,
+    layout: FrameLayout,
+) -> Option<Position> {
+    clear_hitboxes(app);
+    mouse::prepare_frame(app);
+    render_content(frame, app, transcript_view, layout);
+    mouse::decorate(frame, app);
+    app.frame_caret
+}
+
+pub(super) fn clear_hitboxes(app: &mut App) {
+    settings::invalidate_geometry(app);
+    app.input_area = None;
+    app.frame_caret = None;
+    app.panel_area = None;
+    app.transcript_area = None;
+    app.image_preview_area = None;
+    app.media.clear_hits();
+    app.transcript_viewport = None;
+    app.subagent_dock = subagents::DockLayout::default();
+    app.subagent_links.clear();
+    app.model_provider_hit_regions.clear();
+    app.model_list_area = None;
+    app.model_list_offset = 0;
+    if let Some(ImagePreview::Pixels(preview)) = app.session.image_preview.as_mut() {
+        preview.image_area = Rect::default();
+    }
+}
+
+fn render_content(
+    frame: &mut Frame,
+    app: &mut App,
+    transcript_view: &TranscriptView,
+    layout: FrameLayout,
 ) {
-    let notice_rows = u16::from(app.message.is_some());
-    let [history, notice, hints, error, status] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(notice_rows),
-        Constraint::Length(1),
-    ])
-    .areas(area);
-    render_transcript(frame, history, app, transcript_view);
+    match layout {
+        FrameLayout::SubagentDetail(area) => app.session.subagents.render_detail(frame, area),
+        FrameLayout::Dashboard(area) => dashboard::render(frame, area, app),
+        FrameLayout::SessionPicker(area) => session_picker::render(frame, area, app),
+        FrameLayout::Settings(area) => settings::render(frame, area, app),
+        FrameLayout::TooSmall(area) => {
+            let paragraph =
+                Paragraph::new("Terminal too small.").style(Style::default().fg(theme().muted));
+            frame.render_widget(paragraph, area);
+            render_image_preview(frame, app, area);
+        }
+        FrameLayout::ModelPicker(area) => render_model_panel(frame, area, app),
+        FrameLayout::ReadOnly {
+            history,
+            notice,
+            hints,
+            error,
+            status,
+        } => {
+            render_transcript(frame, history, app, transcript_view);
+            render_read_only_notice(frame, app, notice, hints, error, status);
+            render_image_preview(frame, app, history);
+        }
+        FrameLayout::Main {
+            header,
+            history,
+            status,
+            panel,
+            dock,
+            input,
+            footer,
+            has_timeline,
+        } => {
+            render_workspace_header(frame, header, app);
+            if has_timeline {
+                render_transcript(frame, history, app, transcript_view);
+            } else {
+                render_welcome(frame, history);
+                app.session.transcript_scroll = 0;
+                app.session.transcript_max_scroll = 0;
+                app.session.transcript_selection = None;
+            }
+            if status.height > 0 {
+                render_status_indicator(frame, status, app);
+            }
+            if panel.height > 0 {
+                app.panel_area = Some(panel);
+                render_panel(frame, panel, app);
+            }
+            app.subagent_dock = app.session.subagents.render_dock(frame, dock, true);
+            render_input(frame, input, app);
+            render_footer(frame, footer, app);
+            render_image_preview(frame, app, history);
+        }
+    }
+}
+
+fn render_read_only_notice(
+    frame: &mut Frame,
+    app: &App,
+    notice: Rect,
+    hints: Rect,
+    error: Rect,
+    status: Rect,
+) {
+    let label = if app.session.history_load_failed {
+        "Could not load session history"
+    } else {
+        "Session open in another window"
+    };
     frame.render_widget(
-        Paragraph::new("Session open in another window").style(Style::default().fg(theme().accent)),
+        Paragraph::new(label).style(Style::default().fg(theme().accent)),
         notice,
     );
     frame.render_widget(
-        Paragraph::new("R Retry · F Fork").style(Style::default().fg(theme().muted)),
+        Paragraph::new("R Retry · F Fork · Ctrl+\\ Dashboard")
+            .style(Style::default().fg(theme().muted)),
         hints,
     );
-    if let Some(message) = app.message.as_deref() {
+    if let Some(message) = app.session.message.as_deref() {
         frame.render_widget(Paragraph::new(message), error);
     }
     render_status(frame, status, app);
-    render_image_preview(frame, app, history);
 }
 
-fn render_image_preview(frame: &mut Frame, app: &mut App, area: Rect) {
-    let Some(preview) = app.image_preview.as_mut() else {
-        return;
-    };
-    frame.render_widget(Clear, area);
+pub(super) fn image_preview_bounds(area: Rect) -> (Rect, Rect) {
     let available = Rect::new(
         area.x.saturating_add(1),
         area.y.saturating_add(1),
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
+    let pixels = Rect {
+        height: available.height.saturating_sub(1),
+        ..available
+    };
+    (available, pixels)
+}
+
+fn render_image_preview(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(preview) = app.session.image_preview.as_mut() else {
+        return;
+    };
+    frame.render_widget(Clear, area);
+    let (available, image_bounds) = image_preview_bounds(area);
     let preview = match preview {
         ImagePreview::Details(details) => {
             app.image_preview_area = Some(render_image_details(frame, available, details));
@@ -302,22 +449,12 @@ fn render_image_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         ImagePreview::Pixels(preview) => preview,
     };
-    let image_bounds = Rect::new(
-        available.x,
-        available.y,
-        available.width,
-        available.height.saturating_sub(1),
-    );
-    if preview.requested_bounds != image_bounds {
-        preview.requested_bounds = image_bounds;
-        request_image_preview_render(preview);
-    }
-    let image_size = Rect::new(
-        0,
-        0,
-        preview.render_size.width.min(image_bounds.width),
-        preview.render_size.height.min(image_bounds.height),
-    );
+    let prepared = preview.prepared_bounds == image_bounds && preview.protocol.is_some();
+    let image_size = if prepared {
+        preview.render_size
+    } else {
+        Rect::default()
+    };
     let content_width = image_size
         .width
         .max(72.min(available.width))
@@ -354,7 +491,7 @@ fn render_image_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         content.width,
         1,
     );
-    let zoom = if preview.protocol.is_none() {
+    let zoom = if !prepared {
         "Loading preview…".to_string()
     } else if preview.view.zoom_steps == 0 {
         "Fit".to_string()
@@ -410,18 +547,23 @@ fn render_image_details(frame: &mut Frame, area: Rect, details: &ImagePreviewDet
 
 fn composer_layout(app: &App, width: u16) -> text_layout::TextLayout {
     if app.secret_input_active() {
-        return text_layout::TextLayout::plain(&input_for_display(app, &app.input), width);
+        return text_layout::TextLayout::plain(&input_for_display(app, &app.session.input), width);
     }
     let images = app
+        .session
         .draft_image_attachments
         .iter()
         .map(|image| image.start..image.end)
         .collect::<Vec<_>>();
-    text_layout::TextLayout::composer(&app.input, width, &images)
+    text_layout::TextLayout::composer(&app.session.input, width, &images)
 }
 
+#[cfg(test)]
 pub(super) fn input_row_count(app: &App, width: u16) -> u16 {
-    let layout = composer_layout(app, composer_text_width(width));
+    composer_rows(app, &composer_layout(app, composer_text_width(width)))
+}
+
+fn composer_rows(app: &App, layout: &text_layout::TextLayout) -> u16 {
     let caret = layout
         .caret(input_display_offset(app, clamped_cursor(app)))
         .0
@@ -429,16 +571,25 @@ pub(super) fn input_row_count(app: &App, width: u16) -> u16 {
     layout.height().max(caret).clamp(1, 10) as u16
 }
 
-fn composer_text_width(width: u16) -> u16 {
+pub(super) fn composer_text_width(width: u16) -> u16 {
     width.saturating_sub(PROMPT_TEXT_COLUMN + 1).max(1)
 }
 
+pub(super) fn composer_text_area(outer: Rect) -> Rect {
+    Rect {
+        x: outer.x.saturating_add(PROMPT_TEXT_COLUMN),
+        width: composer_text_width(outer.width),
+        ..outer
+    }
+}
+
 pub(super) fn panel_height(app: &App, max_height: u16) -> u16 {
-    if let Some(panel) = app.home_risk_panel.as_ref() {
+    if let Some(panel) = app.session.home_risk_panel.as_ref() {
         return (panel.workspaces.len() as u16 + 4).min(max_height).max(1);
     }
-    if app.pending_question.is_some() {
+    if app.session.pending_question.is_some() {
         let rows = app
+            .session
             .pending_question
             .as_ref()
             .map(|question| question.options.len() as u16)
@@ -446,11 +597,12 @@ pub(super) fn panel_height(app: &App, max_height: u16) -> u16 {
         return (rows + 4).min(max_height);
     }
     if app.command_panel_open() {
-        let rows = matching_commands(&app.input).len() as u16;
+        let rows = matching_commands(&app.session.input).len() as u16;
         return rows.min(max_height).max(1);
     }
-    if app.message.is_some() || app.secret_input_active() {
+    if app.session.message.is_some() || app.secret_input_active() {
         let rows = app
+            .session
             .message
             .as_deref()
             .map_or(1, |message| message.lines().count() as u16);
@@ -465,41 +617,43 @@ pub(super) fn render_transcript(
     app: &mut App,
     transcript_view: &TranscriptView,
 ) {
-    app.transcript_max_scroll = transcript_view
+    if app.session.pending_history.is_some() {
+        let count = app.session.dashboard_replies.len();
+        let label = if count == 0 {
+            "Loading session…".to_owned()
+        } else {
+            format!("Loading session… · {count} queued")
+        };
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(theme().muted)),
+            area,
+        );
+        return;
+    }
+    app.session.transcript_max_scroll = transcript_view
         .total_rows
         .saturating_sub(u64::from(area.height));
-    if app.transcript_follow_bottom {
-        app.transcript_scroll = app.transcript_max_scroll;
+    if app.session.transcript_follow_bottom {
+        app.session.transcript_scroll = app.session.transcript_max_scroll;
     } else {
-        app.transcript_scroll = app.transcript_scroll.min(app.transcript_max_scroll);
+        app.session.transcript_scroll = app
+            .session
+            .transcript_scroll
+            .min(app.session.transcript_max_scroll);
     }
-    output_preview::prepare_visible(app, transcript_view, area.height);
-    let window = transcript_render_window(transcript_view, app.transcript_scroll, area.height);
+    let window =
+        transcript_render_window(transcript_view, app.session.transcript_scroll, area.height);
     app.transcript_viewport = Some(area);
     let content = Rect {
         width: area.width.saturating_sub(1),
         ..area
     };
-    for (offset, line) in window
-        .lines
-        .iter()
-        .skip(window.local_scroll.into())
-        .take(area.height.into())
-        .enumerate()
-    {
-        if line.style.bg == theme().user_prompt().bg {
-            frame.buffer_mut().set_style(
-                Rect::new(content.x, content.y + offset as u16, content.width, 1),
-                theme().user_prompt(),
-            );
-        }
-    }
     frame.render_widget(
         Paragraph::new(window.lines).scroll((window.local_scroll, 0)),
         content,
     );
     let mut selectable_area = content;
-    if !app.transcript_follow_bottom && app.transcript_max_scroll > 0 {
+    if !app.session.transcript_follow_bottom && app.session.transcript_max_scroll > 0 {
         let hint_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -512,15 +666,33 @@ pub(super) fn render_transcript(
         selectable_area.height = selectable_area.height.saturating_sub(1);
     }
     app.transcript_area = (selectable_area.height > 0).then_some(selectable_area);
+    app.subagent_links.extend(
+        transcript_view
+            .subagent_link_rows
+            .iter()
+            .filter_map(|(id, row)| {
+                let offset = row.checked_sub(app.session.transcript_scroll)?;
+                (offset < u64::from(selectable_area.height)).then(|| {
+                    let rect = Rect::new(
+                        selectable_area.x,
+                        selectable_area.y + offset as u16,
+                        selectable_area.width,
+                        1,
+                    );
+                    (rect, id.clone())
+                })
+            }),
+    );
     mouse::set_bash_blocks(app, selectable_area, &transcript_view.bash_block_rows);
     mouse::set_text_layout(
         app,
         Arc::clone(&transcript_view.layout),
-        app.transcript_scroll as usize,
+        app.session.transcript_scroll as usize,
     );
     mouse::render_bash_selection(frame, app);
     render_transcript_selection(frame.buffer_mut(), selectable_area, app);
     render_inline_images(frame, selectable_area, app, transcript_view);
+    media::render(frame, selectable_area, app, transcript_view);
 }
 
 fn render_inline_images(
@@ -529,43 +701,45 @@ fn render_inline_images(
     app: &mut App,
     transcript_view: &TranscriptView,
 ) {
-    // Images are resized in the frame loop.
-    for image in &transcript_view.images {
-        let Some(row) = image.row.checked_sub(app.transcript_scroll) else {
-            continue;
+    for (placement, row, fits_cache) in
+        inline_images::visible_images(transcript_view, app.session.transcript_scroll, area.height)
+    {
+        let image = &placement.image;
+        let image_area = Rect {
+            x: area.x + area.width.saturating_sub(placement.size.width) / 2,
+            y: area.y.saturating_add(row),
+            ..placement.size
         };
-        if row.saturating_add(u64::from(INLINE_IMAGE_ROWS)) > u64::from(area.height) {
-            continue;
-        }
-        let row = u16::try_from(row).unwrap_or(u16::MAX);
-        let image_area = Rect::new(
-            area.x.saturating_add(2),
-            area.y.saturating_add(row),
-            area.width.saturating_sub(4).min(64),
-            INLINE_IMAGE_ROWS,
-        );
-        if let Some(error) = app.inline_image_errors.get(image.key.as_str()) {
+        if let Some(error) = app.inline_image_errors.get(&image.key).filter(|entry| {
+            entry.matches(
+                app.session.active_session.as_ref(),
+                &app.session.workspace_root,
+                image,
+            )
+        }) {
             frame.render_widget(
-                Paragraph::new(format!("Image preview unavailable: {error}"))
+                Paragraph::new(format!("Image preview unavailable: {}", error.value))
                     .style(Style::default().fg(theme().muted))
                     .wrap(Wrap { trim: false }),
                 image_area,
             );
-        } else if let Some(protocol) = app.inline_images.get_mut(image.key.as_str()) {
-            let resize = Resize::Scale(Some(FilterType::Triangle));
-            let image_size = protocol.size_for(resize.clone(), image_area);
-            let fitted_area = Rect::new(
-                image_area.x,
-                image_area.y,
-                image_size.width,
-                image_size.height,
-            );
-            frame.render_stateful_widget(
-                StatefulImage::default().resize(resize),
-                fitted_area,
-                protocol,
-            );
-        } else {
+        } else if let Some(protocol) = app
+            .inline_images
+            .get_mut(&image.key)
+            .filter(|entry| {
+                entry.matches(
+                    app.session.active_session.as_ref(),
+                    &app.session.workspace_root,
+                    image,
+                )
+            })
+            .filter(|entry| entry.value.size == placement.size)
+        {
+            protocol
+                .value
+                .protocol
+                .render(image_area, frame.buffer_mut());
+        } else if !fits_cache {
             frame.render_widget(
                 Paragraph::new("Image preview unavailable")
                     .style(Style::default().fg(theme().muted)),
@@ -604,11 +778,13 @@ pub(super) fn transcript_render_window(
 }
 
 pub(super) fn render_transcript_selection(buffer: &mut Buffer, area: Rect, app: &App) {
-    let (Some(layout), Some(selection)) = (app.text_layout.as_ref(), app.transcript_selection)
-    else {
+    let (Some(layout), Some(selection)) = (
+        app.session.text_layout.as_ref(),
+        app.session.transcript_selection,
+    ) else {
         return;
     };
-    paint_selection(buffer, area, layout, app.text_scroll, selection);
+    paint_selection(buffer, area, layout, app.session.text_scroll, selection);
 }
 
 fn paint_selection(
@@ -633,23 +809,9 @@ fn paint_selection(
     }
 }
 
-/// Align assistant text with the command and user-message text.
 pub(super) fn render_summary_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     let projected = centaeris_core::session::visualization::project_markdown(text, true);
-    let mut markdown =
-        render_markdown_lines(projected.trim_start(), width.saturating_sub(2), false).0;
-    indent_assistant_lines(&mut markdown);
-    markdown
-}
-
-fn indent_assistant_lines(markdown: &mut [Line<'static>]) {
-    for line in markdown.iter_mut().filter(|line| {
-        line.spans
-            .iter()
-            .any(|span| !span.content.as_ref().is_empty())
-    }) {
-        line.spans.insert(0, Span::raw("  "));
-    }
+    render_markdown_lines(projected.trim_start(), width, false).0
 }
 
 /// 将 newline 闭合的输出从可变尾块推进 owned transcript source。
@@ -658,82 +820,80 @@ fn indent_assistant_lines(markdown: &mut [Line<'static>]) {
 /// `ModelTextReplace` 会撤销它们并从同一来源重绘。
 pub(super) fn materialize_assistant_prefix(app: &mut App) -> bool {
     let Some(mut end) = app
+        .session
         .assistant_buffer
         .rfind('\n')
         .map(|index| index.saturating_add(1))
     else {
         return false;
     };
-    for block in centaeris_core::session::visualization::visual_blocks(&app.assistant_buffer) {
+    for block in
+        centaeris_core::session::visualization::visual_blocks(&app.session.assistant_buffer)
+    {
         if !block.complete || (block.start < end && block.end > end) {
             end = end.min(block.start);
         }
     }
-    end = markdown_table::stable_prefix(&app.assistant_buffer, end);
-    if end <= app.assistant_emitted_bytes {
+    end = markdown_table::stable_prefix(&app.session.assistant_buffer, end);
+    if end <= app.session.assistant_emitted_bytes {
         return false;
     }
     let source = centaeris_core::session::visualization::project_markdown_range(
-        &app.assistant_buffer,
-        app.assistant_emitted_bytes..end,
+        &app.session.assistant_buffer,
+        app.session.assistant_emitted_bytes..end,
         false,
     )
     .expect("source-aligned assistant prefix");
     let (_, in_code_block) = render_markdown_lines(
         source.as_str(),
         app.render_width,
-        app.assistant_tail_in_code_block,
+        app.session.assistant_tail_in_code_block,
     );
-    app.assistant_stream_started = true;
-    app.assistant_emitted_bytes = end;
-    app.assistant_tail_in_code_block = in_code_block;
-    append_live_assistant_markdown(app, source, false);
+    app.session.assistant_stream_started = true;
+    app.session.assistant_emitted_bytes = end;
+    app.session.assistant_tail_in_code_block = in_code_block;
+    append_live_assistant_markdown(&mut app.session, source, false);
     true
 }
 
-pub(super) fn materialize_assistant_tail(app: &mut App, separator: bool) {
+pub(super) fn materialize_assistant_tail(state: &mut SessionState, separator: bool) {
     let source = centaeris_core::session::visualization::project_markdown_range(
-        &app.assistant_buffer,
-        app.assistant_emitted_bytes..app.assistant_buffer.len(),
+        &state.assistant_buffer,
+        state.assistant_emitted_bytes..state.assistant_buffer.len(),
         separator,
     )
     .expect("source-aligned assistant tail");
-    if source.is_empty() && (!separator || !app.assistant_stream_started) {
+    if source.is_empty() && (!separator || !state.assistant_stream_started) {
         return;
     }
-    let (_, in_code_block) = render_markdown_lines(
-        source.as_str(),
-        app.render_width,
-        app.assistant_tail_in_code_block,
-    );
-    if !source.is_empty() {
-        app.assistant_stream_started = true;
-        app.assistant_emitted_bytes = app.assistant_buffer.len();
-        app.assistant_tail_in_code_block = in_code_block;
-    }
-    append_live_assistant_markdown(app, source, separator);
+    append_live_assistant_markdown(state, source, separator);
 }
 
-pub(super) fn append_live_assistant_markdown(app: &mut App, markdown: String, separator: bool) {
+pub(super) fn append_live_assistant_markdown(
+    state: &mut SessionState,
+    markdown: String,
+    separator: bool,
+) {
     if markdown.is_empty() && !separator {
         return;
     }
-    app.assistant_stream_start
-        .get_or_insert(app.transcript.len());
-    app.transcript.push(
+    state
+        .assistant_stream_start
+        .get_or_insert(state.transcript.len());
+    state.transcript.push(
         TranscriptLine::LiveAssistant {
             markdown,
             separator,
         }
-        .for_run(app.assistant_run_id.as_deref(), app.assistant_is_final),
+        .for_run(state.assistant_run_id.as_deref(), state.assistant_is_final),
     );
 }
 
 /// 只渲染当前未闭合尾块；已闭合行已经进入 owned transcript source。
-pub(super) fn build_assistant_live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+pub(super) fn build_assistant_live_lines(state: &SessionState, width: u16) -> Vec<Line<'static>> {
     let projected = centaeris_core::session::visualization::project_markdown_range(
-        &app.assistant_buffer,
-        app.assistant_emitted_bytes..app.assistant_buffer.len(),
+        &state.assistant_buffer,
+        state.assistant_emitted_bytes..state.assistant_buffer.len(),
         false,
     )
     .expect("source-aligned assistant preview");
@@ -741,13 +901,7 @@ pub(super) fn build_assistant_live_lines(app: &App, width: u16) -> Vec<Line<'sta
     if assistant.trim().is_empty() {
         return Vec::new();
     }
-    let (mut lines, _) = render_markdown_lines(
-        assistant,
-        width.saturating_sub(2),
-        app.assistant_tail_in_code_block,
-    );
-    indent_assistant_lines(&mut lines);
-    lines
+    render_markdown_lines(assistant, width, state.assistant_tail_in_code_block).0
 }
 
 pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
@@ -756,6 +910,8 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
     let mut source_line_indices = Vec::new();
     let mut bash_block_indices = Vec::new();
     let mut image_line_indices = Vec::new();
+    let mut media_line_indices = Vec::new();
+    let mut subagent_link_indices = Vec::new();
     let mut hanging_indents = Vec::new();
     let mut decorations = Vec::new();
     let mut spacing = Vec::new();
@@ -764,7 +920,7 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
         let item = &transcript[cursor];
         match item {
             TranscriptLine::Tool(tool) => {
-                let expanded = tool.is_bash && app.expanded_bash_tools.contains(&tool.key);
+                let expanded = tool.is_bash && app.session.expanded_bash_tools.contains(&tool.key);
                 let adjacent_collapsed_bash = tool.is_bash
                     && !expanded
                     && tool.images.is_empty()
@@ -773,7 +929,7 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
                         &transcript[cursor - 1],
                         TranscriptLine::Tool(previous)
                             if previous.is_bash && previous.images.is_empty()
-                                && !app.expanded_bash_tools.contains(&previous.key)
+                                && !app.session.expanded_bash_tools.contains(&previous.key)
                     );
                 if !adjacent_collapsed_bash {
                     space_transcript_blocks(&lines, &mut spacing);
@@ -802,17 +958,42 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
                     lines.extend(output_preview::preview_lines(app, tool, width));
                 }
                 for image in &tool.images {
-                    image_line_indices.push((image.key.clone(), lines.len()));
-                    push_inline_image_lines(&mut lines, image.path.as_str(), width);
+                    let size = inline_images::size(app, image, width);
+                    let index = lines.len();
+                    if size.height > 0 {
+                        image_line_indices.push((image.clone(), index, size));
+                        lines.extend((0..size.height).map(|_| Line::default()));
+                    }
+                    let source = media::Source::Image(image.clone());
+                    media_line_indices.push((
+                        image.key.clone(),
+                        source.clone(),
+                        index,
+                        lines.len(),
+                        size,
+                    ));
+                    lines.push(media::controls_line(&source, size, width));
                 }
-                if tool.images.is_empty() && (!tool.is_bash || expanded) {
+                for (slot, path) in tool.video_paths.iter().enumerate() {
+                    let key = format!("{}:video:{slot}", tool.key);
+                    let size = media::video_size(app, &key, width);
+                    let index = lines.len();
+                    lines.extend((0..size.height).map(|_| Line::default()));
+                    let source = media::Source::Video(path.clone());
+                    media_line_indices.push((key, source.clone(), index, lines.len(), size));
+                    lines.push(media::controls_line(&source, size, width));
+                }
+                if tool.images.is_empty()
+                    && tool.video_paths.is_empty()
+                    && (!tool.is_bash || expanded)
+                {
                     lines.push(Line::default());
                 }
             }
             TranscriptLine::ReferencedAnswer { key } => {
                 space_transcript_blocks(&lines, &mut spacing);
                 source_line_indices.push((key.clone(), lines.len()));
-                let loaded = output_preview::assistant_answer_text(app, key);
+                let loaded = output_preview::assistant_answer_text(&app.session, key);
                 lines.extend(render_summary_lines(
                     loaded.as_deref().unwrap_or("Loading answer…"),
                     width,
@@ -869,13 +1050,14 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
         }
         cursor += 1;
     }
-    if app.assistant_is_final
+    if app.session.assistant_is_final
         || app
+            .session
             .assistant_run_id
             .as_deref()
             .is_none_or(|id| runs::process_visible(app, id))
     {
-        let live = build_assistant_live_lines(app, width);
+        let live = build_assistant_live_lines(&app.session, width);
         let continues_assistant = matches!(
             transcript.last(),
             Some(TranscriptLine::LiveAssistant {
@@ -887,6 +1069,11 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
             space_transcript_blocks(&lines, &mut spacing);
         }
         lines.extend(live);
+    }
+
+    for task in app.session.subagents.terminal_links() {
+        subagent_link_indices.push((task.child_session_id.clone(), lines.len()));
+        lines.push(subagents::terminal_link_line(task, width.saturating_sub(1)));
     }
 
     let mut byte = 0;
@@ -929,9 +1116,20 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
         .collect();
     let images = image_line_indices
         .into_iter()
-        .map(|(key, index)| TranscriptImagePlacement {
-            key,
+        .map(|(image, index, size)| TranscriptImagePlacement {
+            image,
+            size,
             row: layout.position(starts[index]).0 as u64,
+        })
+        .collect();
+    let media = media_line_indices
+        .into_iter()
+        .map(|(key, source, index, actions, size)| media::Placement {
+            key,
+            source,
+            size,
+            row: layout.position(starts[index]).0 as u64,
+            controls: layout.position(starts[actions]).0 as u64,
         })
         .collect();
     TranscriptView {
@@ -939,7 +1137,12 @@ pub(super) fn build_transcript_view(app: &App, width: u16) -> TranscriptView {
         line_start_rows: (0..total_rows).collect(),
         source_rows,
         bash_block_rows,
+        subagent_link_rows: subagent_link_indices
+            .into_iter()
+            .map(|(id, index)| (id, layout.position(starts[index]).0 as u64))
+            .collect(),
         images,
+        media,
         total_rows,
         layout,
     }
@@ -949,18 +1152,6 @@ fn space_transcript_blocks(lines: &[Line<'_>], spacing: &mut Vec<usize>) {
     if lines.last().is_some_and(|line| line.width() > 0) {
         spacing.push(lines.len());
     }
-}
-
-fn push_inline_image_lines(lines: &mut Vec<Line<'static>>, path: &str, width: u16) {
-    lines.extend((0..INLINE_IMAGE_ROWS).map(|_| Line::from("")));
-    lines.push(Line::from(vec![
-        Span::styled("  Path: ", Style::default().fg(theme().muted)),
-        Span::styled(
-            fit_middle_columns(path, width.saturating_sub(9) as usize),
-            Style::default().fg(theme().muted),
-        ),
-    ]));
-    lines.push(Line::from(""));
 }
 
 /// 行级 markdown 渲染：代码围栏、标题、列表、粗体、行内代码。
@@ -1134,7 +1325,7 @@ pub(super) fn welcome_line() -> Line<'static> {
 
 pub(super) fn input_display_offset(app: &App, byte: usize) -> usize {
     if app.secret_input_active() {
-        app.input[..byte].graphemes(true).count() * '•'.len_utf8()
+        app.session.input[..byte].graphemes(true).count() * '•'.len_utf8()
     } else {
         byte
     }
@@ -1142,58 +1333,58 @@ pub(super) fn input_display_offset(app: &App, byte: usize) -> usize {
 
 pub(super) fn input_source_offset(app: &App, byte: usize) -> usize {
     if app.secret_input_active() {
-        app.input
+        app.session
+            .input
             .grapheme_indices(true)
             .nth(byte / '•'.len_utf8())
-            .map_or(app.input.len(), |(byte, _)| byte)
+            .map_or(app.session.input.len(), |(byte, _)| byte)
     } else {
-        byte.min(app.input.len())
+        byte.min(app.session.input.len())
     }
 }
 
-pub(super) fn render_input(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.mouse_state.input_focused && mouse::editor_enabled(app);
-    let border = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(theme().composer_border(focused));
-    let inner = border.inner(area);
-    frame.render_widget(border, area);
-    let title_width = area.width.saturating_sub(4);
-    if area.height >= 2 && title_width > 0 {
-        let title = status_line(app, title_width.into());
-        if !title.spans.is_empty() {
-            let title_area = Rect::new(area.x + 2, area.bottom() - 1, title_width, 1);
-            frame.render_widget(
-                Paragraph::new(title).alignment(Alignment::Right),
-                title_area,
-            );
+pub(super) struct ComposerLayout {
+    outer: Rect,
+    text_area: Rect,
+    text: text_layout::TextLayout,
+}
+
+impl ComposerLayout {
+    fn new(app: &App, outer: Rect, mut text: text_layout::TextLayout) -> Self {
+        let mut text_area = composer_text_area(outer);
+        let caret = text.caret(input_display_offset(app, clamped_cursor(app))).0 + 1;
+        if text.height().max(caret) > usize::from(text_area.height) {
+            text_area.width = text_area.width.saturating_sub(1);
+            text = composer_layout(app, text_area.width);
+        }
+        Self {
+            outer,
+            text_area,
+            text,
         }
     }
-    let content = Rect::new(
-        area.x.saturating_add(PROMPT_TEXT_COLUMN),
-        inner.y,
-        composer_text_width(area.width),
-        inner.height,
+}
+
+pub(super) fn render_composer_prefix(frame: &mut Frame, outer: Rect, focused: bool) {
+    frame.render_widget(
+        Paragraph::new(USER_PROMPT_PREFIX).style(theme().composer_prompt(focused)),
+        Rect::new(outer.x, outer.y, PROMPT_TEXT_COLUMN, 1),
     );
-    let mut layout = composer_layout(app, content.width);
-    let mut text_area = content;
-    if layout.height().max(
-        layout
-            .caret(input_display_offset(app, clamped_cursor(app)))
-            .0
-            + 1,
-    ) > content.height as usize
-    {
-        text_area.width = text_area.width.saturating_sub(1);
-        layout = composer_layout(app, text_area.width);
-    }
+}
+
+fn render_input(frame: &mut Frame, composer: ComposerLayout, app: &mut App) {
+    let ComposerLayout {
+        outer,
+        text_area,
+        text: layout,
+    } = composer;
+    let focused = app.mouse_state.input_focused && mouse::editor_enabled(app);
     let (row, column) = layout.caret(input_display_offset(app, clamped_cursor(app)));
-    if !app.input_scroll_override {
-        if row < app.input_scroll {
-            app.input_scroll = row;
-        } else if row >= app.input_scroll + text_area.height as usize {
-            app.input_scroll = row
+    if !app.session.input_scroll_override {
+        if row < app.session.input_scroll {
+            app.session.input_scroll = row;
+        } else if row >= app.session.input_scroll + text_area.height as usize {
+            app.session.input_scroll = row
                 .saturating_add(1)
                 .saturating_sub(text_area.height as usize);
         }
@@ -1202,17 +1393,14 @@ pub(super) fn render_input(frame: &mut Frame, area: Rect, app: &mut App) {
         .height()
         .max(row + 1)
         .saturating_sub(text_area.height as usize);
-    app.input_scroll = app.input_scroll.min(maximum);
-    frame.render_widget(
-        Paragraph::new(&USER_PROMPT_PREFIX[1..]).style(theme().composer_border(focused)),
-        Rect::new(inner.x, inner.y, PROMPT_TEXT_COLUMN - 1, 1),
-    );
+    app.session.input_scroll = app.session.input_scroll.min(maximum);
+    render_composer_prefix(frame, outer, focused);
     frame.render_widget(
         Paragraph::new(
             layout
                 .lines
                 .iter()
-                .skip(app.input_scroll)
+                .skip(app.session.input_scroll)
                 .take(text_area.height as usize)
                 .cloned()
                 .collect::<Vec<_>>(),
@@ -1224,19 +1412,19 @@ pub(super) fn render_input(frame: &mut Frame, area: Rect, app: &mut App) {
             frame.buffer_mut(),
             text_area,
             &layout,
-            app.input_scroll,
+            app.session.input_scroll,
             TextSelection {
                 anchor: input_display_offset(app, range.start),
                 head: input_display_offset(app, range.end),
             },
         );
     }
-    if app.input.is_empty() {
+    if app.session.input.is_empty() {
         let placeholder = if let Some(prompt) = app.model_credential_prompt.as_ref() {
             Some(format!("API key for {}", prompt.provider_name))
         } else if app.secret_input_active() {
             Some("API key (masked)".into())
-        } else if app.pending_question.is_some() {
+        } else if app.session.pending_question.is_some() {
             Some("Answer the pending question".into())
         } else {
             None
@@ -1249,7 +1437,7 @@ pub(super) fn render_input(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     if let Some(y) = row
-        .checked_sub(app.input_scroll)
+        .checked_sub(app.session.input_scroll)
         .filter(|row| *row < text_area.height as usize)
     {
         let x = text_area
@@ -1258,10 +1446,12 @@ pub(super) fn render_input(frame: &mut Frame, area: Rect, app: &mut App) {
             .min(text_area.right().saturating_sub(1));
         let y = text_area.y + y as u16;
         if !app.secret_input_active()
-            && app.pending_question.is_none()
+            && app.session.pending_question.is_none()
             && input_selection_range(app).is_none()
         {
-            if let Some(ghost) = command_completion_suffix(&app.input, app.selected_command) {
+            if let Some(ghost) =
+                command_completion_suffix(&app.session.input, app.session.selected_command)
+            {
                 frame.render_widget(
                     Paragraph::new(ghost).style(
                         Style::default()
@@ -1273,11 +1463,11 @@ pub(super) fn render_input(frame: &mut Frame, area: Rect, app: &mut App) {
             }
         }
         if mouse::editor_enabled(app) {
-            frame.set_cursor_position((x, y));
+            app.frame_caret = Some(Position::new(x, y));
         }
     }
     app.input_area = Some(text_area);
-    app.input_layout = Some(layout);
+    app.session.input_layout = Some(layout);
 }
 
 pub(super) fn input_for_display(app: &App, input: &str) -> String {
@@ -1293,12 +1483,28 @@ pub(super) fn character_width(character: char) -> usize {
     character.width().unwrap_or(0)
 }
 
-pub(super) fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
-    if app.home_risk_panel.is_some() {
+fn embedded_list_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(2),
+        width: area.width.saturating_sub(2).min(94),
+        ..area
+    }
+}
+
+pub(super) fn question_options_area(area: Rect) -> Rect {
+    Rect {
+        y: area.y.saturating_add(2),
+        height: area.height.saturating_sub(3),
+        ..area
+    }
+}
+
+fn render_panel(frame: &mut Frame, area: Rect, app: &mut App) {
+    if app.session.home_risk_panel.is_some() {
         render_home_risk_panel(frame, area, app);
         return;
     }
-    if app.pending_question.is_some() {
+    if app.session.pending_question.is_some() {
         render_question_panel(frame, area, app);
         return;
     }
@@ -1308,7 +1514,7 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let message = app.message.clone().or_else(|| {
+    let message = app.session.message.clone().or_else(|| {
         app.model_credential_prompt.as_ref().map(|prompt| {
             format!(
                 "Enter the API key for {} · Esc to cancel",
@@ -1326,16 +1532,12 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-pub(super) fn render_home_risk_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(panel) = app.home_risk_panel.as_ref() else {
+fn render_home_risk_panel(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(panel) = app.session.home_risk_panel.as_ref() else {
         return;
     };
-    let panel_area = Rect {
-        x: area.x.saturating_add(2),
-        y: area.y,
-        width: area.width.saturating_sub(2).min(94),
-        height: area.height,
-    };
+    let panel_area = embedded_list_area(area);
+    app.panel_area = Some(panel_area);
     let selected = panel.selected.min(panel.workspaces.len());
     let mut items = vec![
         ListItem::new(Line::from(Span::styled(
@@ -1398,30 +1600,26 @@ pub(super) fn render_home_risk_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(List::new(items), panel_area);
 }
 
-pub(super) fn command_panel_area(area: Rect) -> Rect {
-    let inset = PROMPT_TEXT_COLUMN - 2;
-    Rect {
-        x: area.x.saturating_add(inset),
-        width: area.width.saturating_sub(inset).min(76),
-        ..area
-    }
-}
-
-pub(super) fn render_command_panel(frame: &mut Frame, area: Rect, app: &App) {
+fn render_command_panel(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.height < 1 {
         return;
     }
 
-    let commands = matching_commands(app.input.as_str());
+    let commands = matching_commands(app.session.input.as_str());
     let height = (commands.len() as u16).min(area.height).max(1);
-    let panel_area = command_panel_area(Rect { height, ..area });
+    let panel_area = Rect {
+        width: area.width.min(76),
+        height,
+        ..area
+    };
+    app.panel_area = Some(panel_area);
     let items = if commands.is_empty() {
         vec![ListItem::new(Line::from(vec![
             Span::styled("unknown", Style::default().fg(theme().muted)),
             Span::raw("  Press Enter to fail loudly."),
         ]))]
     } else {
-        let selected = app.selected_command.min(commands.len() - 1);
+        let selected = app.session.selected_command.min(commands.len() - 1);
         commands
             .into_iter()
             .enumerate()
@@ -1437,7 +1635,10 @@ pub(super) fn render_command_panel(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
     let visible = panel_area.height as usize;
-    let selected = app.selected_command.min(items.len().saturating_sub(1));
+    let selected = app
+        .session
+        .selected_command
+        .min(items.len().saturating_sub(1));
     let offset = selected.saturating_sub(visible.saturating_sub(1));
     let mut state = ListState::default()
         .with_offset(offset)
@@ -1466,21 +1667,21 @@ pub(super) fn command_preview_line(
     ])
 }
 
-pub(super) fn render_question_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(question) = app.pending_question.as_ref() else {
+fn render_question_panel(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(question) = app.session.pending_question.as_ref() else {
         return;
     };
     if area.height < 3 {
+        app.panel_area = None;
         return;
     }
-    let option_rows = question.options.len() as u16;
-    let height = (option_rows + 4).min(area.height).max(3);
-    let panel_area = Rect {
-        x: area.x.saturating_add(2),
-        y: area.y,
-        width: area.width.saturating_sub(2).min(94),
-        height,
-    };
+    let panel_area = embedded_list_area(area);
+    app.panel_area = Some(panel_area);
+    let visible = usize::from(question_options_area(panel_area).height);
+    app.session.question_scroll = app
+        .session
+        .question_scroll
+        .min(question.options.len().saturating_sub(visible));
     let mut items = vec![
         ListItem::new(Line::from(vec![
             Span::styled("问题：", Style::default().fg(theme().muted)),
@@ -1503,8 +1704,8 @@ pub(super) fn render_question_panel(frame: &mut Frame, area: Rect, app: &App) {
         for option in question
             .options
             .iter()
-            .skip(app.mouse_state.question_scroll)
-            .take(panel_area.height.saturating_sub(3) as usize)
+            .skip(app.session.question_scroll)
+            .take(visible)
         {
             items.push(ListItem::new(Line::from(vec![Span::styled(
                 fit_middle(
@@ -1542,7 +1743,7 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         "Models".into()
     };
-    let notice_rows = u16::from(app.message.is_some());
+    let notice_rows = u16::from(app.session.message.is_some());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1737,7 +1938,7 @@ pub(super) fn render_model_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         app.model_list_offset = picker_view::render_list(frame, list_area, items, selected_model);
     }
 
-    if let Some(message) = app.message.as_deref() {
+    if let Some(message) = app.session.message.as_deref() {
         let style = Style::default().fg(theme().muted);
         frame.render_widget(Paragraph::new(message).style(style), chunks[3]);
     }
@@ -1768,7 +1969,7 @@ fn render_workspace_header(frame: &mut Frame, area: Rect, app: &App) {
         Layout::horizontal([Constraint::Min(0), Constraint::Length(context_width)]).areas(area);
     frame.render_widget(
         Paragraph::new(fit_middle_columns(
-            &app.session_cwd,
+            &app.session.session_cwd,
             path_area.width.saturating_sub(1) as usize,
         ))
         .style(style),
@@ -1777,35 +1978,61 @@ fn render_workspace_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(label).style(style), context_area);
 }
 
-fn render_shortcuts(frame: &mut Frame, area: Rect, app: &App) {
-    let hints = if app.secret_input_active() {
-        "Enter save   Esc back"
-    } else if app.home_risk_panel.is_some() {
-        "↑↓ select   Enter confirm   Esc back"
-    } else if app.pending_question.is_some() {
-        "Enter answer   Esc stop"
+fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let hints: &[&str] = if app.secret_input_active() {
+        &["Enter save", "Esc back"]
+    } else if app.session.home_risk_panel.is_some() {
+        &["↑↓ select", "Enter confirm", "Esc back"]
+    } else if app.session.pending_question.is_some() {
+        &["Enter answer", "Esc stop"]
     } else if app.command_panel_open() {
-        "↑↓ select   Enter open   Tab complete"
-    } else if app.pending_esc_stop {
-        "Esc again to stop"
-    } else if has_active_agent_run(app) {
-        "Esc Esc stop   Ctrl+\\ sessions   /help commands"
+        &["↑↓ select", "Enter open", "Tab complete"]
+    } else if app.session.pending_esc_stop {
+        &["Esc again to stop"]
+    } else if has_active_agent_run(&app.session) {
+        &["Esc Esc stop", "Ctrl+\\ Dashboard"]
     } else {
-        "Enter send   Shift+Enter newline   Ctrl+\\ sessions   /help commands"
+        &["Enter send", "Shift+Enter newline", "Ctrl+\\ Dashboard"]
     };
+    let model_budget = usize::from(area.width).saturating_sub(Line::raw(hints[0]).width() + 1);
+    let model = status_line(app, model_budget);
+    let model_width = if model.width() <= model_budget {
+        model.width() as u16
+    } else {
+        0
+    };
+    let [shortcuts, model_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(model_width)]).areas(area);
+    let mut shortcut_text = hints[0].to_owned();
+    for hint in &hints[1..] {
+        if Line::raw(shortcut_text.as_str()).width() + 3 + Line::raw(*hint).width()
+            > usize::from(shortcuts.width)
+        {
+            break;
+        }
+        shortcut_text.push_str("   ");
+        shortcut_text.push_str(hint);
+    }
     frame.render_widget(
-        Paragraph::new(hints).style(Style::default().fg(theme().muted)),
-        area,
+        Paragraph::new(shortcut_text).style(Style::default().fg(theme().muted)),
+        shortcuts,
+    );
+    frame.render_widget(
+        Paragraph::new(model).alignment(Alignment::Right),
+        model_area,
     );
 }
 
 pub(super) fn render_status_indicator(frame: &mut Frame, area: Rect, app: &mut App) {
     const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     const STOP: &str = "[stop]";
-    let elapsed = app.agent_run_started_at.map(|start| start.elapsed());
-    let glyph = if app.pending_question.is_some()
+    let elapsed = app
+        .session
+        .agent_run_started_at
+        .map(|start| start.elapsed());
+    let glyph = if app.session.pending_question.is_some()
         || matches!(
-            app.process_state,
+            app.session.process_state,
             RuntimeDisplayState::WaitingUser | RuntimeDisplayState::ConnectionLost
         ) {
         "·"
@@ -1816,12 +2043,13 @@ pub(super) fn render_status_indicator(frame: &mut Frame, area: Rect, app: &mut A
         SPINNER[(tick % SPINNER.len() as u128) as usize]
     };
     let style = Style::default().fg(theme().muted);
-    let stop_width =
-        if has_active_agent_run(app) && app.process_state != RuntimeDisplayState::ConnectionLost {
-            STOP.len() as u16
-        } else {
-            0
-        };
+    let stop_width = if has_active_agent_run(&app.session)
+        && app.session.process_state != RuntimeDisplayState::ConnectionLost
+    {
+        STOP.len() as u16
+    } else {
+        0
+    };
     let mut output = status_usage::output_label(app).unwrap_or_default();
     if Line::raw(output.as_str()).width() + stop_width as usize + 16 > area.width as usize {
         output.clear();
@@ -1869,24 +2097,24 @@ pub(super) fn render_status_indicator(frame: &mut Frame, area: Rect, app: &mut A
 }
 
 pub(super) fn status_header(app: &App) -> String {
-    if app.process_state == RuntimeDisplayState::ConnectionLost {
+    if app.session.process_state == RuntimeDisplayState::ConnectionLost {
         return "Connection lost".to_string();
     }
-    if app.tool_protocol_error {
+    if app.session.tool_protocol_error {
         return "Protocol error".to_string();
     }
-    if app.pending_question.is_some() {
+    if app.session.pending_question.is_some() {
         return "Waiting for input".to_string();
     }
-    if let StatusEasterEgg::Showing(egg) = app.status_easter_egg {
+    if let StatusEasterEgg::Showing(egg) = app.session.status_easter_egg {
         return match egg {
             EasterEgg::Wired => "A faint signal crossed the Wired...".to_string(),
             EasterEgg::LongTunnel => "Emerging from the long tunnel...".to_string(),
-            EasterEgg::Tachikoma => format!("Tachikoma ×{}", app.live_subagent_ids.len()),
+            EasterEgg::Tachikoma => format!("Tachikoma ×{}", app.session.live_subagent_ids.len()),
             EasterEgg::KeepsakeClover => "That Keepsake Clover...".to_string(),
         };
     }
-    match app.process_state {
+    match app.session.process_state {
         RuntimeDisplayState::Idle => "Idle",
         RuntimeDisplayState::ConnectionLost => "Connection lost",
         RuntimeDisplayState::PendingPhase => "",
@@ -1894,6 +2122,7 @@ pub(super) fn status_header(app: &App) -> String {
         RuntimeDisplayState::Responding => "Responding...",
         RuntimeDisplayState::ToolRunning => {
             return app
+                .session
                 .tool_projection
                 .active_description()
                 .map(str::to_owned)
@@ -1910,9 +2139,10 @@ pub(super) fn status_header(app: &App) -> String {
 }
 
 pub(super) fn status_inline(app: &App) -> Option<String> {
-    app.active_tool_label
+    app.session
+        .active_tool_label
         .clone()
-        .or_else(|| app.tool_projection.active_label())
+        .or_else(|| app.session.tool_projection.active_label())
 }
 
 pub(super) fn status_line(app: &App, width: usize) -> Line<'static> {
@@ -1961,17 +2191,14 @@ fn run_failure_lines(text: &str, _width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-fn user_prompt_lines(text: &str) -> impl Iterator<Item = (Line<'static>, usize)> + '_ {
+pub(super) fn user_prompt_lines(text: &str) -> impl Iterator<Item = (Line<'static>, usize)> + '_ {
     text.split('\n').enumerate().map(|(index, text)| {
         let prefix = if index == 0 {
             USER_PROMPT_PREFIX
         } else {
             USER_PROMPT_CONTINUATION
         };
-        (
-            Line::styled(format!("{prefix}{text}"), theme().user_prompt()),
-            prefix.len(),
-        )
+        (Line::raw(format!("{prefix}{text}")), prefix.len())
     })
 }
 
@@ -2018,12 +2245,8 @@ pub(super) fn transcript_to_lines_from(
                 markdown,
                 separator,
             } => {
-                let (mut rendered, in_code_block) = render_markdown_lines(
-                    markdown.as_str(),
-                    width.saturating_sub(2),
-                    live_in_code_block,
-                );
-                indent_assistant_lines(&mut rendered);
+                let (rendered, in_code_block) =
+                    render_markdown_lines(markdown.as_str(), width, live_in_code_block);
                 live_in_code_block = in_code_block;
                 if emit {
                     lines.extend(rendered);

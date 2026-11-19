@@ -339,35 +339,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "centaeris-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "centaeris-model-catalog",
- "futures",
- "hmac 0.12.1",
- "httpdate",
- "image",
- "libc",
- "pulldown-cmark",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tree-sitter",
- "tree-sitter-bash",
- "unicode-normalization",
- "url",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "centaeris-desktop-services"
+name = "centaeris-cli-runtime"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -398,6 +370,34 @@ dependencies = [
  "toml",
  "windows-sys 0.59.0",
  "zstd",
+]
+
+[[package]]
+name = "centaeris-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "centaeris-model-catalog",
+ "futures",
+ "hmac 0.12.1",
+ "httpdate",
+ "image",
+ "libc",
+ "pulldown-cmark",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "unicode-normalization",
+ "url",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -459,8 +459,8 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "centaeris-agent",
+ "centaeris-cli-runtime",
  "centaeris-core",
- "centaeris-desktop-services",
  "crossterm 0.29.0",
  "getrandom 0.4.3",
  "image",
@@ -473,6 +473,7 @@ dependencies = [
  "tokio",
  "unicode-segmentation",
  "unicode-width 0.2.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

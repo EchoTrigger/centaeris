@@ -28,7 +28,7 @@ class LauncherTests(unittest.TestCase):
             settings.write_text(json.dumps({"providerId": "custom.test", "model": "mock",
                 "credentialEnv": key_name, "reasoningEffort": "max",
                 "contextTokens": 500000, "maxOutputTokens": 64000}))
-            binary = root / "target/harbor-bookworm/debug/centaeris-runtime"
+            binary = root / "target/harbor-bookworm/debug/cet"
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b"\x7fELFfake")
             job = root / "jobs/centaeris-tb21-five-tasks-pass5"

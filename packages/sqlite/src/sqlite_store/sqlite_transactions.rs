@@ -251,11 +251,14 @@ pub(super) fn upsert_external_context_and_schedule_job_conn(
             if req.object.source_provider_id == "centaeris.core"
                 && req.object.source_tool_name == "followup_task"
             {
-                let origin_ref = req.object.metadata["originWorkPacketRef"].as_str()
+                let origin_ref = req.object.metadata["originWorkPacketRef"]
+                    .as_str()
                     .ok_or("followup_task origin WorkPacket is missing")?;
-                let origin = super::sqlite_external_context::load_external_context_object_conn(tx, origin_ref)
-                    .map_err(|error| error.to_string())?
-                    .ok_or("followup_task origin WorkPacket is missing")?;
+                let origin = super::sqlite_external_context::load_external_context_object_conn(
+                    tx, origin_ref,
+                )
+                .map_err(|error| error.to_string())?
+                .ok_or("followup_task origin WorkPacket is missing")?;
                 if !origin.metadata["agentRetiredAtMs"].is_null() {
                     return Err("agent_id has been retired by Session deletion".to_string());
                 }

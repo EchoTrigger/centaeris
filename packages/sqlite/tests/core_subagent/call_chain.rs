@@ -83,7 +83,10 @@ impl AsyncJobStorePort for LostConfirmation {
     ) -> Result<SubagentJobCancellationReceipt, JobStoreError> {
         AsyncJobStorePort::request_subagent_job_cancellation(&self.actor, req).await
     }
-    async fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, JobStoreError> {
+    async fn subagent_job_cancellation_requested(
+        &self,
+        job_id: &str,
+    ) -> Result<bool, JobStoreError> {
         AsyncJobStorePort::subagent_job_cancellation_requested(&self.actor, job_id).await
     }
     async fn reclaim_expired_runtime_job_leases(&self, req: i64) -> Result<usize, JobStoreError> {

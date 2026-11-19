@@ -1959,7 +1959,9 @@ fn postgres_subagent_cancellation_obeys_authoritative_completion_order() {
         job.lease_owner = Some("active-claim".into());
         job.lease_expires_at_ms = Some(200);
         let session_id = job.session_id.clone().expect("fixture Session");
-        store.schedule_runtime_job(ScheduleRuntimeJobRequest { job }).unwrap();
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest { job })
+            .unwrap();
         let complete = || UpsertExternalContextLinkAndCompleteJobRequest {
             object: None,
             link: None,
@@ -1970,34 +1972,53 @@ fn postgres_subagent_cancellation_obeys_authoritative_completion_order() {
                 completed_at_ms: 120,
             },
         };
-        assert_eq!(store.get_runtime_job(id).unwrap().unwrap().status, RuntimeJobStatus::Running);
+        assert_eq!(
+            store.get_runtime_job(id).unwrap().unwrap().status,
+            RuntimeJobStatus::Running
+        );
         if completed_first {
-            store.upsert_external_context_link_and_complete_job(complete()).unwrap();
+            store
+                .upsert_external_context_link_and_complete_job(complete())
+                .unwrap();
         }
-        let receipt = store.request_subagent_job_cancellation(RequestSubagentJobCancellation {
-            job_id: id.into(),
-            session_id,
-            requested_at_ms: 121,
-        }).unwrap();
+        let receipt = store
+            .request_subagent_job_cancellation(RequestSubagentJobCancellation {
+                job_id: id.into(),
+                session_id,
+                requested_at_ms: 121,
+            })
+            .unwrap();
         let job = store.get_runtime_job(id).unwrap().unwrap();
         if completed_first {
-            assert_eq!(receipt, SubagentJobCancellationReceipt {
-                accepted: false, status: RuntimeJobStatus::Succeeded
-            });
+            assert_eq!(
+                receipt,
+                SubagentJobCancellationReceipt {
+                    accepted: false,
+                    status: RuntimeJobStatus::Succeeded
+                }
+            );
             assert_eq!(job.output_refs, ["original-result"]);
         } else {
-            assert_eq!(receipt, SubagentJobCancellationReceipt {
-                accepted: true, status: RuntimeJobStatus::Running
-            });
+            assert_eq!(
+                receipt,
+                SubagentJobCancellationReceipt {
+                    accepted: true,
+                    status: RuntimeJobStatus::Running
+                }
+            );
             assert_eq!(job.lease_owner.as_deref(), Some("active-claim"));
-            assert!(store.upsert_external_context_link_and_complete_job(complete()).is_err());
-            store.cancel_runtime_job(CancelRuntimeJobRequest {
-                job_id: id.into(),
-                expected_lease_owner: Some("active-claim".into()),
-                expected_status: Some(RuntimeJobStatus::Running),
-                reason: SUBAGENT_CANCEL_REASON.into(),
-                cancelled_at_ms: 130,
-            }).unwrap();
+            assert!(store
+                .upsert_external_context_link_and_complete_job(complete())
+                .is_err());
+            store
+                .cancel_runtime_job(CancelRuntimeJobRequest {
+                    job_id: id.into(),
+                    expected_lease_owner: Some("active-claim".into()),
+                    expected_status: Some(RuntimeJobStatus::Running),
+                    reason: SUBAGENT_CANCEL_REASON.into(),
+                    cancelled_at_ms: 130,
+                })
+                .unwrap();
             let stopped = store.get_runtime_job(id).unwrap().unwrap();
             assert_eq!(stopped.status, RuntimeJobStatus::Cancelled);
             assert!(stopped.output_refs.is_empty());

@@ -6,22 +6,18 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Centaeris is a host-agnostic agent runtime framework written in Rust. Desktop,
-terminal, and hosted products use the same runtime contracts for sessions, model
+Centaeris is a host-agnostic agent runtime framework written in Rust. Local
+CLI and hosted Workspace products use the same runtime contracts for sessions, model
 requests, tools, events, persistence, and durable continuation.
 
 This repository contains the public runtime, local and hosted products, their
 user interfaces, and separate first-party System Skill bundles. Private plugins,
 credentials, customer data and private deployment state remain external.
 
-## Appearance
-
-Choose System, Light, or Dark in Settings > Appearance. The preference persists on this device. Replies and process headings use 14px; process details, code, and tables use 13px. Process headings and content share one gray in each theme.
-
 ## Features
 
 - One canonical runtime for model, tool, session, and continuation semantics.
-- Local Electron and terminal hosts over a strict host protocol.
+- A standalone local CLI with interactive, headless and stdio RPC modes.
 - Typed tool contracts, terminal outcomes, safety decisions, and observable runtime events.
 - SQLite storage adapter and MCP adapter behind runtime-owned contracts.
 - Package and skill loading, with three public built-in System Skills and no
@@ -34,12 +30,12 @@ Choose System, Light, or Dark in Settings > Appearance. The preference persists 
 | [`packages/core`](packages/core/README.md) | Runtime semantics and contracts |
 | [`packages/agent`](packages/agent/README.md) | Rust Agent SDK and local execution adapters |
 | [`packages/sdk`](packages/sdk/README.md) | Typed TypeScript Session client |
-| [`packages/desktop/src/services`](packages/desktop/src/services/README.md) | Shared Desktop and CLI product services |
+| [`packages/cli/runtime`](packages/cli/runtime/README.md) | In-process local Runtime |
 | [`packages/sqlite`](packages/sqlite/README.md) | SQLite RuntimeStore adapter |
 | [`packages/mcp`](packages/mcp/README.md) | MCP adapter |
 | [`packages/model-catalog`](packages/model-catalog/README.md) | Rust model catalog |
 | [`packages/model-http`](packages/model-http/Cargo.toml) | Shared model HTTP and streaming transport |
-| [`packages/desktop`](packages/desktop/README.md) | Electron host |
+| [`packages/electron-shell`](packages/electron-shell/README.md) | Dormant Electron infrastructure |
 | [`packages/cli`](packages/cli/README.md) | Interactive, Print, JSON and RPC entry points |
 | [`packages/ui`](packages/ui/README.md) | Shared frontend foundations |
 | [`packages/visuals`](packages/visuals/package.json) | Shared visualization rendering |
@@ -60,8 +56,6 @@ and Compose entries serve independently selectable products.
 
 Local product distributions currently build and verify Windows x64 artifacts:
 
-- an assisted, per-user Desktop installer named `Centaeris-Desktop-0.1.0-windows-x64-setup.exe`;
-- a portable Desktop archive named `centaeris-desktop-windows-x64.zip`;
 - a standalone TUI archive named `centaeris-windows-x64.zip`;
 - corresponding source named `centaeris-source.zip`.
 
@@ -77,21 +71,14 @@ Requirements: the Rust toolchain in `rust-toolchain.toml`, Node.js 22.21.0,
 pnpm 12.10.1 and Python 3.12.
 
 ```sh
-python3 scripts/ci.py Source --frontend-tests
+python3 scripts/ci.py Source
 ```
 
 Use `python` on Windows. See [portable source development](docs/development/Building.md)
 for the common gates and [Windows setup](docs/getting-started/Windows.md) for the complete build and
 first-run paths. The runtime and tests do not require an installed Plugin. The
-Desktop and TUI distributions include the public System Skills in this tree;
+TUI distribution includes the public System Skills in this tree;
 other extensions are separate versioned assets.
-
-## Interface language
-
-The Desktop UI currently ships in English. Its `react-i18next` foundation and
-English resources live in `packages/desktop/src/renderer/i18n.ts` and `packages/desktop/src/renderer/locales/`.
-No incomplete language option is exposed. User content, model responses, commands,
-and protocol identifiers retain their original text.
 
 ## Documentation
 

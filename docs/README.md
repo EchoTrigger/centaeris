@@ -6,8 +6,7 @@ implementation plans or compatibility aliases.
 
 ## Get started
 
-- [Windows setup](getting-started/Windows.md): build and run the verified Desktop
-  and TUI targets.
+- [Windows setup](getting-started/Windows.md): build and run the CLI.
 - [Local configuration](getting-started/Configuration.md): user data, working
   directories, model credentials, Plugins, and System Skills.
 - [Troubleshooting](Troubleshooting.md): common startup and build failures.
@@ -31,7 +30,7 @@ implementation plans or compatibility aliases.
 - [Building](development/Building.md): toolchains and artifact commands.
 - [Testing](development/Testing.md): focused and full local gates.
 - [Frontend foundations](development/FrontendFoundations.md): mature component,
-  animation, layout, sorting and state implementations; Desktop acceptance precedes Web migration.
+  animation, layout, sorting and state implementations.
 - [Inline visualizations](development/InlineVisualizations.md): React and TUI
   content contract, implementation boundaries and acceptance requirements.
 - [ExecutionHost contract](architecture/ExecutionHostContract.md):

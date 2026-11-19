@@ -2,11 +2,10 @@ use super::*;
 use crate::runtime::contracts::TimestampMs;
 use crate::runtime::keys::runtime_job as runtime_job_keys;
 use crate::runtime::subagent::{
-    load_subagent_work_packet_async, subagent_id_from_job, SubagentWorkPacketEnvelope,
+    delegated_agent_retired, delegation_id_suffix, load_subagent_work_packet_async,
+    request_subagent_task_cancellation, subagent_id_from_job, SubagentWorkPacketEnvelope,
 };
-use crate::session::reliability::{
-    ListRuntimeJobsRequest, RequestSubagentJobCancellation, SubagentJobCancellationReceipt,
-};
+use crate::session::reliability::{ListRuntimeJobsRequest, RequestSubagentJobCancellation};
 use crate::session::store::job::JobStoreError;
 use crate::tool::AGENT_CONTROL_TOOL_NAMES;
 
@@ -57,15 +56,6 @@ struct TaskIdArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListAgentsArgs {}
-
-fn delegation_id_suffix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    value.strip_prefix(prefix).filter(|id| {
-        id.len() == 16
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
-}
 
 impl AgentToolArgsV1 {
     fn validate(mut self) -> Result<Self, String> {
@@ -698,7 +688,15 @@ impl<
                 "outputRef": agent_task_output_ref(&job, &binding),
             })),
             "interrupt_agent" => {
-                let receipt = self.request_task_cancellation(session_id, &job.job_id).await?;
+                let receipt = request_subagent_task_cancellation(
+                    self.job_store.as_ref(),
+                    RequestSubagentJobCancellation {
+                        job_id: job.job_id.clone(),
+                        session_id: session_id.to_owned(),
+                        requested_at_ms: now_ms(),
+                    },
+                )
+                .await?;
                 Ok(json!({
                     "agentId": binding.subagent_id,
                     "taskId": job.job_id,
@@ -707,39 +705,6 @@ impl<
                 }))
             }
             _ => Err(format!("unsupported Agent control tool: {}", call.name).into()),
-        }
-    }
-
-    async fn request_task_cancellation(
-        &self,
-        session_id: &str,
-        job_id: &str,
-    ) -> Result<SubagentJobCancellationReceipt, JobStoreError> {
-        let result = self
-            .job_store
-            .request_subagent_job_cancellation(RequestSubagentJobCancellation {
-                job_id: job_id.to_owned(),
-                session_id: session_id.to_owned(),
-                requested_at_ms: now_ms(),
-            })
-            .await;
-        let error = match result {
-            Ok(receipt) => return Ok(receipt),
-            Err(error) if error.requires_settlement() || matches!(
-                error, JobStoreError::Storage { outcome: crate::session::store::job::JobWriteOutcome::Committed, .. }
-            ) => error,
-            Err(error) => return Err(error),
-        };
-        self.job_store.settle_job_operations().await?;
-        let accepted = self.job_store.subagent_job_cancellation_requested(job_id).await?;
-        let job = self.find_delegated_task(session_id, job_id).await?;
-        if accepted || job.status.is_terminal() {
-            Ok(SubagentJobCancellationReceipt {
-                accepted,
-                status: job.status,
-            })
-        } else {
-            Err(error)
         }
     }
 
@@ -781,16 +746,8 @@ impl<
         }
         let mut listed = Vec::with_capacity(agents.len());
         for (id, (tasks, last)) in agents {
-            if let Some(suffix) = delegation_id_suffix(&id, "agent-") {
-                let origin = runtime_external_context_keys::subagent_work_packet_ref(suffix);
-                if self
-                    .job_store
-                    .load_external_context_object(&origin)
-                    .await?
-                    .is_some_and(|packet| !packet.metadata["agentRetiredAtMs"].is_null())
-                {
-                    continue;
-                }
+            if delegated_agent_retired(self.job_store.as_ref(), &id).await? {
+                continue;
             }
             listed.push(json!({"agentId": id, "tasks": tasks, "lastTerminalTask": last}));
         }

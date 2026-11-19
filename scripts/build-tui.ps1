@@ -68,7 +68,7 @@ function Get-SystemSkillsBundle {
         [Parameter(Mandatory = $true)][string]$Path
     )
     $inspector = @'
-import { inspectSystemSkillsBundle } from "./packages/desktop/src/main/services/systemSkills.mjs";
+import { inspectSystemSkillsBundle } from "./scripts/system-skills.mjs";
 try {
   process.stdout.write(JSON.stringify(await inspectSystemSkillsBundle(process.argv[1])));
 } catch (error) {
@@ -143,13 +143,12 @@ Invoke-Checked "product license assembly" "node.exe" @(
 Invoke-Checked "product license validation" "node.exe" @(
     (Join-Path $repoRoot "scripts/product-licenses.mjs"), "check", $distRoot
 ) $repoRoot
-$notices = (Get-Content -Raw -LiteralPath (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md")).Replace("packages/desktop/public/licenses/", "licenses/")
+$noticeSections = (Get-Content -Raw -LiteralPath (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md")) -split '(?m)(?=^## )'
+$notices = (@("# Third-party notices`n") + ($noticeSections -cmatch '^## (Model catalog logos|System Skills)\r?\n')) -join "`n"
 Set-Content -LiteralPath (Join-Path $distRoot "THIRD_PARTY_NOTICES.md") -Value $notices -Encoding utf8NoBOM
-Copy-Item -LiteralPath (Join-Path $repoRoot "packages/desktop/public/licenses") -Destination (Join-Path $distRoot "licenses") -Recurse
 Invoke-Checked "third-party license assembly" "node.exe" @(
-    (Join-Path $repoRoot "packages/desktop/scripts/write-third-party-licenses.mjs"),
+    (Join-Path $repoRoot "scripts/write-third-party-licenses.mjs"),
     (Join-Path $distRoot "THIRD_PARTY_LICENSES"),
-    "centaeris-desktop-services",
     "centaeris-tui",
     "--rust-only"
 ) $repoRoot
@@ -193,8 +192,6 @@ foreach ($requiredPath in @(
     "packages/model-catalog/centaeris_model_catalog/logos/LICENSE",
     "COPYRIGHT",
     "THIRD_PARTY_NOTICES.md",
-    "licenses/OFL-GoogleSansCode.txt",
-    "licenses/OFL-NotoSansCJK.txt",
     "THIRD_PARTY_LICENSES/index.json"
 )) {
     if ($manifest.files.path -notcontains $requiredPath) {
@@ -208,13 +205,14 @@ foreach ($skillName in $systemSkillsBundle.skillNames) {
     }
 }
 foreach ($relativePath in @(
+    "packages/model-catalog/centaeris_model_catalog/logos/LICENSE",
     "system-skills/skill-creator/license.txt",
     "system-skills/skill-creator/NOTICE",
     "system-skills/skill-installer/LICENSE.txt",
     "system-skills/skill-installer/NOTICE"
 )) {
     if ($manifest.files.path -notcontains $relativePath -or -not $notices.Contains($relativePath)) {
-        throw "TUI package is missing System Skill attribution: $relativePath"
+        throw "TUI package is missing bundled asset attribution: $relativePath"
     }
 }
 if ($manifest.files.path | Where-Object { $_ -match '^system-skills/.*(/__pycache__/|\.pyc$)' }) {
@@ -232,7 +230,6 @@ Write-Host "[tui-build] complete" -ForegroundColor Green
 Write-Host "Package: $distRoot"
 Write-Host "Archive: $zipPath"
 Write-Host "TUI size: $((Get-Item -LiteralPath (Join-Path $distRoot $tuiName)).Length) bytes"
-Write-Host "Runtime size: $((Get-Item -LiteralPath (Join-Path $distRoot $runtimeName)).Length) bytes"
 Write-Host "Archive size: $((Get-Item -LiteralPath $zipPath).Length) bytes"
 Write-Host "Version: $version"
 Write-Host "System Skills: $($systemSkillsBundle.skillNames.Count) ($($systemSkillsBundle.digest))"

@@ -3,12 +3,13 @@
 The `centaeris-tui` Rust crate builds `cet`, the Ratatui terminal and headless
 CLI. The TUI and `print`/`json` modes run the local Agent and tools in the `cet`
 process. The `rpc` mode serves the Agent JSONL protocol over standard input
-and output in that same process. These modes use the shared Session and tool
-implementation under `packages/desktop/src/services`.
+and output in that same process. All three entry points use the local app
+service in [`centaeris-cli-runtime`](runtime/src/lib.rs).
 
 Multiple TUI and `print`/`json` processes can share the local data directory.
-Each session has one writer at a time. Desktop's separate `centaeris-runtime`
-service and the raw `rpc` mode require exclusive access to their data directory. The package
+Each root session and its descendants have one writer at a time. Desktop's
+separate `centaeris-runtime` service and the raw `rpc` mode require exclusive
+access to their data directory. The package
 includes `cet.mjs`, the Node entry point under `@centaeris/tui-local`, and
 the `dist/` output used by the Windows TUI archive.
 
@@ -18,20 +19,23 @@ first-run paths.
 
 ## Slash commands
 
-The TUI command menu contains `/model`, `/effort`, `/resume`, `/new`,
+The TUI command menu contains `/model`, `/effort`, `/resume`, `/dashboard`, `/new`,
 `/clear`, `/stop`, `/help`, and `/exit`.
 `/help` opens this same menu. Enter activates its highlighted command; Tab
 completes only the command name. Other slash command names return an unknown
 command error without changing the active chat.
 
-Use `/resume` or Ctrl+\ to browse pinned and recent sessions across workspaces.
-Ctrl+\ opens the list with your current draft still in place. Press
-`/` or type to filter by title, session ID, or workspace path. Use Up/Down
+Use `/resume` to browse pinned and recent sessions grouped by workspace, with the
+current workspace first. Press `/` or type to filter by title or session ID. Use Up/Down
 to move from search to the results, then Enter or click a row to restore it.
 Esc returns from search to the list, then clears the filter or closes the
 picker. Open sessions keep their drafts, attachments, scroll position and
 running tasks while you switch between them. A session opened for writing
 stays owned by that terminal window until the window exits.
+
+`/dashboard`, its alias `/sessions`, Ctrl+\ or Ctrl+4 opens the Dashboard
+to preview and reply to open sessions.
+The Inactive group loads saved sessions from the current working directory.
 
 `/new` and `/clear` both open a blank session in the current workspace.
 The previous session remains available in `/resume` and its task keeps running.
@@ -76,17 +80,20 @@ The wheel scrolls the area under the pointer. Overflowing lists, transcript
 and long drafts have draggable scrollbars. Dragging a selection
 beyond the composer or transcript scrolls the loaded text. Active panels own
 their pointer input; resizing or changing panels ends a drag. Click an image
-placeholder to open the draft image viewer. Detected Kitty and iTerm2 graphics
-support pixel previews with wheel zoom, drag to pan, and `0` to fit. Other
-terminals show image dimensions, format, byte size, and the attachment path.
-Press Esc to return to the draft.
+placeholder to open the draft image viewer. Compatible Kitty and iTerm2
+terminals support pixel previews with wheel zoom, drag to pan, and `0` to fit.
+The text preview shows image dimensions, format, byte size, and the attachment
+path. Press Esc to return to the draft. Tool images stay with their results in
+the transcript. Kitty, Ghostty, and WezTerm can display them inline with the
+Kitty graphics protocol. Windows native terminals and tmux use text previews.
 
 ## Terminal layout
 
 The transcript separates prompts, answers, and tool output. Long tool commands
 align their continuation lines with the command, and the current run status
 sits above the composer. Failed commands and requests keep their error summary.
-The composer keeps a dedicated background and compact spacing in short windows.
+The borderless composer uses the terminal background and aligns its text with
+the submitted prompts.
 
 Markdown tables align cells by display width. In narrow windows, cells keep
 their text and separators while logical rows wrap. Fenced code gets a separate

@@ -3,7 +3,7 @@
 License identifiers follow the [SPDX License List](https://spdx.org/licenses/).
 
 Original Centaeris source code and documentation, including all first-party
-packages and the complete Desktop, TUI, and hosted Workspace products, are
+packages and the complete CLI and hosted Workspace products, are
 licensed under [AGPL-3.0-only](LICENSE).
 
 The Core, model catalog, MCP, and SQLite packages carry a copy of the same
@@ -20,11 +20,9 @@ Third-party material remains under its stated license:
   modification notices in their directories under `system-skills/`.
 - Provider logos in `packages/model-catalog/centaeris_model_catalog/logos/`
   retain their [original license and attribution notice](packages/model-catalog/centaeris_model_catalog/logos/LICENSE).
-- Bundled fonts in `packages/desktop/public/` retain their SIL Open Font License
-  notices, indexed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- Vendored license fallbacks in `packages/desktop/packaging/third_party_license_fallbacks/`
+- Vendored license fallbacks in `scripts/third_party_license_fallbacks/`
   retain their upstream notices. Dependencies retain their own licenses;
-  Desktop and TUI distributions include the assembled `THIRD_PARTY_LICENSES`.
+  TUI distributions include the assembled `THIRD_PARTY_LICENSES`.
 
 ## Trademarks
 

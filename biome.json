@@ -5,9 +5,6 @@
       "packages/sdk/src/**",
       "packages/ui/src/**",
       "packages/visuals/src/**",
-      "packages/desktop/src/**",
-      "packages/desktop/tests/**",
-      "packages/desktop/scripts/**",
       "packages/workspace/web/src/**",
       "packages/workspace/web/tests/**"
     ]

@@ -4,7 +4,10 @@ const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(450);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Surface {
+    SubagentDetail,
+    Dashboard,
     Sessions,
+    Settings,
     #[default]
     Main,
     Image,
@@ -63,7 +66,6 @@ impl Scrollbar {
 pub(super) struct State {
     pub position: Option<Position>,
     pub input_focused: bool,
-    pub question_scroll: usize,
     pub(super) stop_area: Option<Rect>,
     surface: Surface,
     bars: Vec<Scrollbar>,
@@ -79,7 +81,6 @@ impl Default for State {
         Self {
             position: None,
             input_focused: true,
-            question_scroll: 0,
             stop_area: None,
             surface: Surface::Main,
             bars: Vec::new(),
@@ -102,15 +103,21 @@ impl State {
 }
 
 fn surface(app: &App) -> Surface {
-    if app.image_preview.is_some() {
+    if app.session.subagents.detail_open() {
+        Surface::SubagentDetail
+    } else if app.session.image_preview.is_some() {
         Surface::Image
     } else if app.session_picker.is_some() {
         Surface::Sessions
+    } else if dashboard::visible(app) {
+        Surface::Dashboard
     } else if app.model_panel.is_some() {
         Surface::Models
-    } else if app.home_risk_panel.is_some() {
+    } else if settings::visible(app) {
+        Surface::Settings
+    } else if app.session.home_risk_panel.is_some() {
         Surface::Home
-    } else if app.pending_question.is_some() {
+    } else if app.session.pending_question.is_some() {
         Surface::Question
     } else {
         Surface::Main
@@ -127,22 +134,24 @@ pub(super) fn cancel_capture(app: &mut App) {
     app.mouse_state.last_press = None;
     app.mouse_state.bash_press = None;
     app.mouse_state.bash_selection = None;
-    if let Some(ImagePreview::Pixels(preview)) = app.image_preview.as_mut() {
+    if let Some(ImagePreview::Pixels(preview)) = app.session.image_preview.as_mut() {
         preview.drag = None;
     }
 }
 
 pub(super) fn resize(app: &mut App) {
     cancel_capture(app);
+    clear_hitboxes(app);
     app.mouse_state.bars.clear();
     app.mouse_state.bash_blocks.clear();
     app.mouse_state.stop_area = None;
     session_picker::invalidate_geometry(app);
+    dashboard::invalidate_geometry(app);
 }
 
 pub(super) fn set_bash_blocks(app: &mut App, area: Rect, blocks: &[(String, Range<u64>)]) {
     app.mouse_state.bash_blocks.clear();
-    let scroll = app.transcript_scroll;
+    let scroll = app.session.transcript_scroll;
     let viewport_end = scroll.saturating_add(u64::from(area.height));
     for (key, rows) in blocks {
         let start = rows.start.max(scroll);
@@ -170,7 +179,7 @@ pub(super) fn render_bash_selection(frame: &mut Frame, app: &App) {
             frame.buffer_mut().set_style(
                 *area,
                 Style {
-                    bg: theme().user_prompt().bg,
+                    bg: Some(ratatui::style::Color::Rgb(42, 42, 42)),
                     ..Style::default()
                 },
             );
@@ -191,31 +200,18 @@ pub(super) fn set_text_layout(
     layout: std::sync::Arc<text_layout::TextLayout>,
     scroll: usize,
 ) {
-    if let (Some(previous), Some(selection)) = (app.text_layout.as_ref(), app.transcript_selection)
-    {
+    if let (Some(previous), Some(selection)) = (
+        app.session.text_layout.as_ref(),
+        app.session.transcript_selection,
+    ) {
         let end = selection.range().end;
         if previous.text.get(..end) != layout.text.get(..end) {
-            app.transcript_selection = None;
+            app.session.transcript_selection = None;
             app.mouse_drag = None;
         }
     }
-    app.text_layout = Some(layout);
-    app.text_scroll = scroll;
-}
-
-pub(super) fn embedded_area(app: &App) -> Option<Rect> {
-    app.panel_area.map(|outer| {
-        if app.command_panel_open() {
-            command_panel_area(outer)
-        } else {
-            Rect::new(
-                outer.x.saturating_add(2),
-                outer.y,
-                outer.width.saturating_sub(2).min(94),
-                outer.height,
-            )
-        }
-    })
+    app.session.text_layout = Some(layout);
+    app.session.text_scroll = scroll;
 }
 
 pub(super) fn prepare_frame(app: &mut App) {
@@ -224,7 +220,7 @@ pub(super) fn prepare_frame(app: &mut App) {
     let current = surface(app);
     if current != app.mouse_state.surface {
         cancel_capture(app);
-        app.transcript_selection = None;
+        app.session.transcript_selection = None;
         app.mouse_state.surface = current;
         app.mouse_state.input_focused = editor_enabled(app);
     }
@@ -265,13 +261,17 @@ pub(super) fn decorate(frame: &mut Frame, app: &mut App) {
     match current {
         Surface::Main => {
             if let Some(area) = app.transcript_viewport {
-                let total = app.text_layout.as_ref().map_or(0, |layout| layout.height());
+                let total = app
+                    .session
+                    .text_layout
+                    .as_ref()
+                    .map_or(0, |layout| layout.height());
                 if total > area.height as usize {
                     bars.push(Scrollbar {
                         area: Rect::new(area.right().saturating_sub(1), area.y, 1, area.height),
                         total,
                         visible: area.height as usize,
-                        offset: app.transcript_scroll as usize,
+                        offset: app.session.transcript_scroll as usize,
                         target: ScrollTarget::Transcript,
                     });
                 }
@@ -320,10 +320,11 @@ pub(super) fn decorate(frame: &mut Frame, app: &mut App) {
         }
         _ => {}
     }
-    if let Some(area) = embedded_area(app) {
+    if let Some(area) = app.panel_area {
         if current == Surface::Main && app.command_panel_open() {
-            let count = matching_commands(&app.input).len();
+            let count = matching_commands(&app.session.input).len();
             let offset = app
+                .session
                 .selected_command
                 .saturating_sub(area.height.saturating_sub(1) as usize);
             add_list(
@@ -331,22 +332,18 @@ pub(super) fn decorate(frame: &mut Frame, app: &mut App) {
                 &mut hover,
                 area,
                 offset..count,
-                Some(app.selected_command.min(count.saturating_sub(1))),
+                Some(app.session.selected_command.min(count.saturating_sub(1))),
                 ScrollTarget::Commands,
             );
         } else if current == Surface::Question {
-            let body = Rect::new(
-                area.x,
-                area.y + 2,
-                area.width,
-                area.height.saturating_sub(3),
-            );
+            let body = question_options_area(area);
             add_list(
                 &mut bars,
                 &mut hover,
                 body,
-                app.mouse_state.question_scroll
+                app.session.question_scroll
                     ..app
+                        .session
                         .pending_question
                         .as_ref()
                         .map_or(0, |question| question.options.len()),
@@ -355,6 +352,7 @@ pub(super) fn decorate(frame: &mut Frame, app: &mut App) {
             );
         } else if current == Surface::Home {
             for row in 0..app
+                .session
                 .home_risk_panel
                 .as_ref()
                 .map_or(0, |panel| panel.workspaces.len() + 1)
@@ -363,6 +361,7 @@ pub(super) fn decorate(frame: &mut Frame, app: &mut App) {
                 hover.push(HoverRegion {
                     area: Rect::new(area.x, area.y + 2 + row as u16, area.width, 1),
                     selected: app
+                        .session
                         .home_risk_panel
                         .as_ref()
                         .is_some_and(|panel| panel.selected == row),
@@ -371,7 +370,7 @@ pub(super) fn decorate(frame: &mut Frame, app: &mut App) {
         }
     }
     if editor_enabled(app) {
-        if let (Some(area), Some(layout)) = (app.input_area, app.input_layout.as_ref()) {
+        if let (Some(area), Some(layout)) = (app.input_area, app.session.input_layout.as_ref()) {
             if layout.height().max(
                 layout
                     .caret(input_display_offset(app, clamped_cursor(app)))
@@ -389,7 +388,7 @@ pub(super) fn decorate(frame: &mut Frame, app: &mut App) {
                             + 1,
                     ),
                     visible: area.height as usize,
-                    offset: app.input_scroll,
+                    offset: app.session.input_scroll,
                     target: ScrollTarget::Input,
                 });
             }
@@ -448,20 +447,21 @@ fn apply_scroll(app: &mut App, bar: Scrollbar, offset: usize) {
     };
     match bar.target {
         ScrollTarget::Input => {
-            app.input_scroll = offset;
-            app.input_scroll_override = true;
+            app.session.input_scroll = offset;
+            app.session.input_scroll_override = true;
         }
         ScrollTarget::Transcript => {
-            app.transcript_scroll = (offset as u64).min(app.transcript_max_scroll);
-            app.transcript_follow_bottom = app.transcript_scroll == app.transcript_max_scroll;
+            app.session.transcript_scroll = (offset as u64).min(app.session.transcript_max_scroll);
+            app.session.transcript_follow_bottom =
+                app.session.transcript_scroll == app.session.transcript_max_scroll;
         }
         ScrollTarget::Models => {
             if let Some(row) = model_picker::rows(app).get(selected) {
                 model_picker::select(app, row.index);
             }
         }
-        ScrollTarget::Commands => app.selected_command = selected,
-        ScrollTarget::Question => app.mouse_state.question_scroll = offset,
+        ScrollTarget::Commands => app.session.selected_command = selected,
+        ScrollTarget::Question => app.session.question_scroll = offset,
         ScrollTarget::Sessions => session_picker::scroll_to(app, selected),
     }
 }
@@ -479,16 +479,18 @@ fn panel_wheel(app: &mut App, up: bool, position: Position) {
             handle_home_risk_key(key, app);
         }
         Surface::Question => {
-            let visible =
-                embedded_area(app).map_or(0, |area| area.height.saturating_sub(3) as usize);
+            let visible = app
+                .panel_area
+                .map_or(0, |area| usize::from(question_options_area(area).height));
             let max = app
+                .session
                 .pending_question
                 .as_ref()
                 .map_or(0, |question| question.options.len().saturating_sub(visible));
-            app.mouse_state.question_scroll = if up {
-                app.mouse_state.question_scroll.saturating_sub(1)
+            app.session.question_scroll = if up {
+                app.session.question_scroll.saturating_sub(1)
             } else {
-                (app.mouse_state.question_scroll + 1).min(max)
+                (app.session.question_scroll + 1).min(max)
             };
         }
         Surface::Main
@@ -510,9 +512,45 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
     }
     let position = Position::new(event.column, event.row);
     app.mouse_state.position = Some(position);
+    if app.session.subagents.handle_detail_mouse(event) {
+        return;
+    }
     if current == Surface::Image {
         image_mouse(app, event);
         return;
+    }
+    if current == Surface::Dashboard {
+        dashboard::mouse(app, event);
+        return;
+    }
+    if current == Surface::Settings {
+        settings::mouse(app, event);
+        return;
+    }
+    if current == Surface::Main && !app.command_panel_open() && !app.secret_input_active() {
+        if app.session.subagents.handle_dock_mouse(
+            event,
+            &app.subagent_dock,
+            app.runtime.as_ref(),
+            app.session.read_only_session.is_none(),
+        ) {
+            cancel_capture(app);
+            app.mouse_state.input_focused = false;
+            return;
+        }
+        if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            app.session.subagents.blur_dock();
+            if let Some((_, child)) = app
+                .subagent_links
+                .iter()
+                .find(|(area, _)| area.contains(position))
+            {
+                if app.session.subagents.open_child(child) {
+                    cancel_capture(app);
+                    return;
+                }
+            }
+        }
     }
     if let Some((bar, grab)) = app.mouse_state.scrollbar_drag {
         if matches!(
@@ -527,6 +565,10 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
         return;
     }
     if event.kind == MouseEventKind::Down(MouseButton::Left) {
+        if current == Surface::Main && media::click(app, position) {
+            cancel_capture(app);
+            return;
+        }
         app.mouse_state.bash_press = (current == Surface::Main)
             .then(|| app.mouse_state.bash_key_at(position))
             .flatten()
@@ -537,14 +579,14 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
         if matches!(current, Surface::Main | Surface::Question)
             && !app.command_panel_open()
             && !app.secret_input_active()
-            && has_active_agent_run(app)
+            && has_active_agent_run(&app.session)
             && app
                 .mouse_state
                 .stop_area
                 .is_some_and(|area| area.contains(position))
         {
             app.mouse_drag = None;
-            app.pending_esc_stop = false;
+            app.session.pending_esc_stop = false;
             if let Err(error) = stop_controlled_tasks(app, "tui_user_stop") {
                 show_message(app, error);
             }
@@ -604,7 +646,7 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
             return;
         }
         if input {
-            let max = app.input_layout.as_ref().map_or(0, |layout| {
+            let max = app.session.input_layout.as_ref().map_or(0, |layout| {
                 layout
                     .height()
                     .max(
@@ -615,12 +657,12 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
                     )
                     .saturating_sub(app.input_area.map_or(0, |area| area.height as usize))
             });
-            app.input_scroll = if up {
-                app.input_scroll.saturating_sub(3)
+            app.session.input_scroll = if up {
+                app.session.input_scroll.saturating_sub(3)
             } else {
-                (app.input_scroll + 3).min(max)
+                (app.session.input_scroll + 3).min(max)
             };
-            app.input_scroll_override = true;
+            app.session.input_scroll_override = true;
         } else if body {
             scroll_transcript(app, if up { -3 } else { 3 });
         } else if app.panel_area.is_some_and(|area| area.contains(position)) {
@@ -642,8 +684,8 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
                     _ => {}
                 }
             } else if app.panel_area.is_some_and(|area| area.contains(position)) {
-                app.transcript_selection = None;
-                app.input_selection_anchor = None;
+                app.session.transcript_selection = None;
+                app.session.input_selection_anchor = None;
                 handle_panel_click(event, app);
                 return;
             }
@@ -667,12 +709,16 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
             };
             let byte = if clicks > 1 {
                 let (area, layout, scroll) = if input {
-                    (app.input_area, app.input_layout.as_ref(), app.input_scroll)
+                    (
+                        app.input_area,
+                        app.session.input_layout.as_ref(),
+                        app.session.input_scroll,
+                    )
                 } else {
                     (
                         app.transcript_area,
-                        app.text_layout.as_deref(),
-                        app.text_scroll,
+                        app.session.text_layout.as_deref(),
+                        app.session.text_scroll,
                     )
                 };
                 area.zip(layout).map(|(area, layout)| {
@@ -693,29 +739,30 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
             };
             if let Some(byte) = byte {
                 if input {
-                    app.transcript_selection = None;
-                    app.input_scroll_override = false;
+                    app.session.transcript_selection = None;
+                    app.session.input_scroll_override = false;
                     if clicks == 1 {
-                        app.input_cursor =
+                        app.session.input_cursor =
                             input_byte_from_mouse(app, event.column, event.row).unwrap_or(byte);
-                        app.input_selection_anchor = Some(app.input_cursor);
+                        app.session.input_selection_anchor = Some(app.session.input_cursor);
                         app.mouse_drag = Some(MouseDrag::Input);
                     } else {
-                        let layout = text_layout::TextLayout::plain(&app.input, u16::MAX);
+                        let layout = text_layout::TextLayout::plain(&app.session.input, u16::MAX);
                         let selected = layout.semantic_selection(byte, clicks == 3);
-                        app.input_selection_anchor = Some(selected.anchor);
-                        app.input_cursor = selected.head;
+                        app.session.input_selection_anchor = Some(selected.anchor);
+                        app.session.input_cursor = selected.head;
                         copy_input(app);
                     }
                 } else {
-                    app.input_selection_anchor = None;
-                    app.transcript_selection = Some(if clicks == 1 {
+                    app.session.input_selection_anchor = None;
+                    app.session.transcript_selection = Some(if clicks == 1 {
                         text_layout::Selection {
                             anchor: byte,
                             head: byte,
                         }
                     } else {
-                        app.text_layout
+                        app.session
+                            .text_layout
                             .as_ref()
                             .expect("body layout")
                             .semantic_selection(byte, clicks == 3)
@@ -736,12 +783,12 @@ pub(super) fn handle(app: &mut App, event: MouseEvent) {
             match app.mouse_drag {
                 Some(MouseDrag::Input) => {
                     if let Some(byte) = input_byte_from_mouse(app, event.column, event.row) {
-                        app.input_cursor = byte;
+                        app.session.input_cursor = byte;
                     }
                 }
                 Some(MouseDrag::Transcript) => {
                     if let Some(byte) = transcript_point_from_mouse(app, event.column, event.row) {
-                        if let Some(selection) = app.transcript_selection.as_mut() {
+                        if let Some(selection) = app.session.transcript_selection.as_mut() {
                             selection.head = byte;
                         }
                     }
@@ -781,21 +828,21 @@ fn complete_bash_click(app: &mut App, position: Position) -> bool {
                     .is_some_and(|last| now.duration_since(last) < MULTI_CLICK_INTERVAL)
         });
     if toggle {
-        if app.expanded_bash_tools.remove(&key) {
-            app.output_preview.remove(&key);
+        if app.session.expanded_bash_tools.remove(&key) {
+            app.session.output_preview.remove(&key);
         } else {
-            app.expanded_bash_tools.insert(key.clone());
-            app.transcript_follow_bottom = false;
+            app.session.expanded_bash_tools.insert(key.clone());
+            app.session.transcript_follow_bottom = false;
         }
-        invalidate_transcript_layout(app);
+        invalidate_transcript_layout(&mut app.session);
     }
     app.mouse_state.bash_selection = Some(BashSelection {
         key,
         last_click: (!toggle).then_some(now),
     });
     app.mouse_drag = None;
-    app.transcript_selection = None;
-    app.input_selection_anchor = None;
+    app.session.transcript_selection = None;
+    app.session.input_selection_anchor = None;
     true
 }
 
@@ -812,7 +859,7 @@ pub(super) fn drag_scroll_tick(app: &mut App) -> bool {
             let Some(area) = app.input_area else {
                 return false;
             };
-            let maximum = app.input_layout.as_ref().map_or(0, |layout| {
+            let maximum = app.session.input_layout.as_ref().map_or(0, |layout| {
                 layout
                     .height()
                     .max(
@@ -823,7 +870,7 @@ pub(super) fn drag_scroll_tick(app: &mut App) -> bool {
                     )
                     .saturating_sub(area.height as usize)
             });
-            (area, app.input_scroll, maximum)
+            (area, app.session.input_scroll, maximum)
         }
         Some(MouseDrag::Transcript) if surface(app) == Surface::Main => {
             let Some(area) = app.transcript_area else {
@@ -831,8 +878,8 @@ pub(super) fn drag_scroll_tick(app: &mut App) -> bool {
             };
             (
                 area,
-                app.transcript_scroll as usize,
-                app.transcript_max_scroll as usize,
+                app.session.transcript_scroll as usize,
+                app.session.transcript_max_scroll as usize,
             )
         }
         _ => return false,
@@ -848,17 +895,18 @@ pub(super) fn drag_scroll_tick(app: &mut App) -> bool {
         return false;
     }
     if app.mouse_drag == Some(MouseDrag::Input) {
-        app.input_scroll = next;
-        app.input_scroll_override = true;
+        app.session.input_scroll = next;
+        app.session.input_scroll_override = true;
         if let Some(byte) = input_byte_from_mouse(app, position.x, position.y) {
-            app.input_cursor = byte;
+            app.session.input_cursor = byte;
         }
     } else {
-        app.transcript_scroll = next as u64;
-        app.text_scroll = next;
-        app.transcript_follow_bottom = app.transcript_scroll == app.transcript_max_scroll;
+        app.session.transcript_scroll = next as u64;
+        app.session.text_scroll = next;
+        app.session.transcript_follow_bottom =
+            app.session.transcript_scroll == app.session.transcript_max_scroll;
         if let Some(byte) = transcript_point_from_mouse(app, position.x, position.y) {
-            if let Some(selection) = app.transcript_selection.as_mut() {
+            if let Some(selection) = app.session.transcript_selection.as_mut() {
                 selection.head = byte;
             }
         }
@@ -869,7 +917,7 @@ pub(super) fn drag_scroll_tick(app: &mut App) -> bool {
 fn copy_input(app: &mut App) {
     if !app.secret_input_active() {
         if let Some(range) = input_selection_range(app) {
-            let text = app.input[range].to_owned();
+            let text = app.session.input[range].to_owned();
             copy(app, &text);
         }
     }
@@ -884,7 +932,7 @@ fn image_mouse(app: &mut App, event: MouseEvent) {
     let position = Position::new(event.column, event.row);
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(ImagePreview::Pixels(preview)) = app.image_preview.as_mut() {
+            if let Some(ImagePreview::Pixels(preview)) = app.session.image_preview.as_mut() {
                 if preview.image_area.contains(position) {
                     preview.drag = Some(ImagePreviewDrag {
                         start: position,
@@ -902,12 +950,12 @@ fn image_mouse(app: &mut App, event: MouseEvent) {
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
-            if let Some(ImagePreview::Pixels(preview)) = app.image_preview.as_mut() {
+            if let Some(ImagePreview::Pixels(preview)) = app.session.image_preview.as_mut() {
                 finish_image_preview_drag(preview, position);
             }
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            if let Some(ImagePreview::Pixels(preview)) = app.image_preview.as_mut() {
+            if let Some(ImagePreview::Pixels(preview)) = app.session.image_preview.as_mut() {
                 if preview.image_area.contains(position) {
                     zoom_image_preview(
                         preview,

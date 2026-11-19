@@ -4,8 +4,7 @@ Shared runtime foundations, the Rust Agent SDK, local clients, and frontend
 foundations live directly under `packages/`. Hosted API, Web, Worker, Runtime,
 Executor, and document processing belong to `packages/workspace/`.
 `packages/core` owns runtime semantics and generic source associations.
-`packages/desktop/src/services` composes the shared local product host for
-Desktop and CLI. Workspace owns hosted control-plane facts, material evidence,
+`packages/cli/runtime` composes the in-process Runtime for the standalone CLI. Workspace owns hosted control-plane facts, material evidence,
 document locators, and citation presentation.
 
 ## Provenance and history
@@ -34,7 +33,8 @@ source baselines. Existing Core versions stay selected where constraints allow;
 incompatible major versions required by hosted packages remain side by side.
 The added hosted crates and their dependency graph account for the lock growth.
 
-pnpm links SDK, Desktop, UI, visuals, and Workspace Web through one root lock.
+pnpm links SDK, UI, visuals, and Workspace Web through one root lock. The
+dormant Electron shell has its own lockfile and no product build entry.
 Pinned dependencies and transitive overrides are declared in the root manifests.
 The Python members under `packages/workspace/` share the root `uv.lock`.
 Local product builds use the Cargo and pnpm workspaces.
@@ -42,7 +42,7 @@ Local product builds use the Cargo and pnpm workspaces.
 ## Product gates
 
 ```sh
-python scripts/ci.py Source --frontend-tests
+python scripts/ci.py Source
 python scripts/workspace/ci.py --stage Rust
 python scripts/workspace/ci.py --stage Web
 python scripts/workspace/ci.py --stage Contracts
@@ -51,7 +51,6 @@ python scripts/workspace/ci.py --stage ApiPostgres
 python scripts/workspace/ci.py --stage Support
 python scripts/workspace/ci.py
 python scripts/products.py build tui
-python scripts/products.py build desktop
 python scripts/products.py build runtime-server
 python scripts/products.py build hosted-execution
 python scripts/workspace/build.py
@@ -75,7 +74,7 @@ or stored deployment data is migrated by this source change.
 
 ## Independent publication
 
-Desktop, TUI and Workspace manual release entries build independently. Their
+TUI and Workspace manual release entries build independently. Their
 publish input defaults to false. Opt-in publication requires main and passing CI
 for the same source SHA; local implementation does not invoke those workflows.
 The supported local distribution matrix remains Windows x64. A product release

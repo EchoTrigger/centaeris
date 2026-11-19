@@ -47,7 +47,10 @@ async fn poll_loop_cancellation_async(
         return poll_loop_cancellation(cancellation_probe);
     };
     let observed: Result<_, crate::session::store::job::JobStoreError> = async {
-        let job = worker.jobs.get_runtime_job(worker.job_id).await?
+        let job = worker
+            .jobs
+            .get_runtime_job(worker.job_id)
+            .await?
             .ok_or_else(|| {
                 crate::session::store::job::JobStoreError::not_executed(
                     crate::session::store::job::JobStoreOperation::Read,
@@ -57,9 +60,13 @@ async fn poll_loop_cancellation_async(
         if let Some(reason) = cancelled_job_reason(&job) {
             return Ok(Some(reason));
         }
-        Ok(worker.jobs.subagent_job_cancellation_requested(worker.job_id).await?
+        Ok(worker
+            .jobs
+            .subagent_job_cancellation_requested(worker.job_id)
+            .await?
             .then(|| SUBAGENT_CANCEL_REASON.to_owned()))
-    }.await;
+    }
+    .await;
     let reason = observed.map_err(|error| {
         let message = error.diagnostic_message();
         worker
@@ -670,8 +677,9 @@ impl<
                     description: contract.summary,
                     input_schema: contract.input_schema,
                 };
-                let bytes = serde_json::to_vec(&definition)
-                    .map_err(|error| format!("serialize historical tool definition failed: {error}"))?;
+                let bytes = serde_json::to_vec(&definition).map_err(|error| {
+                    format!("serialize historical tool definition failed: {error}")
+                })?;
                 use sha2::{Digest, Sha256};
                 format!("sha256:{:x}", Sha256::digest(bytes))
             } else {
@@ -2666,11 +2674,11 @@ impl<
             }
 
             let (mut response, tool_interrupt) = {
-                let watch_tool = worker_cancellation.filter(|_| {
-                    !turn_req.generate_result.tool_calls.is_empty()
-                });
+                let watch_tool =
+                    worker_cancellation.filter(|_| !turn_req.generate_result.tool_calls.is_empty());
                 let execution_tools = if let Some(worker) = watch_tool {
-                    execution_tools.with_additional_execution_cancellation_probe(worker.tool_probe())
+                    execution_tools
+                        .with_additional_execution_cancellation_probe(worker.tool_probe())
                 } else {
                     execution_tools
                 };

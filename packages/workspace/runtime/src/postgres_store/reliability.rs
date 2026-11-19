@@ -3,6 +3,11 @@ use std::time::{Duration, Instant};
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::{Client, GenericClient, Row};
 
+use centaeris_core::runtime::subagent::SUBAGENT_RUN_JOB_KIND;
+use centaeris_core::session::reliability::{
+    subagent_cancel_request_id, RequestSubagentJobCancellation, SubagentJobCancellationReceipt,
+    SUBAGENT_CANCEL_REASON, SUBAGENT_CANCEL_REQUESTED_EVENT, SUBAGENT_CANCEL_UNCONFIRMED,
+};
 use centaeris_core::session::reliability::{
     AcquireResourceClaimDisposition, AcquireResourceClaimRequest, AcquireResourceClaimResult,
     CancelRuntimeJobRequest, ClaimDueRuntimeJobsRequest, CompleteRuntimeJobRequest,
@@ -17,11 +22,6 @@ use centaeris_core::session::reliability::{
     ScheduleRuntimeJobDisposition, ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult,
     StartRuntimeJobRequest, WakeRuntimeJobDisposition, WakeRuntimeJobRequest,
     YieldRuntimeJobRequest, RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT, RUNTIME_JOB_TERMINAL_EVENT,
-};
-use centaeris_core::runtime::subagent::SUBAGENT_RUN_JOB_KIND;
-use centaeris_core::session::reliability::{
-    subagent_cancel_request_id, RequestSubagentJobCancellation, SubagentJobCancellationReceipt,
-    SUBAGENT_CANCEL_REASON, SUBAGENT_CANCEL_REQUESTED_EVENT, SUBAGENT_CANCEL_UNCONFIRMED,
 };
 
 use super::runtime::to_i64;
@@ -559,10 +559,16 @@ fn subagent_job_cancellation_requested(
     client: &mut impl GenericClient,
     job_id: &str,
 ) -> Result<bool, String> {
-    client.query_one(
-        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE event_id=$1 AND event_type=$2)",
-        &[&subagent_cancel_request_id(job_id), &SUBAGENT_CANCEL_REQUESTED_EVENT],
-    ).map(|row| row.get(0)).map_err(|e| e.to_string())
+    client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE event_id=$1 AND event_type=$2)",
+            &[
+                &subagent_cancel_request_id(job_id),
+                &SUBAGENT_CANCEL_REQUESTED_EVENT,
+            ],
+        )
+        .map(|row| row.get(0))
+        .map_err(|e| e.to_string())
 }
 
 pub(super) fn ensure_no_subagent_job_cancellation(
@@ -571,10 +577,13 @@ pub(super) fn ensure_no_subagent_job_cancellation(
 ) -> Result<(), String> {
     // The request and terminal write serialize on the same row. Read the
     // marker in a new statement after obtaining the row lock.
-    let subagent = tx.query_opt(
-        "SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND job_kind=$2 FOR UPDATE",
-        &[&job_id, &SUBAGENT_RUN_JOB_KIND],
-    ).map_err(|e| e.to_string())?.is_some();
+    let subagent = tx
+        .query_opt(
+            "SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND job_kind=$2 FOR UPDATE",
+            &[&job_id, &SUBAGENT_RUN_JOB_KIND],
+        )
+        .map_err(|e| e.to_string())?
+        .is_some();
     if subagent && subagent_job_cancellation_requested(tx, job_id)? {
         return Err("subagent Job cancellation was requested".into());
     }

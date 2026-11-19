@@ -3,7 +3,7 @@ FROM node:22.21.0-alpine@sha256:bd26af08779f746650d95a2e4d653b0fd3c8030c44284b6b
 WORKDIR /app
 RUN npm install --global pnpm@12.10.1
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml biome.json ./
-COPY packages/desktop/package.json packages/desktop/package.json
+COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/workspace/web/package.json packages/workspace/web/package.json
 COPY packages/ui packages/ui
 COPY packages/visuals packages/visuals

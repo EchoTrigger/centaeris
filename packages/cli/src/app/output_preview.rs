@@ -23,8 +23,39 @@ pub(super) struct OutputPreview {
 const CACHE_ENTRIES: usize = 32;
 const MAX_PENDING: usize = 4;
 
+fn selected_tool<'a>(
+    transcript: &'a [TranscriptLine],
+    expanded_bash_tools: &HashSet<String>,
+    key: &str,
+) -> Option<&'a ToolTranscriptLine> {
+    transcript.iter().find_map(|line| match line.content() {
+        TranscriptLine::Tool(tool)
+            if tool.key == key
+                && tool.full_text.is_none()
+                && (!tool.is_bash || expanded_bash_tools.contains(key)) =>
+        {
+            Some(tool.as_ref())
+        }
+        _ => None,
+    })
+}
+
 pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16) {
-    let bottom = app.transcript_scroll.saturating_add(u64::from(height));
+    let Some(state) = app.session.transcript_paging.as_ref() else {
+        return;
+    };
+    if app
+        .session
+        .active_session
+        .as_ref()
+        .is_some_and(|session| session.id != state.session_id())
+    {
+        return;
+    }
+    let bottom = app
+        .session
+        .transcript_scroll
+        .saturating_add(u64::from(height));
     let keys: Vec<String> = view
         .source_rows
         .iter()
@@ -34,15 +65,16 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
                 .source_rows
                 .get(index + 1)
                 .map_or(view.total_rows, |(_, row)| *row);
-            (*row < bottom && end > app.transcript_scroll).then(|| key.clone())
+            (*row < bottom && end > app.session.transcript_scroll).then(|| key.clone())
         })
         .take(CACHE_ENTRIES)
         .collect();
     for key in &keys {
-        if app.output_preview.contains_key(key) {
+        if app.session.output_preview.contains_key(key) {
             continue;
         }
         if app
+            .session
             .output_preview
             .values()
             .filter(|detail| detail.pending.is_some())
@@ -51,21 +83,18 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
         {
             break;
         }
-        let tool = app.transcript.iter().find_map(|line| match line.content() {
-            TranscriptLine::Tool(tool)
-                if &tool.key == key
-                    && tool.full_text.is_none()
-                    && (!tool.is_bash || app.expanded_bash_tools.contains(key)) =>
-            {
-                Some(tool)
-            }
-            _ => None,
-        });
+        let tool = selected_tool(
+            &app.session.transcript,
+            &app.session.expanded_bash_tools,
+            key,
+        );
         let run_error = app
+            .session
             .transcript_paging
             .as_ref()
             .and_then(|state| state.run_error_reference(key));
         let assistant_answer = app
+            .session
             .transcript_paging
             .as_ref()
             .and_then(|state| state.assistant_answer_reference(key));
@@ -73,7 +102,7 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             continue;
         }
         let Some((session, generation, reference)) =
-            app.transcript_paging.as_ref().and_then(|state| {
+            app.session.transcript_paging.as_ref().and_then(|state| {
                 state
                     .tool_output_reference(key)
                     .or(run_error.clone())
@@ -89,8 +118,9 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
         else {
             continue;
         };
-        if app.output_preview.len() >= CACHE_ENTRIES {
+        if app.session.output_preview.len() >= CACHE_ENTRIES {
             let Some(evicted) = app
+                .session
                 .output_preview
                 .keys()
                 .find(|cached| !keys.contains(cached))
@@ -98,7 +128,7 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             else {
                 break;
             };
-            app.output_preview.remove(&evicted);
+            app.session.output_preview.remove(&evicted);
         }
         let mut detail = tool.map(inline_preview).unwrap_or_else(|| OutputPreview {
             content: String::new(),
@@ -122,8 +152,8 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             })
         {
             detail.error = Some("Answer exceeds the display byte limit".into());
-            app.output_preview.insert(key.clone(), detail);
-            invalidate_transcript_layout(app);
+            app.session.output_preview.insert(key.clone(), detail);
+            invalidate_transcript_layout(&mut app.session);
             continue;
         }
         let result = app.runtime.as_mut().ok_or_else(|| "Runtime is unavailable".to_string()).and_then(|runtime| runtime.request_async("transcript/content-range", json!({"request": {
@@ -136,8 +166,8 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             Ok(response) => detail.pending = Some(response),
             Err(error) => detail.error = Some(error),
         }
-        app.output_preview.insert(key.clone(), detail);
-        invalidate_transcript_layout(app);
+        app.session.output_preview.insert(key.clone(), detail);
+        invalidate_transcript_layout(&mut app.session);
     }
 }
 
@@ -246,40 +276,42 @@ fn accept_page(detail: &mut OutputPreview, value: Value) -> Result<(), String> {
     Ok(())
 }
 pub(super) fn poll(app: &mut App) -> bool {
-    let before = app.output_preview.len();
-    app.output_preview.retain(|key, detail| {
-        let exists = detail.assistant_answer
-            && app
-                .transcript_paging
+    let before = app.session.output_preview.len();
+    app.session.output_preview.retain(|key, detail| {
+        let (Some(state), Some((session, generation, reference))) =
+            (&app.session.transcript_paging, &detail.identity)
+        else {
+            return false;
+        };
+        if state.session_id() != session
+            || state.projection_generation() != generation
+            || app
+                .session
+                .active_session
                 .as_ref()
-                .is_some_and(|state| state.assistant_answer_reference(key).is_some())
-            || detail.run_error
-                && app
-                    .transcript_paging
-                    .as_ref()
-                    .is_some_and(|state| state.run_error_reference(key).is_some())
-            || app.transcript.iter().any(
-                |line| matches!(line.content(), TranscriptLine::Tool(tool) if &tool.key == key),
-            );
-        exists
-            && detail
-                .identity
-                .as_ref()
-                .is_none_or(|(session, generation, reference)| {
-                    app.transcript_paging.as_ref().is_some_and(|state| {
-                        state.session_id() == session
-                            && state.projection_generation() == generation
-                            && state
-                                .tool_output_reference(key)
-                                .or_else(|| state.run_error_reference(key))
-                                .or_else(|| state.assistant_answer_reference(key))
-                                .as_ref()
-                                == Some(reference)
-                    })
-                })
+                .is_some_and(|active| &active.id != session)
+        {
+            return false;
+        }
+        let selected = if detail.assistant_answer {
+            state.assistant_answer_reference(key)
+        } else if detail.run_error {
+            state.run_error_reference(key)
+        } else {
+            selected_tool(
+                &app.session.transcript,
+                &app.session.expanded_bash_tools,
+                key,
+            )
+            .filter(|tool| {
+                tool.readable_range == detail.readable_range && tool.is_bash == detail.expanded_bash
+            })
+            .and_then(|_| state.tool_output_reference(key))
+        };
+        selected.as_ref() == Some(reference)
     });
-    let mut changed = before != app.output_preview.len();
-    for detail in app.output_preview.values_mut() {
+    let mut changed = before != app.session.output_preview.len();
+    for detail in app.session.output_preview.values_mut() {
         let Some(pending) = detail.pending.as_ref() else {
             continue;
         };
@@ -295,11 +327,12 @@ pub(super) fn poll(app: &mut App) -> bool {
         changed = true;
     }
     let mut pending_count = app
+        .session
         .output_preview
         .values()
         .filter(|detail| detail.pending.is_some())
         .count();
-    for detail in app.output_preview.values_mut().filter(|detail| {
+    for detail in app.session.output_preview.values_mut().filter(|detail| {
         (detail.run_error || detail.assistant_answer || detail.expanded_bash)
             && detail.pending.is_none()
             && detail.has_more
@@ -331,22 +364,26 @@ pub(super) fn poll(app: &mut App) -> bool {
         changed = true;
     }
     if changed {
-        invalidate_transcript_layout(app);
+        invalidate_transcript_layout(&mut app.session);
     }
     changed
 }
 
-pub(super) fn assistant_answer_text(app: &App, key: &str) -> Option<String> {
-    let detail = app.output_preview.get(key)?;
+pub(super) fn assistant_answer_text(session_state: &SessionState, key: &str) -> Option<String> {
+    let detail = session_state.output_preview.get(key)?;
     if !detail.assistant_answer {
         return None;
     }
     let (session, generation, reference) = detail.identity.as_ref()?;
-    if !app.transcript_paging.as_ref().is_some_and(|state| {
-        state.session_id() == session
-            && state.projection_generation() == generation
-            && state.assistant_answer_reference(key).as_ref() == Some(reference)
-    }) {
+    if !session_state
+        .transcript_paging
+        .as_ref()
+        .is_some_and(|state| {
+            state.session_id() == session
+                && state.projection_generation() == generation
+                && state.assistant_answer_reference(key).as_ref() == Some(reference)
+        })
+    {
         return None;
     }
     if let Some(error) = &detail.error {
@@ -359,12 +396,12 @@ pub(super) fn assistant_answer_text(app: &App, key: &str) -> Option<String> {
 }
 
 pub(super) fn run_error_text(app: &App, key: &str) -> Option<String> {
-    let detail = app.output_preview.get(key)?;
+    let detail = app.session.output_preview.get(key)?;
     if !detail.run_error {
         return None;
     }
     let (session, generation, reference) = detail.identity.as_ref()?;
-    if !app.transcript_paging.as_ref().is_some_and(|state| {
+    if !app.session.transcript_paging.as_ref().is_some_and(|state| {
         state.session_id() == session
             && state.projection_generation() == generation
             && state.run_error_reference(key).as_ref() == Some(reference)
@@ -386,7 +423,7 @@ pub(super) fn preview_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     let inline = inline_preview(tool);
-    let detail = app.output_preview.get(&tool.key).unwrap_or(&inline);
+    let detail = app.session.output_preview.get(&tool.key).unwrap_or(&inline);
     if detail.pending.is_some() {
         return vec![Line::styled(
             "  │ Loading…",
@@ -444,6 +481,7 @@ pub(super) fn bash_output_lines(app: &App, tool: &ToolTranscriptLine) -> Vec<Lin
     let style = Style::default().fg(theme().muted);
     let referenced = tool.full_text.is_none()
         && app
+            .session
             .transcript_paging
             .as_ref()
             .is_some_and(|state| state.tool_output_reference(&tool.key).is_some());
@@ -457,7 +495,7 @@ pub(super) fn bash_output_lines(app: &App, tool: &ToolTranscriptLine) -> Vec<Lin
         .as_deref()
         .or(fallback.as_deref())
         .unwrap_or_default();
-    let detail = app.output_preview.get(&tool.key);
+    let detail = app.session.output_preview.get(&tool.key);
     let remote_text = detail.map(|detail| detail.content.as_str());
     let mut body = remote_text.unwrap_or(inline);
     if let Some((start, length)) = tool.readable_range {

@@ -16,7 +16,7 @@ def trial_profile(root: Path, attempt: str) -> Path:
     if not attempt or Path(attempt).name != attempt or attempt in (".", ".."):
         raise ValueError("invalid attempt identity")
     profile = root / attempt
-    profile.mkdir(parents=True, exist_ok=False)
+    profile.mkdir(mode=0o700, parents=True, exist_ok=False)
     return profile
 
 
@@ -319,24 +319,65 @@ async def run_trial(rpc, instruction, cwd, model, provider, effort, timeout,
         raise
 
 
-async def connect(endpoint, events, startup_timeout=30, event_spool=None):
+async def initialize(rpc):
+    descriptor = await rpc.call("initialize", {"clientKind": "tui", "viewerId": str(uuid.uuid4())})
+    expected = {"status": "ok", "protocol": "centaeris.runtime", "protocolVersion": 1,
+                "coreProtocolVersion": "1.0.0"}
+    if any(descriptor.get(key) != value for key, value in expected.items()):
+        raise ValueError("unsupported Runtime initialize descriptor")
+    return descriptor
+
+
+async def connect(endpoint, events, startup_timeout=30):
     deadline = time.monotonic() + startup_timeout
     while True:
         try:
             reader, writer = await asyncio.open_unix_connection(endpoint, limit=16 * 1024 * 1024)
-            rpc = Rpc(reader, writer, events, event_spool=event_spool)
-            descriptor = await rpc.call("initialize", {"clientKind": "tui",
-                                                       "viewerId": str(uuid.uuid4())})
-            expected = {"status": "ok", "protocol": "centaeris.runtime", "protocolVersion": 1,
-                        "coreProtocolVersion": "1.0.0"}
-            if any(descriptor.get(key) != value for key, value in expected.items()):
-                await rpc.close()
-                raise ValueError("unsupported Runtime initialize descriptor")
-            return rpc
         except (FileNotFoundError, ConnectionRefusedError):
             if time.monotonic() >= deadline:
                 raise asyncio.TimeoutError("Runtime startup deadline exceeded")
             await asyncio.sleep(0.1)
+            continue
+        rpc = Rpc(reader, writer, events)
+        try:
+            await initialize(rpc)
+        except BaseException:
+            await rpc.close()
+            raise
+        return rpc
+
+
+async def start_cancel_listener(endpoint, rpc, descriptor, stop_requested):
+    """Let Harbor's separate cancel process address the existing stdio client."""
+    async def handle(reader, writer):
+        try:
+            while line := await reader.readline():
+                frame = json.loads(line)
+                method = frame["method"]
+                response = {"jsonrpc": "2.0", "id": frame["id"]}
+                if method == "initialize":
+                    response["result"] = descriptor
+                elif method == "runtime/shutdown":
+                    response["result"] = {"disposition": "requested"}
+                elif method in ("_centaeris/session/agent-runs", "_centaeris/session/agent-runs/cancel"):
+                    try:
+                        response["result"] = await rpc.call(method, frame["params"]["request"], timeout=6)
+                    except Exception as error:
+                        response["error"] = {"code": -32000, "message": str(error)}
+                else:
+                    response["error"] = {"code": -32601, "message": "Unsupported Harbor control request"}
+                writer.write((json.dumps(response) + "\n").encode())
+                await writer.drain()
+                if method == "runtime/shutdown":
+                    stop_requested.set()
+                    break
+        except (ValueError, KeyError, OSError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    return await asyncio.start_unix_server(handle, path=endpoint)
 
 
 async def supervise(args):
@@ -347,23 +388,23 @@ async def supervise(args):
     env = {**os.environ, "CENTAERIS_DESKTOP_DATA_DIR": str(profile),
            "CENTAERIS_MODEL_CONTEXT_BUDGET_TOKENS": str(args.context_tokens),
            "CENTAERIS_MODEL_OUTPUT_BUDGET_TOKENS": str(args.output_tokens)}
-    endpoint_process = await asyncio.create_subprocess_exec(
-        args.runtime, "--runtime-server-endpoint", env=env, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE)
-    stdout, stderr = await asyncio.wait_for(endpoint_process.communicate(), 30)
-    if endpoint_process.returncode:
-        raise RuntimeError(stderr.decode())
-    endpoint = json.loads(stdout)["endpoint"]
-    write_json(root / "endpoint.json", {"endpoint": endpoint, "pid": os.getpid(), "profilePath": str(profile)})
+    endpoint = profile / "control.sock"
+    stop_requested = asyncio.Event()
     with (root / "runtime.log").open("wb") as runtime_log, (root / "events.jsonl").open("w", encoding="utf-8") as events, (profile / "events.jsonl").open("w+", encoding="utf-8") as event_spool:
-        runtime = await asyncio.create_subprocess_exec(args.runtime, "--runtime-server", env=env,
-                                                       stdout=runtime_log, stderr=runtime_log)
+        runtime = await asyncio.create_subprocess_exec(
+            args.runtime, "--mode", "rpc", env=env, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=runtime_log, limit=160 * 1024 * 1024)
         rpc = None
+        control = None
         primary = None
         cleanup_errors = []
         published_result = None
         try:
-            rpc = await connect(endpoint, events, event_spool=event_spool)
+            rpc = Rpc(runtime.stdout, runtime.stdin, events, event_spool=event_spool)
+            descriptor = await initialize(rpc)
+            control = await start_cancel_listener(endpoint, rpc, descriptor, stop_requested)
+            write_json(root / "endpoint.json", {"endpoint": str(endpoint), "pid": os.getpid(),
+                                                "profilePath": str(profile)})
             result = await run_trial(rpc, Path(args.instruction).read_text(encoding="utf-8"),
                                      args.cwd, args.model, args.provider, args.effort,
                                      args.timeout, state_path=root / "state.json",
@@ -387,14 +428,21 @@ async def supervise(args):
             if result["status"] == "succeeded":
                 # Keep the initialized connection and Runtime-owned task services alive
                 # while Harbor verifies. Container teardown ultimately owns cleanup.
-                if args.keep_alive:
-                    await asyncio.Event().wait()
-                else:
-                    await asyncio.sleep(args.linger)
+                try:
+                    await asyncio.wait_for(stop_requested.wait(), None if args.keep_alive else args.linger)
+                except asyncio.TimeoutError:
+                    pass
         except BaseException as error:
             primary = error
             raise
         finally:
+            if control:
+                try:
+                    control.close()
+                    await asyncio.wait_for(control.wait_closed(), 2)
+                    endpoint.unlink(missing_ok=True)
+                except Exception as error:
+                    cleanup_errors.append(("closeControl", error))
             if rpc:
                 try:
                     await rpc.call("runtime/shutdown", {}, timeout=12)

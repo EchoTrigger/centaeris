@@ -31,12 +31,8 @@ pub(super) fn theme() -> &'static Theme {
 }
 
 impl Theme {
-    pub(super) fn composer_border(&self, focused: bool) -> Style {
+    pub(super) fn composer_prompt(&self, focused: bool) -> Style {
         Style::default().fg(if focused { Color::Gray } else { self.muted })
-    }
-
-    pub(super) fn user_prompt(&self) -> Style {
-        Style::default().bg(Color::Rgb(42, 42, 42)).fg(Color::White)
     }
 
     pub(super) fn selected_row(&self) -> Style {

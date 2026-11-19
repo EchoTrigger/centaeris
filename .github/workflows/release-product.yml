@@ -34,12 +34,12 @@ jobs:
           PRODUCT: ${{ inputs.product }}
         run: |
           case "$PRODUCT" in
-            desktop|tui|workspace) ;;
+            tui|workspace) ;;
             *) echo "Unknown product" >&2; exit 64 ;;
           esac
   local-product:
     needs: validate
-    if: ${{ inputs.product == 'desktop' || inputs.product == 'tui' }}
+    if: ${{ inputs.product == 'tui' }}
     runs-on: windows-2022
     timeout-minutes: 120
     env:
@@ -52,41 +52,21 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: 3.12.10
-      - name: Install pinned pnpm
-        run: npm install --global pnpm@12.10.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.21.0
-          cache: ${{ inputs.product == 'desktop' && 'pnpm' || '' }}
       - run: rustup show active-toolchain
       - run: python scripts/ci.py Rust
       - name: Build and validate the selected local product
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:PRODUCT -eq 'desktop') {
-            python scripts/ci.py Node --frontend-tests
-            pnpm --filter @centaeris/electron-host run build
-            pnpm --filter @centaeris/electron-host run check:dist-licenses
-            pnpm --filter @centaeris/electron-host run smoke:runtime
-          } else {
-            ./scripts/build-tui.ps1
-          }
+          ./scripts/build-tui.ps1
       - name: Package the selected product and exact source
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist/release-candidate -Force | Out-Null
-          if ($env:PRODUCT -eq 'desktop') {
-            node packages/desktop/scripts/build-installer.mjs --output (Join-Path $PWD 'dist/release-candidate')
-            if ($LASTEXITCODE -ne 0) { throw 'Desktop installer build failed' }
-            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-            $installer = Join-Path $PWD "dist/release-candidate/Centaeris-Desktop-$version-windows-x64-setup.exe"
-            node packages/desktop/scripts/smoke-installer.mjs $installer
-            if ($LASTEXITCODE -ne 0) { throw 'Desktop installer acceptance failed' }
-            Compress-Archive -LiteralPath 'packages/desktop/dist/Centaeris Desktop' -DestinationPath dist/release-candidate/centaeris-desktop-windows-x64.zip
-          } else {
-            Copy-Item -LiteralPath packages/cli/dist/centaeris-windows-x64.zip -Destination dist/release-candidate
-          }
+          Copy-Item -LiteralPath packages/cli/dist/centaeris-windows-x64.zip -Destination dist/release-candidate
           git archive --format=zip --prefix=centaeris/ --output=dist/release-candidate/centaeris-source.zip HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -94,7 +74,6 @@ jobs:
           name: centaeris-${{ inputs.product }}-${{ github.sha }}
           path: |
             dist/release-candidate/*.zip
-            dist/release-candidate/*-setup.exe
           if-no-files-found: error
           compression-level: 0
       - name: Publish only after explicit manual selection

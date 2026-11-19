@@ -35,7 +35,7 @@ pub(super) enum TranscriptLine {
         text: String,
         final_started: bool,
     },
-    Tool(ToolTranscriptLine),
+    Tool(Box<ToolTranscriptLine>),
     Subagent(SubagentTranscriptLine),
     Error(String),
 }
@@ -48,6 +48,10 @@ pub(super) struct SubagentTranscriptLine {
 }
 
 impl TranscriptLine {
+    pub(super) fn tool(line: ToolTranscriptLine) -> Self {
+        Self::Tool(Box::new(line))
+    }
+
     pub(super) fn for_run(self, run_id: Option<&str>, final_answer: bool) -> Self {
         match run_id {
             Some(run_id) => Self::RunItem {

@@ -1,11 +1,5 @@
 # Local interactive terminals
 
-Desktop opens Files, Review and Terminal from the right-panel + menu. Files and
-Review reuse existing tabs; Terminal creates a new interactive shell. Existing
-terminals can be reopened from the same menu. Closing or hiding a tab never stops
-its shell. End terminal is the explicit termination action. Exited output remains
-available until the Runtime's bounded retained-record cache evicts it.
-
 The local Runtime owns each PTY, independently of Agent Session/AgentRun semantics.
 A terminal records its originating workspace and optional chat ID; changing the
 current workspace does not move a running terminal. Its recorded workspace is the
@@ -49,21 +43,9 @@ up to 64 entries (or the configured active limit if larger), evicting only fully
 ended terminals. Creation receipts live in indexed durable storage without a
 cumulative admission ceiling, so eviction cannot make retries create another
 shell. Input admission uses a bounded 32-message queue with blocking backpressure.
-Desktop sends one 8 KiB piece at a time, temporarily pauses user input while a
-paste is draining, and does not reject a paste just because it exceeds 64 KiB.
-It stops sending after transport failure and offers explicit reconnect without replaying
-user input. Terminal control replies such as ConPTY's initial cursor-position
-query remain enabled while replay is rendered.
-
-The renderer uses xterm.js and FitAddon, consumes raw UTF-8 byte chunks, and never
-passes terminal output through Markdown. Output eviction reports a gap and resets
-the viewer; this is bounded replay, not a durable terminal-screen snapshot. Hidden
-views do not send zero-sized resize requests.
-
 ## Lifecycle and limits
 
-Active terminals keep the existing Runtime service alive after the last client
-disconnects. Explicit Runtime shutdown requests termination and waits for bounded
+Terminals live with the owning Runtime. Runtime shutdown requests termination and waits for bounded
 cleanup. Windows reuses the Host's kill-on-close Job Object; Unix terminates
 processes in the PTY session, including its foreground process groups. Ctrl+C is
 ordinary PTY input, not the explicit stop operation. Before spawning on Windows,
@@ -78,15 +60,5 @@ TUI background task behavior and Core contracts are unchanged.
 
 ## Validation
 
-After building the debug Runtime, run `node scripts/test-terminal-sessions.mjs`.
-It uses an isolated profile, two real local clients and no model request, covering
-PowerShell input/output, resize, duplicate start, stale-instance and operation
-conflicts, Ctrl+C, all-client disconnect/reconnect beyond the idle timeout,
-confirmed child creation before stop, and explicit service shutdown.
-
-Rust/TypeScript share `packages/desktop/src/services/generated/terminal-samples.json` with a
-Rust serialization parity check. UI tests cover control replies, no input retry,
-and closing a view without stopping its process. Windows native verification is
-performed locally; macOS/Linux native shell and cleanup acceptance remain required
-on those platforms. Interactive full-screen applications and visual fit are in the
-Desktop manual acceptance checklist.
+Run `cargo test --locked -p centaeris-cli-runtime terminal_sessions`. The
+serialization fixtures are in `packages/cli/runtime/src/generated/terminal-samples.json`.

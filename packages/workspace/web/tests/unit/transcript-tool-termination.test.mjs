@@ -8,6 +8,7 @@ import { createTranscriptViewStore } from "../../src/chat/transcriptViewStore.ts
 
 const load = createJsxSubjectLoader(new Map());
 const { TranscriptToolGroupCard } = await import(await load(fileURLToPath(new URL("../../src/chat/TranscriptBlockContent.tsx", import.meta.url))));
+const unconfirmedStatus = /结果未确认|results? unconfirmed|transcriptTool\.status\.unconfirmed/i;
 const block = status => ({ blockId: "tool", blockRevision: "1", orderKey: { sourceSequence: "3", ordinal: 0 },
   body: { kind: "tool", callId: "call", toolName: "bash", status,
     summary: "Probe", summaryRef: null, outputRef: null } });
@@ -20,12 +21,12 @@ function render(status, runEnded) {
 }
 test("a terminal Run displays unresolved tool results without claiming they are still running", () => {
   const markup = render("running", true);
-  assert.match(markup, /结果未确认|results? unconfirmed|transcriptTool\.resultsUnconfirmed/i);
+  assert.match(markup, unconfirmedStatus);
   assert.doesNotMatch(markup, /正在运行|Running|toolGroupTitle\.running/i);
 });
 test("an active Run keeps ordinary running progress", () => {
   const markup = render("running", false);
-  assert.doesNotMatch(markup, /结果未确认|results? unconfirmed|transcriptTool\.resultsUnconfirmed/i);
+  assert.doesNotMatch(markup, unconfirmedStatus);
 });
 test("a completed receipt keeps its original completion presentation after Run termination", () => {
   assert.equal(render("completed", true), render("completed", false));

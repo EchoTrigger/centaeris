@@ -156,7 +156,7 @@ pub(super) fn move_selection(app: &mut App, delta: isize) {
         .unwrap_or(0);
     let next = (current as isize + delta).rem_euclid(items.len() as isize) as usize;
     select(app, items[next].index);
-    app.message = None;
+    app.session.message = None;
 }
 
 pub(super) fn filter(app: &mut App, ch: Option<char>) {
@@ -172,7 +172,7 @@ pub(super) fn filter(app: &mut App, ch: Option<char>) {
     if let Some(row) = rows(app).first() {
         select(app, row.index);
     }
-    app.message = None;
+    app.session.message = None;
 }
 
 pub(super) fn activate(app: &mut App) -> Result<(), String> {
@@ -197,7 +197,7 @@ pub(super) fn activate(app: &mut App) -> Result<(), String> {
             let panel = app.model_panel.as_mut().expect("open picker");
             panel.stage = Stage::ModelEffort(index);
             panel.query.clear();
-            app.message = None;
+            app.session.message = None;
             Ok(())
         }
         Stage::Models => request_model_selection(app, provider.provider_id, model.model, None),
@@ -220,7 +220,7 @@ pub(super) fn back(app: &mut App) {
         if matches!(panel.stage, Stage::ModelEffort(_)) {
             panel.stage = Stage::Models;
             panel.query.clear();
-            app.message = None;
+            app.session.message = None;
             return;
         }
     }

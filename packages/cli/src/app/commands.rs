@@ -4,6 +4,15 @@ pub(super) struct SlashCommand {
     pub(super) description: &'static str,
 }
 
+const DASHBOARD: SlashCommand = SlashCommand {
+    name: "/dashboard",
+    description: "Open the session dashboard",
+};
+const SETTINGS: SlashCommand = SlashCommand {
+    name: "/settings",
+    description: "Open local CLI settings",
+};
+
 pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/model",
@@ -17,6 +26,8 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/resume",
         description: "Browse and manage sessions",
     },
+    DASHBOARD,
+    SETTINGS,
     SlashCommand {
         name: "/new",
         description: "Start a new session",
@@ -91,5 +102,13 @@ pub(super) fn matching_commands(input: &str) -> Vec<SlashCommand> {
         .iter()
         .copied()
         .filter(|command| command.name.trim_start_matches('/').starts_with(query))
+        .chain("sessions".starts_with(query).then_some(SlashCommand {
+            name: "/sessions",
+            ..DASHBOARD
+        }))
+        .chain("config".starts_with(query).then_some(SlashCommand {
+            name: "/config",
+            ..SETTINGS
+        }))
         .collect()
 }

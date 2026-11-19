@@ -1,5 +1,7 @@
-use centaeris_core::session::transcript::TranscriptBlockStatusV1;
-use serde::Deserialize;
+use centaeris_core::{
+    model::prepared_prompt::ModelInputImageSourceRefV1,
+    session::transcript::TranscriptBlockStatusV1,
+};
 use serde_json::Value;
 
 const TOOL_RESULT_MAX_LINES: usize = 6;
@@ -27,6 +29,7 @@ pub(crate) struct ToolTranscriptLine {
     pub(crate) operations: Vec<ToolOperation>,
     pub(crate) result_blocks: Vec<ToolResultBlock>,
     pub(crate) images: Vec<ToolImage>,
+    pub(crate) video_paths: Vec<String>,
     pub(crate) result_states: Vec<ToolResultState>,
     pub(crate) interrupted: bool,
     pub(crate) running: bool,
@@ -65,31 +68,6 @@ pub(crate) struct ToolImage {
     pub(crate) byte_length: u64,
     pub(crate) width_px: u32,
     pub(crate) height_px: u32,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "sourceKind", rename_all = "camelCase", deny_unknown_fields)]
-enum ToolImageSource {
-    InputRef {
-        input_ref: String,
-        content_type: String,
-        placeholder: String,
-    },
-    ExecutionFile {
-        image: ExecutionToolImage,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ExecutionToolImage {
-    path: String,
-    content_type: String,
-    sha256: String,
-    byte_length: u64,
-    width_px: u32,
-    height_px: u32,
-    placeholder: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -477,6 +455,7 @@ pub(crate) fn transcript_page_tool_line(
         operations: Vec::new(),
         result_blocks: Vec::new(),
         images: Vec::new(),
+        video_paths: Vec::new(),
         result_states,
         interrupted,
         running,
@@ -613,39 +592,14 @@ fn decode_tool_result(event: &Value, payload: &Value) -> Result<ToolResult, Stri
         })
         .transpose()?
         .unwrap_or_default();
-    let image_sources = serde_json::from_value::<Vec<ToolImageSource>>(
+    let image_sources = serde_json::from_value(
         payload
             .get("modelInputImages")
             .cloned()
             .ok_or_else(|| "missing payload.modelInputImages".to_string())?,
     )
     .map_err(|error| format!("invalid payload.modelInputImages: {error}"))?;
-    let mut images = Vec::new();
-    for (index, source) in image_sources.into_iter().enumerate() {
-        match source {
-            ToolImageSource::InputRef {
-                input_ref,
-                content_type,
-                placeholder,
-            } => validate_image_source_fields(
-                input_ref.as_str(),
-                content_type.as_str(),
-                placeholder.as_str(),
-            )?,
-            ToolImageSource::ExecutionFile { image } => {
-                validate_execution_tool_image(&image)?;
-                images.push(ToolImage {
-                    key: format!("tool_image:{call_id}:{index}"),
-                    path: image.path,
-                    content_type: image.content_type,
-                    sha256: image.sha256,
-                    byte_length: image.byte_length,
-                    width_px: image.width_px,
-                    height_px: image.height_px,
-                });
-            }
-        }
-    }
+    let images = execution_images(&call_id, image_sources)?;
     let readable_range = payload
         .get("operations")
         .and_then(Value::as_array)
@@ -674,42 +628,28 @@ fn decode_tool_result(event: &Value, payload: &Value) -> Result<ToolResult, Stri
     })
 }
 
-fn validate_image_source_fields(
-    identity: &str,
-    content_type: &str,
-    placeholder: &str,
-) -> Result<(), String> {
-    if identity.trim().is_empty()
-        || placeholder.trim().is_empty()
-        || !matches!(content_type, "image/png" | "image/jpeg" | "image/webp")
-    {
-        return Err("payload.modelInputImages contains an invalid image reference".to_string());
+pub(crate) fn execution_images(
+    call_id: &str,
+    sources: Vec<ModelInputImageSourceRefV1>,
+) -> Result<Vec<ToolImage>, String> {
+    let mut images = Vec::new();
+    for (index, source) in sources.into_iter().enumerate() {
+        source
+            .validate()
+            .map_err(|error| format!("invalid payload.modelInputImages: {error}"))?;
+        if let ModelInputImageSourceRefV1::ExecutionFile { image } = source {
+            images.push(ToolImage {
+                key: format!("tool_image:{call_id}:{index}"),
+                path: image.path,
+                content_type: image.content_type,
+                sha256: image.sha256,
+                byte_length: image.byte_length,
+                width_px: image.width_px,
+                height_px: image.height_px,
+            });
+        }
     }
-    Ok(())
-}
-
-fn validate_execution_tool_image(image: &ExecutionToolImage) -> Result<(), String> {
-    validate_image_source_fields(
-        image.path.as_str(),
-        image.content_type.as_str(),
-        image.placeholder.as_str(),
-    )?;
-    let digest = image.sha256.strip_prefix("sha256:");
-    if image.byte_length == 0
-        || image.width_px == 0
-        || image.height_px == 0
-        || digest.is_none_or(|digest| {
-            digest.len() != 64
-                || !digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-    {
-        return Err(
-            "payload.modelInputImages contains invalid execution image metadata".to_string(),
-        );
-    }
-    Ok(())
+    Ok(images)
 }
 
 fn decode_tool_operation(
@@ -925,6 +865,7 @@ fn running_call_line(call: &ToolCall) -> ToolTranscriptLine {
         operations: Vec::new(),
         result_blocks: Vec::new(),
         images: Vec::new(),
+        video_paths: Vec::new(),
         result_states: Vec::new(),
         interrupted: false,
         running: true,
@@ -979,6 +920,13 @@ fn seal_call(call: ToolCall, result: Option<ToolResult>) -> ToolTranscriptLine {
         operations,
         result_blocks,
         images,
+        video_paths: result
+            .as_ref()
+            .and_then(|result| result.model_content.as_deref())
+            .map_or_else(
+                Vec::new,
+                centaeris_cli_runtime::rpc_client::transcript_video_paths,
+            ),
         result_states,
         interrupted: result.is_none(),
         running: false,

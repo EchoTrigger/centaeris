@@ -171,8 +171,7 @@ impl FileToolError {
                 "File write conflict".to_string(),
             ),
             FileToolErrorKind::EditTextMismatch => (
-                "Every edits[].old_text must match current file content exactly once without overlap; re-read and rebuild the atomic edit with enough surrounding context"
-                    .to_string(),
+                self.message.clone(),
                 "Edit text did not apply".to_string(),
             ),
             FileToolErrorKind::DurableCommitMissing => (
@@ -565,10 +564,12 @@ fn file_read_content(outcome: &FileReadOutcome) -> String {
     if let Some(call) = continuation {
         sections.push(format!("Continuation: {call}."));
     } else if outcome.first_line_exceeds_limit {
-        sections.push(format!(
-            "Continuation: use bash for the oversized line, then continue later lines with read path={} and offset={}.",
-            outcome.path, outcome.start_line
-        ));
+        if outcome.start_line < outcome.total_lines {
+            let call = read_continuation_call(outcome, outcome.start_line + 1);
+            sections.push(format!(
+                "Continuation: after inspecting the oversized line, continue with {call}."
+            ));
+        }
     } else {
         sections.push("Continuation: this file read is complete.".to_string());
     }
@@ -818,7 +819,7 @@ mod tests {
             truncated: true,
             truncated_by: Some("lines"),
             first_line_exceeds_limit: false,
-            next_offset: Some(8),
+            next_offset: Some(9),
             file_hash: format!("sha256:{}", "a".repeat(64)),
             content: "evidence".to_string(),
             input_ref: Some("input_1".to_string()),
@@ -835,11 +836,11 @@ mod tests {
 
         assert!(output.content.lines().next().is_some_and(|line| {
             line.contains("lines 4-8 of 20")
-                && line.ends_with("Continue with read(input_ref=\"input_1\", offset=8).")
+                && line.ends_with("Continue with read(input_ref=\"input_1\", offset=9).")
         }));
         assert!(output
             .content
-            .contains("Continuation: read(input_ref=\"input_1\", offset=8)."));
+            .contains("Continuation: read(input_ref=\"input_1\", offset=9)."));
 
         let [ToolExecutionFact::SourceAssociated(payload)] = output.facts.as_slice() else {
             panic!("expected one source fact")

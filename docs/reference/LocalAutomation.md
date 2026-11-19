@@ -1,6 +1,6 @@
 # Local OpenSSH and schedules
 
-These are local Host/application features shared by Desktop and TUI. Core's
+These are local Host/application features provided by the CLI Runtime. Core's
 runtime contracts, turn loop and execution semantics are unchanged. Hosted
 Workspace is outside this implementation.
 
@@ -16,7 +16,7 @@ cet ssh connect dev
 `connect` inherits the native terminal, before TUI raw mode starts. OpenSSH handles
 interactive login and host-key prompts. It does not open an embedded terminal.
 
-Desktop and TUI Agents receive `ssh_start` with `destination`, `command` and
+Local Agents receive `ssh_start` with `destination`, `command` and
 optional `timeout_ms` (zero/omitted means no deadline) and optional
 `connect_timeout_seconds`; completion and output use the existing `process_list`,
 `process_read` and `process_stop` tools. Agent starts receive automatic completion
@@ -44,7 +44,7 @@ browser or reconnectable remote process service.
 ## Persistent local schedules
 
 The primary creation and management surface is conversation with the Agent in
-Desktop or TUI. For example: "Every day at 09:00 UTC, review this workspace using
+the CLI. For example: "Every day at 09:00 UTC, review this workspace using
 the current model and tell me what needs attention." The Agent creates the plan;
 the user does not need to write a specification file or enter CLI commands.
 
@@ -101,20 +101,16 @@ numbering, and an explicit IANA time zone. Presets can use `0 * * * *` (hourly),
 `0 9 * * *` (daily), or `0 9 * * 1` (Monday). Cron parsing and time-zone behavior
 come from `croner` and `chrono-tz`; the Host does not implement another parser.
 
-Desktop and TUI Agents use `schedule_manage` with an `action`:
+Local Agents use `schedule_manage` with an `action`:
 `context`, `list`, `create`, `update`, `pause`, `resume`, `delete`, `history`, `run`, or
 `service`. Tool parameters are `operation_id`, `schedule_id`,
 `expected_revision`, and `spec.model.provider_id` / `thinking_mode`.
 The corresponding Host method is also `schedule_manage`, with camelCase fields.
 `context` is Agent-only and bound to its Session; it is not a Host method action.
-Desktop currently uses these Agent tools and the Host bridge; this slice adds
-no separate scheduling form or remote-connection screen.
-
 ## Execution and recovery
 
 - Scheduling starts disabled. `service start` enables persistent background
-  scheduling. Enabled plans keep the shared Runtime alive after client windows
-  close. `service stop` disables automatic future triggers, without cancelling
+  scheduling. Enabled plans run while the owning CLI is open. `service stop` disables automatic future triggers, without cancelling
   admitted work. Manual `run` works even with automatic scheduling off.
 - The machine must be awake and the Runtime must be running. There is no OS
   startup registration, wake timer or cloud execution. After a full service exit
@@ -140,23 +136,9 @@ no separate scheduling form or remote-connection screen.
   indexed due plans and active occurrences only. Completed history and deleted
   plan identities stay on disk for history and deduplication. `list` and `history`
   return up to 50 rows by default (maximum 100), with `nextCursor`; pass that as
-  `cursor` to continue in the same scope. History is newest first. Desktop offers
-  Load more, and Agents can request subsequent pages.
+  `cursor` to continue in the same scope. History is newest first. Agents can request subsequent pages.
 
 ## Validation
 
-Run the normal Rust/Node source gates and:
-
-```text
-cargo build --locked -p centaeris-desktop-services --bin centaeris-runtime -p centaeris-tui --bin cet
-node scripts/test-host-automation.mjs
-node scripts/test-agent-schedules.mjs
-node scripts/test-process-agent.mjs
-node scripts/test-process-sessions.mjs
-```
-
-Automation acceptance uses an isolated profile, a loopback model server and an
-SSH executable fixture. It verifies argument forwarding and process integration,
-not authentication against a real remote SSH server. Manual real-host acceptance
-should cover a configured alias, native authentication, remote failure and
-disconnection without automatic command replay.
+Run the normal Rust source gate. Focused checks live in the CLI Runtime's
+`schedules`, `process_sessions` and `process_agent` modules.

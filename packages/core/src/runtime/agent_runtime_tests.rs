@@ -231,7 +231,10 @@ impl crate::session::store::AsyncJobStorePort for AgentRuntimeTestStore {
     async fn request_subagent_job_cancellation(
         &self,
         req: crate::session::reliability::RequestSubagentJobCancellation,
-    ) -> Result<crate::session::reliability::SubagentJobCancellationReceipt, crate::session::store::job::JobStoreError> {
+    ) -> Result<
+        crate::session::reliability::SubagentJobCancellationReceipt,
+        crate::session::store::job::JobStoreError,
+    > {
         RuntimeJobStorePort::request_subagent_job_cancellation(self, req).map_err(Into::into)
     }
 
@@ -1127,16 +1130,22 @@ impl crate::session::reliability::RuntimeJobStorePort for AgentRuntimeTestStore 
     ) -> Result<crate::session::reliability::SubagentJobCancellationReceipt, String> {
         use crate::session::reliability::{SubagentJobCancellationReceipt, SUBAGENT_CANCEL_REASON};
         let mut state = self.state()?;
-        let job = state.jobs.get(&request.job_id)
-            .filter(|job| job.session_id.as_deref() == Some(request.session_id.as_str())
-                && job.job_kind == SUBAGENT_RUN_JOB_KIND)
+        let job = state
+            .jobs
+            .get(&request.job_id)
+            .filter(|job| {
+                job.session_id.as_deref() == Some(request.session_id.as_str())
+                    && job.job_kind == SUBAGENT_RUN_JOB_KIND
+            })
             .ok_or("subagent Job is missing from the Session")?;
         let receipt = SubagentJobCancellationReceipt::decide(
             job.status.clone(),
             state.subagent_cancel_requests.contains(&request.job_id),
         );
         if receipt.accepted {
-            state.subagent_cancel_requests.insert(request.job_id.clone());
+            state
+                .subagent_cancel_requests
+                .insert(request.job_id.clone());
             if receipt.status == RuntimeJobStatus::Cancelled {
                 let job = state.jobs.get_mut(&request.job_id).expect("checked Job");
                 job.status = RuntimeJobStatus::Cancelled;
@@ -4601,6 +4610,29 @@ fn query_loop_readmission_recovers_formatted_receipts_without_reexecution_or_dig
 
 #[tokio::test]
 async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool() {
+    assert_unsettled_intent(
+        "stream_boundary_test_tool",
+        r#"{"value":"possibly executed"}"#,
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn zero_based_read_intent_is_never_reexecuted_with_one_based_offsets() {
+    assert_unsettled_intent(
+        "read",
+        r#"{"path":"original.txt","offset":1,"limit":1}"#,
+        Some("sha256:bffd554ad13c0e892e14cbc160f04ba5ab6c863221f8a1cbcd25f2476c37b0ed"),
+    )
+    .await;
+}
+
+async fn assert_unsettled_intent(
+    tool_name: &str,
+    args_json: &str,
+    historical_digest: Option<&str>,
+) {
     use sha2::{Digest, Sha256};
 
     let store = AgentRuntimeTestStore::new();
@@ -4613,7 +4645,17 @@ async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool()
     let session_id = "chat-tool-indeterminate";
     let turn_id = "turn-tool-indeterminate";
     let call_id = "call-tool-indeterminate";
-    let args_json = json!({ "value": "possibly executed" }).to_string();
+    let mut intent = tool_execution_intent_fixture(
+        &engine.tools_port,
+        session_id,
+        turn_id,
+        call_id,
+        tool_name,
+        args_json,
+    );
+    if let Some(digest) = historical_digest {
+        intent["toolContractDigest"] = digest.into();
+    }
     let event_identity = format!("{session_id}\0{turn_id}\0{call_id}");
     store
         .append_event_idempotent(RuntimeEvent {
@@ -4626,15 +4668,7 @@ async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool()
             event_type: "tool_execution.intent.v1".to_string(),
             at_ms: 1,
             visibility: EventVisibility::Internal,
-            payload_json: tool_execution_intent_fixture(
-                &engine.tools_port,
-                session_id,
-                turn_id,
-                call_id,
-                "stream_boundary_test_tool",
-                args_json.as_str(),
-            )
-            .to_string(),
+            payload_json: intent.to_string(),
         })
         .expect("persist interrupted tool intent");
 
@@ -4647,8 +4681,8 @@ async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool()
                 content: String::new(),
                 tool_calls: vec![ToolCallEnvelope {
                     id: call_id.to_string(),
-                    name: "stream_boundary_test_tool".to_string(),
-                    args_json,
+                    name: tool_name.into(),
+                    args_json: args_json.into(),
                 }],
                 continuation_reasoning_content: None,
                 reasoning_content: None,
@@ -5088,17 +5122,28 @@ async fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
             "agent_id": output["subagentId"],
             "prompt": "Continue the inspection.",
             "description": "Follow-up inspection",
-        }).to_string(),
+        })
+        .to_string(),
     };
-    let followup = engine.execute_agent_tool_call(
-        session_id, turn_id, Some(&agent_run_identity), &followup_call,
-    ).await;
+    let followup = engine
+        .execute_agent_tool_call(
+            session_id,
+            turn_id,
+            Some(&agent_run_identity),
+            &followup_call,
+        )
+        .await;
     assert_eq!(followup.status, "ok", "{followup:?}");
     assert_eq!(followup.details["childSessionId"], output["childSessionId"]);
     assert_ne!(followup.details["runtimeJobId"], output["runtimeJobId"]);
-    let replay = engine.execute_agent_tool_call(
-        session_id, turn_id, Some(&agent_run_identity), &followup_call,
-    ).await;
+    let replay = engine
+        .execute_agent_tool_call(
+            session_id,
+            turn_id,
+            Some(&agent_run_identity),
+            &followup_call,
+        )
+        .await;
     assert_eq!(replay.details, followup.details);
 
     let wait = ToolCallEnvelope {
@@ -5106,10 +5151,17 @@ async fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
         name: "wait_agent".to_string(),
         args_json: json!({"task_id": followup.details["runtimeJobId"]}).to_string(),
     };
-    let report = engine.execute_task_runtime_tool_call(session_id, &wait).await;
+    let report = engine
+        .execute_task_runtime_tool_call(session_id, &wait)
+        .await;
     assert_eq!(report.status, "ok", "{report:?}");
-    assert_eq!(report.details["outputRef"]["runtimeJobId"], followup.details["runtimeJobId"]);
-    let foreign = engine.execute_task_runtime_tool_call("other-session", &wait).await;
+    assert_eq!(
+        report.details["outputRef"]["runtimeJobId"],
+        followup.details["runtimeJobId"]
+    );
+    let foreign = engine
+        .execute_task_runtime_tool_call("other-session", &wait)
+        .await;
     assert_eq!(foreign.status, "error");
     assert!(foreign.content.contains("Use list_agents"));
 
@@ -5117,14 +5169,24 @@ async fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
         name: "interrupt_agent".to_string(),
         ..wait
     };
-    let foreign = engine.execute_task_runtime_tool_call("other-session", &interrupt).await;
+    let foreign = engine
+        .execute_task_runtime_tool_call("other-session", &interrupt)
+        .await;
     assert_eq!(foreign.status, "error");
-    let local = engine.execute_task_runtime_tool_call(session_id, &interrupt).await;
+    let local = engine
+        .execute_task_runtime_tool_call(session_id, &interrupt)
+        .await;
     assert_eq!(local.details["cancelAccepted"], true, "{local:?}");
     assert_eq!(local.details["status"], "cancelled");
-    let first = store.get_runtime_job(output["runtimeJobId"].as_str().unwrap()).unwrap().unwrap();
+    let first = store
+        .get_runtime_job(output["runtimeJobId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(first.status, RuntimeJobStatus::Queued);
-    let second = store.get_runtime_job(followup.details["runtimeJobId"].as_str().unwrap()).unwrap().unwrap();
+    let second = store
+        .get_runtime_job(followup.details["runtimeJobId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
     assert!(second.run_at_ms > first.run_at_ms);
 
     let _ = std::fs::remove_dir_all(workspace_root);
@@ -6007,7 +6069,17 @@ fn assert_model_tool_definitions_match_default_projection(
         .iter()
         .map(|definition| definition.name.as_str())
         .collect::<Vec<_>>();
-    let expected = vec!["read", "bash", "edit", "write", "spawn_agent", "followup_task", "wait_agent", "interrupt_agent", "list_agents"];
+    let expected = vec![
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "spawn_agent",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+    ];
     assert_eq!(actual, expected);
     for definition in tool_definitions
         .iter()
@@ -11669,14 +11741,14 @@ fn read_observability_preserves_structured_coverage() {
         tool_call_id: "call-read-coverage".to_string(),
         tool_name: "read".to_string(),
         status: "ok".to_string(),
-        content: "Read castle/index.html lines 1-50 of 1642; next offset 50".to_string(),
+        content: "Read castle/index.html lines 1-50 of 1642; next offset 51".to_string(),
         details: serde_json::json!({
             "schema": "file_read_result_v1",
             "path": "castle/index.html",
             "startLine": 1,
             "endLine": 50,
             "totalLines": 1642,
-            "nextOffset": 50,
+            "nextOffset": 51,
             "truncatedBy": "lines",
             "truncated": true
         }),
@@ -11709,7 +11781,7 @@ fn read_observability_preserves_structured_coverage() {
     );
     assert_eq!(
         operation.get("nextOffset").and_then(Value::as_u64),
-        Some(50)
+        Some(51)
     );
     assert_eq!(
         operation.get("truncatedBy").and_then(Value::as_str),

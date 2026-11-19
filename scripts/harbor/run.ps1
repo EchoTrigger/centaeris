@@ -21,7 +21,7 @@ try {
     $env:PYTHONIOENCODING = 'utf-8'
     $env:PYTHONUTF8 = '1'
     if (-not $env:CENTAERIS_RUNTIME_BINARY) {
-        $env:CENTAERIS_RUNTIME_BINARY = Join-Path $repoRoot 'target/harbor-bookworm/debug/centaeris-runtime'
+        $env:CENTAERIS_RUNTIME_BINARY = Join-Path $repoRoot 'target/harbor-bookworm/debug/cet'
     }
     if (-not (Test-Path -LiteralPath $env:CENTAERIS_RUNTIME_BINARY -PathType Leaf)) {
         throw 'Build the Bookworm Linux runtime first; see scripts/harbor/README.md.'

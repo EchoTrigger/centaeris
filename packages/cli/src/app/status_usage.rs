@@ -1,10 +1,9 @@
 use super::{show_message, App};
-use centaeris_desktop_services::rpc_client::TerminalTokenUsage;
+use centaeris_cli_runtime::rpc_client::TerminalTokenUsage;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 #[derive(Default)]
 pub(super) struct StatusUsage {
-    window: Option<u64>,
     context: Option<u64>,
     output: Option<(String, u64)>,
     pending: Option<PendingUsage>,
@@ -19,20 +18,8 @@ struct PendingUsage {
 }
 
 impl StatusUsage {
-    pub(super) fn swap_session(&mut self, other: &mut Self) {
-        std::mem::swap(self, other);
-        std::mem::swap(&mut self.window, &mut other.window);
-    }
-
-    pub(super) fn update_model(&mut self, window: Option<u64>, model_changed: bool) {
-        self.window = window.filter(|window| *window > 0);
-        if model_changed {
-            self.context = None;
-            self.read_context = false;
-            if let Some(pending) = self.pending.as_mut() {
-                pending.include_context = false;
-            }
-        }
+    pub(super) fn request_output(&mut self, running: bool) {
+        self.read_output = running;
     }
 
     pub(super) fn record_context(&mut self, context: Option<u64>) {
@@ -45,21 +32,17 @@ impl StatusUsage {
 }
 
 pub(super) fn restore(app: &mut App) {
-    let usage = &mut app.status_usage;
+    let usage = &mut app.session.status_usage;
     usage.context = None;
     usage.output = None;
     usage.pending = None;
-    usage.read_context = app.active_session.is_some();
-    usage.read_output = app.active_agent_run_id.is_some();
-}
-
-pub(super) fn request_output(app: &mut App) {
-    app.status_usage.read_output = app.active_agent_run_id.is_some();
+    usage.read_context = app.session.active_session.is_some();
+    usage.read_output = app.session.active_agent_run_id.is_some();
 }
 
 pub(super) fn poll(app: &mut App) -> bool {
-    let usage = &mut app.status_usage;
-    let current_run = app.active_agent_run_id.as_deref();
+    let usage = &mut app.session.status_usage;
+    let current_run = app.session.active_agent_run_id.as_deref();
     let mut changed = false;
     if let Some(pending) = usage.pending.take() {
         let result = match pending.response.try_recv() {
@@ -96,7 +79,7 @@ pub(super) fn poll(app: &mut App) -> bool {
         .flatten();
     usage.pending = (|| {
         let runtime = app.runtime.as_ref()?;
-        let session = app.active_session.as_ref()?;
+        let session = app.session.active_session.as_ref()?;
         if !include_context && run_id.is_none() {
             return None;
         }
@@ -110,8 +93,8 @@ pub(super) fn poll(app: &mut App) -> bool {
 }
 
 pub(super) fn context_label(app: &App) -> Option<String> {
-    let usage = &app.status_usage;
-    let window = short_tokens(usage.window?);
+    let usage = &app.session.status_usage;
+    let window = short_tokens(app.model_context_window?);
     Some(match usage.context {
         Some(context) => format!("{} / {window}", short_tokens(context)),
         None => format!("– / {window}"),
@@ -119,8 +102,8 @@ pub(super) fn context_label(app: &App) -> Option<String> {
 }
 
 pub(super) fn output_label(app: &App) -> Option<String> {
-    let (run_id, tokens) = app.status_usage.output.as_ref()?;
-    (app.active_agent_run_id.as_deref() == Some(run_id.as_str()))
+    let (run_id, tokens) = app.session.status_usage.output.as_ref()?;
+    (app.session.active_agent_run_id.as_deref() == Some(run_id.as_str()))
         .then(|| format!("↑{}", short_tokens(*tokens)))
 }
 
