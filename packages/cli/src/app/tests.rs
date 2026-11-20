@@ -1942,9 +1942,13 @@ fn dashboard_inactive_entry_uses_the_existing_read_only_open() {
 
 #[test]
 fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
-    let path = PathBuf::from("D:/workspace");
-    let mut app = test_app("Draft 中文 ", path.clone(), path);
     let temporary = unique_test_dir("parked-draft");
+    let projects = temporary.join("projects");
+    let workspace = projects.join("workspace");
+    let workspace_cwd = display_path(&workspace);
+    let other_cwd = display_path(&projects.join("other"));
+    let expected_cwd = other_cwd.clone();
+    let mut app = test_app("Draft 中文 ", workspace, temporary.clone());
     let image = temporary.join("draft.png");
     std::fs::write(&image, test_png_bytes()).unwrap();
     insert_draft_image(&mut app, image.clone());
@@ -1958,19 +1962,19 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
     app.session.transcript_scroll = 2;
     app.session.transcript_follow_bottom = false;
     app.session.active_agent_run_id = Some("run-before".into());
-    app.runtime = Some(RuntimeClient::from_test_request_handler(|frame| {
+    app.runtime = Some(RuntimeClient::from_test_request_handler(move |frame| {
         let request = &frame["params"]["request"];
         match frame["method"].as_str().unwrap() {
             "session/catalog" if request["mode"] == "pinned" => {
                 json!({"items": [], "nextCursor": null, "reset": false})
             }
             "session/catalog" if request["cursor"].is_null() => {
-                json!({"items": [{"id": "before", "title": "Recent work", "cwd": "D:/workspace", "isPinned": false}],
+                json!({"items": [{"id": "before", "title": "Recent work", "cwd": workspace_cwd, "isPinned": false}],
                     "nextCursor": "page-2", "reset": false})
             }
             "session/catalog" => {
                 assert_eq!(request["cursor"], "page-2");
-                json!({"items": [{"id": "session-paged", "title": "终端历史验收", "cwd": "D:/other", "isPinned": false}],
+                json!({"items": [{"id": "session-paged", "title": "终端历史验收", "cwd": other_cwd, "isPinned": false}],
                     "nextCursor": null, "reset": false})
             }
             "_centaeris/session/search" => json!({"items": []}),
@@ -1991,10 +1995,10 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
             }),
             "_centaeris/session/activate" => {
                 if request["sessionId"] == "before" {
-                    json!({"id": "before", "title": "Recent work", "cwd": "D:/workspace", "isPinned": false})
+                    json!({"id": "before", "title": "Recent work", "cwd": workspace_cwd, "isPinned": false})
                 } else {
                     assert_eq!(request["sessionId"], "session-paged");
-                    json!({"id": "session-paged", "title": "终端历史验收", "cwd": "D:/other", "isPinned": false})
+                    json!({"id": "session-paged", "title": "终端历史验收", "cwd": other_cwd, "isPinned": false})
                 }
             }
             other => panic!("unexpected resume request: {other}"),
@@ -2012,19 +2016,19 @@ fn resume_searches_later_catalog_pages_and_opens_the_selected_history() {
     wait_for_resume_text(&mut app, "Recent work");
     assert!(recent_activity(&mut app).contains(['⋅', ':', '⸬', '⁙']));
     handle_terminal_event(Event::Paste("终端历史".into()), &mut app);
-    wait_for_resume_text(&mut app, "other");
+    wait_for_resume_text(&mut app, "projects-other");
     let surface = resume_panel_text(&mut app);
     assert!(surface
         .lines()
-        .any(|row| row.trim().trim_matches('│').trim() == "other"));
-    assert!(!surface.contains("D:/other"));
+        .any(|row| row.trim().trim_matches('│').trim() == "projects-other"));
+    assert!(!surface.contains(expected_cwd.as_str()));
     handle_key(enter, &mut app);
     assert!(app.session_picker.is_none());
     assert_eq!(
         app.session.active_session.as_ref().unwrap().id,
         "session-paged"
     );
-    assert_eq!(app.session.session_cwd, "D:/other");
+    assert_eq!(app.session.session_cwd, expected_cwd);
     wait_for_resume_text(&mut app, "Resumed history");
     assert_eq!(
         app.session.transcript,
