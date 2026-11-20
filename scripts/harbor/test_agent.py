@@ -34,8 +34,8 @@ class Environment:
         self.calls.append((command, kwargs))
         if command == "pwd -P":
             return SimpleNamespace(return_code=0, stdout="/app\n", stderr="")
-        if command.endswith(" --runtime-server-endpoint"):
-            return SimpleNamespace(return_code=0, stdout=json.dumps({"endpoint": "/tmp/preflight/runtime.sock"}), stderr="")
+        if command.endswith(" --version"):
+            return SimpleNamespace(return_code=0, stdout="cet 0.1.0\n", stderr="")
         if " wait " in command:
             return SimpleNamespace(return_code=0 if self.status == "succeeded" else 1,
                                    stdout=json.dumps({"status": self.status, "sessionId": "session",
@@ -231,7 +231,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         class IncompatibleEnvironment(Environment):
             async def exec(self, command, **kwargs):
                 result = await super().exec(command, **kwargs)
-                if command.endswith(" --runtime-server-endpoint"):
+                if command.endswith(" --version"):
                     result.return_code = 127
                     result.stdout = None
                     result.stderr = "libc.so.6: version `GLIBC_2.34' not found"
@@ -245,7 +245,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 await agent.install(environment)
             self.assertFalse(any(command.startswith("nohup ") for command, _ in environment.calls))
 
-    async def test_install_preflight_uses_an_isolated_profile_and_empty_environment(self):
+    async def test_install_preflight_uses_an_empty_environment(self):
         class CredentialsMustNotBeRead(dict):
             def get(self, name, *args):
                 if name == "TEST_MODEL_KEY":
@@ -261,13 +261,12 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                               return_value=CredentialsMustNotBeRead({"TEST_MODEL_KEY": "fake-test-key"})):
                 await agent.install(environment)
             probes = [(command, options) for command, options in environment.calls
-                      if command.endswith(" --runtime-server-endpoint")]
+                      if command.endswith(" --version")]
             self.assertEqual(len(probes), 1)
             command, options = probes[0]
             arguments = shlex.split(command)
             self.assertEqual(arguments[:2], ["env", "-i"])
-            self.assertIn("CENTAERIS_DESKTOP_DATA_DIR=/tmp/centaeris-preflight-" + agent.attempt, arguments)
-            self.assertEqual(arguments[-2], agent.remote + "/centaeris-runtime")
+            self.assertEqual(arguments[-2], agent.remote + "/cet")
             self.assertNotIn("fake-test-key", command)
             self.assertNotIn("TEST_MODEL_KEY", command)
             self.assertNotIn("TEST_MODEL_KEY", options.get("env", {}))
@@ -276,7 +275,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             chmod_index = next(index for index, (command, _) in enumerate(environment.calls)
                                if "chmod a+x" in command)
             probe_index = next(index for index, (command, _) in enumerate(environment.calls)
-                               if command.endswith(" --runtime-server-endpoint"))
+                               if command.endswith(" --version"))
             self.assertLess(chmod_index, probe_index)
 
     async def test_session_uses_the_environment_working_directory(self):

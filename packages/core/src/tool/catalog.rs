@@ -4,8 +4,41 @@ use super::types::{ToolContract, ToolTurnBehavior};
 
 pub const BUILTIN_TOOL_PROVIDER_ID: &str = "centaeris.builtin";
 
-pub(crate) const MODEL_TOOL_CATALOG_ORDER: &[&str] =
-    &["read", "bash", "edit", "write", "task_output", "agent"];
+// Persisted read intents are settled from their original evidence. A delegated
+// permission to read is carried forward when projecting tools for a new turn.
+pub(crate) fn migrate_recorded_tool_digest<'a>(
+    name: &str,
+    provider: &str,
+    digest: &'a str,
+) -> &'a str {
+    match (name, provider, digest) {
+        (
+            "read",
+            BUILTIN_TOOL_PROVIDER_ID,
+            "sha256:bffd554ad13c0e892e14cbc160f04ba5ab6c863221f8a1cbcd25f2476c37b0ed",
+        ) => "sha256:3d5314c12fb3a05f06211d201c0c5c0dbfb3f8e0788cc532ebc3b09d9e964876",
+        _ => digest,
+    }
+}
+
+pub(crate) const AGENT_CONTROL_TOOL_NAMES: &[&str] = &[
+    "spawn_agent",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+];
+pub(crate) const MODEL_TOOL_CATALOG_ORDER: &[&str] = &[
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "spawn_agent",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+];
 
 pub(crate) const READ_MAX_LINES: usize = 2_000;
 pub(crate) const READ_MAX_BYTES: usize = 50 * 1024;
@@ -51,11 +84,21 @@ fn build_tool_contract(name: &str) -> ToolContract {
         scopes: vec![],
         dynamic: false,
     };
-    contract.schema_hash = Some(
-        contract
-            .contract_digest()
-            .expect("built-in tool contract must serialize"),
-    );
+    let digest = contract
+        .contract_digest()
+        .expect("built-in tool contract must serialize");
+    // These two model guidance corrections keep the execution identity already
+    // recorded in tool intents and delegated work packets. Any other change
+    // computes a different digest and keeps its own identity.
+    contract.schema_hash = Some(match digest.as_str() {
+        "sha256:fbc31f923f511820ed19c05c8da8868503a8b020eff7f735294aa31649449e0e" => {
+            "sha256:8e7eaba53332e9c1752b7efc092c78182e44ae3c438bc8a9a394bb206e9990b8".to_owned()
+        } // edit
+        "sha256:be40eb21f58c81194a0efdc0f7e84945f2c2d0e05be91f3c3524714e3f63f168" => {
+            "sha256:6c0e160c8c723f57d8386e9a210d71aa69b1feefe0c9d2a77c7015d399619079".to_owned()
+        } // write
+        _ => digest,
+    });
     contract
 }
 
@@ -72,7 +115,7 @@ fn tool_contract(tool_name: &str) -> (&'static str, &'static str, Value, bool) {
                     "input_refs": { "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": { "type": "string", "minLength": 1 }, "description": "Read up to four authorized AgentRun inputs as one bounded batch. Cannot be combined with offset or limit." },
                     "operation": { "type": "string", "enum": ["read", "list"], "description": "Use list with a path to enumerate a bounded directory. Omit or use read for file content." },
                     "recursive": { "type": "boolean", "description": "Only valid for operation=list." },
-                    "offset": { "type": "integer", "minimum": 0, "description": "Zero-based line offset for file reads, or zero-based entry offset for directory listings. Use the continuation offset returned by the previous result." },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Starting line number for text reads (1-indexed, default 1). For directory listings, use a zero-based entry offset. Use the continuation offset returned by the previous result." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": READ_MAX_LINES, "default": READ_MAX_LINES, "description": "For file reads, maximum complete lines to return (default and maximum 2000); every result is also capped at 50 KiB. For directory listings, default 100 and maximum 200." }
                 },
                 "oneOf": [
@@ -86,7 +129,7 @@ fn tool_contract(tool_name: &str) -> (&'static str, &'static str, Value, bool) {
         ),
         "write" => (
             "filesystem.write",
-            "Create a file or replace an existing file that was read during this AgentRun. Paths resolve from the current working directory, and file-version checks stay inside the executor.",
+            "Create a file or overwrite its entire contents. Paths resolve from the current working directory. Use edit for targeted changes.",
             json!({
                 "type": "object",
                 "properties": {
@@ -100,7 +143,7 @@ fn tool_contract(tool_name: &str) -> (&'static str, &'static str, Value, bool) {
         ),
         "edit" => (
             "filesystem.write",
-            "Atomically apply one to 64 exact replacements to one existing file that was read during this AgentRun. Paths resolve from the current working directory. Every edits[].old_text is matched against the same original file and must be exact, unique, and non-overlapping. Keep old_text as small as possible while still unique; do not include large unchanged regions merely to connect distant changes. Put disjoint changes in separate edits[] entries and merge overlapping or nearby changes.",
+            "Atomically apply one to 64 exact replacements to one existing file. Paths resolve from the current working directory. Every edits[].old_text is matched against the same original file and must be exact, unique, and non-overlapping. Keep old_text as small as possible while still unique; do not include large unchanged regions merely to connect distant changes. Put disjoint changes in separate edits[] entries and merge overlapping or nearby changes.",
             json!({
                 "type": "object",
                 "properties": {
@@ -170,10 +213,43 @@ fn tool_contract(tool_name: &str) -> (&'static str, &'static str, Value, bool) {
             }),
             false,
         ),
-        "agent" => (
+        "wait_agent" | "interrupt_agent" => (
             "runtime.agent",
-            "Start a bounded independent task in a child Agent. The task always runs in the background; use task_output with the returned output_ref when its result is needed.",
+            if tool_name == "wait_agent" {
+                "Wait for one delegated task and read its bounded result. Copy taskId exactly from spawn_agent, followup_task, or list_agents."
+            } else {
+                "Request cancellation of one delegated task. Copy taskId exactly from spawn_agent, followup_task, or list_agents. Use wait_agent to observe the final outcome."
+            },
             json!({
+                "type": "object",
+                "properties": { "task_id": { "type": "string", "pattern": "^subagent[.]run:[0-9a-f]{16}$" } },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+            false,
+        ),
+        "list_agents" => (
+            "runtime.agent",
+            "List this Session's delegated agents and their tasks with the exact IDs, descriptions, and statuses.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            false,
+        ),
+        "spawn_agent" | "followup_task" => (
+            "runtime.agent",
+            if tool_name == "spawn_agent" {
+                "Create a child Agent and submit its first background task. Use the returned taskId with wait_agent and agentId with followup_task. Copy IDs exactly."
+            } else {
+                "Submit another task to an existing child Agent, keeping its conversation. Tasks run in order. Copy agentId exactly from spawn_agent or list_agents and use the new taskId with wait_agent."
+            },
+            agent_submission_schema(tool_name),
+            false,
+        ),
+        _ => unreachable!("fixed tool catalog contains unknown tool: {tool_name}"),
+    }
+}
+
+fn agent_submission_schema(tool_name: &str) -> Value {
+    let mut schema = json!({
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string" },
@@ -188,11 +264,19 @@ fn tool_contract(tool_name: &str) -> (&'static str, &'static str, Value, bool) {
                 },
                 "required": ["prompt", "description"],
                 "additionalProperties": false
-            }),
-            false,
-        ),
-        _ => unreachable!("fixed tool catalog contains unknown tool: {tool_name}"),
+    });
+    if tool_name == "followup_task" {
+        schema["properties"]["agent_id"] =
+            json!({ "type": "string", "pattern": "^agent-[0-9a-f]{16}$" });
+        schema["required"] = json!(["agent_id", "prompt", "description"]);
     }
+    schema
+}
+
+// Used only to verify the definition digest of a wait already persisted by an
+// older runtime. This contract is never exposed or accepted for new calls.
+pub(crate) fn historical_task_output_contract() -> ToolContract {
+    build_tool_contract("task_output")
 }
 
 #[cfg(test)]
@@ -237,7 +321,17 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["read", "bash", "edit", "write", "task_output", "agent"]
+            vec![
+                "read",
+                "bash",
+                "edit",
+                "write",
+                "spawn_agent",
+                "followup_task",
+                "wait_agent",
+                "interrupt_agent",
+                "list_agents"
+            ]
         );
         assert_eq!(canonicalize_tool_name("banana"), None);
         assert_eq!(canonicalize_tool_name(" read "), None);
@@ -249,7 +343,7 @@ mod tests {
         }
         let agent = contracts
             .iter()
-            .find(|contract| contract.name == "agent")
+            .find(|contract| contract.name == "spawn_agent")
             .expect("agent contract");
         assert_eq!(
             agent.input_schema["required"],
@@ -331,6 +425,23 @@ mod tests {
     }
 
     #[test]
+    fn corrected_file_guidance_preserves_persisted_execution_identities() {
+        for (name, expected) in [
+            (
+                "edit",
+                "sha256:8e7eaba53332e9c1752b7efc092c78182e44ae3c438bc8a9a394bb206e9990b8",
+            ),
+            (
+                "write",
+                "sha256:6c0e160c8c723f57d8386e9a210d71aa69b1feefe0c9d2a77c7015d399619079",
+            ),
+        ] {
+            let contract = super::build_tool_contract(name);
+            assert_eq!(contract.contract_digest().unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn builtin_model_contracts_own_their_model_guidance_and_omit_ui_titles() {
         let contracts = list_tool_contracts();
         for name in ["read", "bash", "edit", "write"] {
@@ -363,10 +474,7 @@ mod tests {
             .iter()
             .find(|contract| contract.name == "write")
             .expect("write contract");
-        assert!(write.summary.contains("read during this AgentRun"));
-        assert!(write
-            .summary
-            .contains("file-version checks stay inside the executor"));
+        assert!(write.summary.contains("overwrite its entire contents"));
 
         let edit = contracts
             .iter()

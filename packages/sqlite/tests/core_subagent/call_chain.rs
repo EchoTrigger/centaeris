@@ -1,6 +1,7 @@
 use super::*;
 use centaeris_core::session::reliability::{
-    ClaimDueRuntimeJobsRequest, RuntimeJobRecord, ScheduleRuntimeJobRequest,
+    ClaimDueRuntimeJobsRequest, RequestSubagentJobCancellation, RuntimeJobRecord,
+    ScheduleRuntimeJobRequest, SubagentJobCancellationReceipt,
 };
 use centaeris_core::session::store::{
     job::{JobStoreError, JobStoreOperation, JobWriteOutcome},
@@ -75,6 +76,18 @@ impl AsyncJobStorePort for LostConfirmation {
     }
     async fn cancel_runtime_job(&self, req: CancelRuntimeJobRequest) -> Result<(), JobStoreError> {
         AsyncJobStorePort::cancel_runtime_job(&self.actor, req).await
+    }
+    async fn request_subagent_job_cancellation(
+        &self,
+        req: RequestSubagentJobCancellation,
+    ) -> Result<SubagentJobCancellationReceipt, JobStoreError> {
+        AsyncJobStorePort::request_subagent_job_cancellation(&self.actor, req).await
+    }
+    async fn subagent_job_cancellation_requested(
+        &self,
+        job_id: &str,
+    ) -> Result<bool, JobStoreError> {
+        AsyncJobStorePort::subagent_job_cancellation_requested(&self.actor, job_id).await
     }
     async fn reclaim_expired_runtime_job_leases(&self, req: i64) -> Result<usize, JobStoreError> {
         AsyncJobStorePort::reclaim_expired_runtime_job_leases(&self.actor, req).await

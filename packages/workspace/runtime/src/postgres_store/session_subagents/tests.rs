@@ -1,8 +1,9 @@
 use super::*;
 use centaeris_core::runtime::subagent::{build_subagent_run_job, SubagentRunJobRequest};
 use centaeris_core::session::external_context::{ExternalContextObject, ExternalContextStorePort};
+use centaeris_core::session::history::SessionHistoryEntryV1;
 use centaeris_core::session::reliability::{RuntimeJobStorePort, ScheduleRuntimeJobRequest};
-use centaeris_core::session::state::ChatMessage;
+use centaeris_core::session::state::{ChatMessage, SessionStateSnapshot};
 use centaeris_core::session::store::AgentRuntimeSnapshotStorePort;
 use serde_json::json;
 
@@ -135,66 +136,114 @@ fn packet() -> Value {
 }
 
 fn job_and_metadata() -> (RuntimeJobRecord, Value) {
+    job_and_metadata_for("call-agent", "child-turn", "work-packet-one")
+}
+
+fn job_and_metadata_for(
+    call_id: &str,
+    child_turn_id: &str,
+    work_packet_ref: &str,
+) -> (RuntimeJobRecord, Value) {
     let job = build_subagent_run_job(SubagentRunJobRequest {
         session_id: "sess_1".into(),
         parent_turn_id: "parent-turn".into(),
-        tool_call_id: "call-agent".into(),
+        tool_call_id: call_id.into(),
         subagent_id: "child-agent".into(),
-        work_packet_ref: "work-packet-one".into(),
+        work_packet_ref: work_packet_ref.into(),
         checkpoint_id: None,
         run_at_ms: 1,
         created_at_ms: 1,
         max_retries: 0,
     });
     let metadata = json!({"schema":"agent_tool_work_packet_v1","sessionId":"sess_1",
-        "parentTurnId":"parent-turn","childTurnId":"child-turn","toolCallId":"call-agent",
+        "parentTurnId":"parent-turn","childTurnId":child_turn_id,"toolCallId":call_id,
         "childSessionId":"child-one","subagentId":"child-agent","runtimeJobId":job.job_id,
-        "resultRef":"result-one"});
+        "resultRef":format!("result-{}",job.job_id)});
     (job, metadata)
 }
 
-fn snapshot() -> SessionStateSnapshot {
-    let mut snapshot = SessionStateSnapshot::new("child-one".into(), 12);
-    snapshot.messages = vec![
-        ChatMessage {
-            message_id: "assistant-one".into(),
-            role: MessageRole::Assistant,
-            content: "I will read it".into(),
-            created_at_ms: 10,
-            metadata: Default::default(),
-        },
-        ChatMessage {
-            message_id: "tool-one".into(),
-            role: MessageRole::Tool,
-            content: "source bytes".into(),
-            created_at_ms: 11,
-            metadata: Default::default(),
-        },
+fn append_task_history(snapshot: &mut SessionStateSnapshot, turn_id: &str, task: &str) {
+    let read_call_id = format!("call-read-{task}");
+    let messages = [
+        (
+            driver_user_message_id(&snapshot.session_id, turn_id),
+            MessageRole::User,
+            format!("Task {task} input"),
+            ModelMessageSemanticsV1::Plain,
+        ),
+        (
+            format!("assistant-tools-{task}"),
+            MessageRole::Assistant,
+            format!("I will read task {task}"),
+            ModelMessageSemanticsV1::Assistant {
+                reasoning_content: Some("Check source".into()),
+                tool_calls: vec![ModelToolCallStateV1 {
+                    id: read_call_id.clone(),
+                    name: "read".into(),
+                    args_json: json!({"path":format!("task-{task}.txt")}).to_string(),
+                }],
+            },
+        ),
+        (
+            format!("tool-result-{task}"),
+            MessageRole::Tool,
+            format!("Task {task} source bytes"),
+            ModelMessageSemanticsV1::ToolResult {
+                tool_call_id: read_call_id,
+                tool_name: "read".into(),
+                status: "success".into(),
+                result_state: "successWithOutput".into(),
+                error_kind: None,
+                object_refs: vec![],
+                transition_reason: None,
+            },
+        ),
+        (
+            format!("assistant-final-{task}"),
+            MessageRole::Assistant,
+            format!("{task}-RESULT"),
+            ModelMessageSemanticsV1::Assistant {
+                reasoning_content: None,
+                tool_calls: vec![],
+            },
+        ),
     ];
-    snapshot.model_semantics.insert(
-        "assistant-one".into(),
-        ModelMessageSemanticsV1::Assistant {
-            reasoning_content: Some("Check source".into()),
-            tool_calls: vec![ModelToolCallStateV1 {
-                id: "call-read".into(),
-                name: "read".into(),
-                args_json: "{\"path\":\"README.md\"}".into(),
-            }],
-        },
-    );
-    snapshot.model_semantics.insert(
-        "tool-one".into(),
-        ModelMessageSemanticsV1::ToolResult {
-            tool_call_id: "call-read".into(),
-            tool_name: "read".into(),
-            status: "success".into(),
-            result_state: "successWithOutput".into(),
-            error_kind: None,
-            object_refs: vec![],
-            transition_reason: None,
+    for (message_id, role, content, semantics) in messages {
+        let mut metadata = centaeris_core::runtime::contracts::JsonMap::new();
+        if role == MessageRole::User {
+            metadata.insert("message_semantic_kind".into(), "user_request".into());
+        }
+        snapshot.messages.push(ChatMessage {
+            message_id: message_id.clone(),
+            role,
+            content,
+            created_at_ms: 10,
+            metadata,
+        });
+        snapshot.model_semantics.insert(message_id, semantics);
+    }
+}
+
+fn insert_replayed_context(snapshot: &mut SessionStateSnapshot, after_input: usize) {
+    let message_id = "compaction-replay".to_string();
+    snapshot.messages.insert(
+        after_input,
+        ChatMessage {
+            message_id: message_id.clone(),
+            role: MessageRole::User,
+            content: "Earlier task input replayed for the model".into(),
+            created_at_ms: 10,
+            metadata: [
+                ("message_semantic_kind".into(), "user_request".into()),
+                ("kind".into(), "prompt_compaction_user_replay".into()),
+            ]
+            .into_iter()
+            .collect(),
         },
     );
     snapshot
+        .model_semantics
+        .insert(message_id, ModelMessageSemanticsV1::Plain);
 }
 
 #[test]
@@ -213,10 +262,12 @@ fn subagent_read_uses_core_binding_and_exact_work_packet_call() {
     assert_eq!(value["description"], "Inspect source");
     assert_eq!(value["parentAgentRunId"], "parent-run");
     assert_eq!(value["status"], "queued");
+    assert!(value.get("childTurnId").is_none());
     for field in [
         "sessionId",
         "runtimeJobId",
         "childSessionId",
+        "childTurnId",
         "parentTurnId",
     ] {
         let mut wrong = metadata.clone();
@@ -232,23 +283,39 @@ fn subagent_read_uses_core_binding_and_exact_work_packet_call() {
 }
 
 #[test]
-fn subagent_snapshot_read_preserves_typed_model_message_semantics() {
-    let value = serde_json::to_value(present_messages(snapshot(), "child-one").unwrap()).unwrap();
-    assert_eq!(value[0]["role"], "assistant");
-    assert_eq!(value[0]["reasoningContent"], "Check source");
+fn subagent_history_read_preserves_typed_model_message_semantics() {
+    let mut snapshot = SessionStateSnapshot::new("child-one".into(), 12);
+    append_task_history(&mut snapshot, "child-turn", "A");
+    insert_replayed_context(&mut snapshot, 1);
+    let history = std::mem::take(&mut snapshot.messages)
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let semantics = snapshot
+                .model_semantics
+                .remove(&message.message_id)
+                .unwrap();
+            SessionHistoryRecordV1 {
+                position: index as u64 + 1,
+                entry: SessionHistoryEntryV1::new(message, semantics).unwrap(),
+            }
+        })
+        .collect();
+    let value = serde_json::to_value(present_messages(history)).unwrap();
+    assert_eq!(value.as_array().unwrap().len(), 4);
+    assert_eq!(value[0]["role"], "user");
+    assert_eq!(value[1]["role"], "assistant");
+    assert_eq!(value[1]["reasoningContent"], "Check source");
     assert_eq!(
-        value[0]["toolCalls"][0],
-        json!({"id":"call-read","name":"read","argsJson":"{\"path\":\"README.md\"}"})
+        value[1]["toolCalls"][0],
+        json!({"id":"call-read-A","name":"read","argsJson":"{\"path\":\"task-A.txt\"}"})
     );
-    assert!(value[0]["toolCallId"].is_null());
-    assert_eq!(value[1]["role"], "tool");
-    assert_eq!(value[1]["toolCallId"], "call-read");
-    assert_eq!(value[1]["resultState"], "successWithOutput");
-    assert_eq!(value[1]["toolCalls"], json!([]));
-    assert!(present_messages(snapshot(), "other-child").is_err());
-    let mut missing = snapshot();
-    missing.model_semantics.remove("tool-one");
-    assert!(present_messages(missing, "child-one").is_err());
+    assert!(value[1]["toolCallId"].is_null());
+    assert_eq!(value[2]["role"], "tool");
+    assert_eq!(value[2]["toolCallId"], "call-read-A");
+    assert_eq!(value[2]["resultState"], "successWithOutput");
+    assert_eq!(value[2]["toolCalls"], json!([]));
+    assert_eq!(value[3]["content"], "A-RESULT");
 }
 
 #[test]
@@ -322,21 +389,74 @@ fn postgres_session_subagents_read_persists_and_enforces_parent_scope() {
         .unwrap()
         .messages
         .is_empty());
-    let typed = snapshot();
+    let (followup_job, followup_metadata) =
+        job_and_metadata_for("call-followup", "followup-turn", "work-packet-followup");
+    let mut followup_packet = packet();
+    followup_packet["run_context"]["turnId"] = json!("followup-turn");
+    followup_packet["run_context"]["agentRunId"] = json!(followup_job.job_id);
+    followup_packet["run_context"]["agentRef"]["agentRunId"] = json!(followup_job.job_id);
+    followup_packet["task_brief"]["objective"] = json!("Task B input");
+    store
+        .upsert_external_context_object(ExternalContextObject {
+            schema_version: "external_context.v1".into(),
+            object_id: "work-packet-followup".into(),
+            object_kind: "subagent_work_packet".into(),
+            source_provider_id: "centaeris.core".into(),
+            source_tool_name: "followup_task".into(),
+            title: "Follow up".into(),
+            content: json!({"workPacket":followup_packet}).to_string(),
+            metadata: followup_metadata,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest {
+            job: followup_job.clone(),
+        })
+        .unwrap();
+    let followup_detail = SessionSubagentReadRequest {
+        runtime_job_id: followup_job.job_id.clone(),
+        schema: detail.schema.clone(),
+        session_id: detail.session_id.clone(),
+        workspace_id: detail.workspace_id.clone(),
+        owner_id: detail.owner_id,
+    };
+    let mut typed = SessionStateSnapshot::new("child-one".into(), 12);
+    append_task_history(&mut typed, "child-turn", "A");
     store
         .save_agent_runtime_snapshot("child-one", &serde_json::to_string(&typed).unwrap(), 12)
         .unwrap();
+    let queued = store
+        .read_session_subagent(&followup_detail)
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued.agent.status, RuntimeJobStatus::Queued);
+    assert!(queued.messages.is_empty());
+    let after_followup_input = typed.messages.len() + 1;
+    append_task_history(&mut typed, "followup-turn", "B");
+    insert_replayed_context(&mut typed, after_followup_input);
+    store
+        .save_agent_runtime_snapshot("child-one", &serde_json::to_string(&typed).unwrap(), 13)
+        .unwrap();
+    db.execute(
+        "UPDATE runtime.runtime_jobs SET status='succeeded' WHERE job_id=$1",
+        &[&followup_job.job_id],
+    )
+    .unwrap();
     // A new store instance cannot depend on resident/UI-only state.
     let reopened = PostgresRuntimeStore::new(&url).unwrap();
-    assert_eq!(
-        reopened
-            .read_session_subagent(&detail)
-            .unwrap()
-            .unwrap()
-            .messages
-            .len(),
-        2
-    );
+    for (request, task) in [(&detail, "A"), (&followup_detail, "B")] {
+        let response = reopened.read_session_subagent(request).unwrap().unwrap();
+        assert_eq!(response.agent.child_session_id, "child-one");
+        assert_eq!(response.agent.status, RuntimeJobStatus::Succeeded);
+        assert_eq!(response.messages.len(), 4);
+        assert_eq!(response.messages[0].content, format!("Task {task} input"));
+        assert_eq!(
+            response.messages[2].content,
+            format!("Task {task} source bytes")
+        );
+        assert_eq!(response.messages[3].content, format!("{task}-RESULT"));
+    }
     let wrong_owner = SessionSubagentsReadRequest {
         owner_id: 2,
         ..query

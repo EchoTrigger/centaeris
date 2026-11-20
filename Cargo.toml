@@ -5,14 +5,14 @@ members = [
   "packages/mcp",
   "packages/sqlite",
   "packages/agent",
-  "packages/desktop/src/services",
   "packages/cli",
+  "packages/cli/runtime",
   "packages/model-catalog",
   "packages/model-http",
   "packages/workspace/runtime",
   "packages/workspace/executor",
 ]
-default-members = ["packages/core", "packages/mcp", "packages/sqlite", "packages/agent", "packages/desktop/src/services", "packages/cli", "packages/model-catalog", "packages/model-http"]
+default-members = ["packages/core", "packages/mcp", "packages/sqlite", "packages/agent", "packages/cli", "packages/cli/runtime", "packages/model-catalog", "packages/model-http"]
 
 [workspace.package]
 version = "0.1.0"
@@ -39,7 +39,8 @@ arboard = "=3.6.1"
 axum = { version = "=0.8.9", default-features = false }
 base64 = "=0.22.1"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
-crossterm = "=0.28.1"
+# Pins the Windows surrogate key-up fix from crossterm-rs/crossterm#1073.
+crossterm = { version = "=0.29.0", git = "https://github.com/crossterm-rs/crossterm", rev = "954acceea63028799cd9657b266a5647418e55d3", default-features = false, features = ["bracketed-paste", "events", "windows"] }
 fs2 = "=0.4.3"
 futures = "=0.3.32"
 getrandom = "=0.4.3"
@@ -87,8 +88,9 @@ path = "packages/model-http"
 [workspace.dependencies.centaeris-mcp]
 path = "packages/mcp"
 
-[workspace.dependencies.centaeris-desktop-services]
-path = "packages/desktop/src/services"
+[workspace.dependencies.centaeris-cli-runtime]
+path = "packages/cli/runtime"
+default-features = false
 
 [workspace.dependencies.centaeris-runtime-sqlite]
 path = "packages/sqlite"

@@ -1,8 +1,18 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+import { parseVisual } from "@centaeris/visuals/contract";
+import visualCases from "../../../../core/tests/fixtures/visualizations.json";
 import { MarkdownContent } from "../../src/chat/MarkdownContent";
-import { previewExamples } from "../../../../desktop/src/renderer/visualizationPreviewExamples";
 import "../../src/globals.css";
+
+const [session, resources] = visualCases;
+const longText = parseVisual(session.source);
+longText.spec.elements.created.props.text = "说明中同时出现中文、English identifiers 和 packages/workspace/web/src/chat/TranscriptBlockContent.tsx 时，长文本应自然换行，状态仍跟着所属步骤阅读。";
+const previewExamples = [
+  { id: "session", title: "Session 生命周期", source: session.source },
+  { id: "resources", title: "资源控制链路", source: resources.source },
+  { id: "longText", title: "长文本与路径", source: JSON.stringify(longText) },
+];
 
 const parameters = new URLSearchParams(location.search);
 document.documentElement.dataset.theme = parameters.get("theme") ?? "light";
@@ -25,7 +35,7 @@ function Fixture() {
     </section>
     {previewExamples.map(example => <section key={example.id} data-example={example.id} aria-label={example.title} style={{ marginTop: 28 }}>
       <h2>{example.title}</h2>
-      <MarkdownContent text={example.intro + "\n\n" + visual(example.source)} allowVisuals />
+      <MarkdownContent text={visual(example.source)} allowVisuals />
     </section>)}
     <section aria-label="Invalid visual" style={{ marginTop: 28 }}>
       <MarkdownContent text={`Before invalid\n\n${fence}centaeris_visual\n{"schema":"unsupported","html":"<script>bad()</script>"}\n${fence}\n\nAfter invalid`} allowVisuals />

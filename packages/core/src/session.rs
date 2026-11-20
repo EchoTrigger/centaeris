@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub mod external_context;
+pub mod fork;
 pub mod history;
 pub mod host_event_input;
 pub mod manager;
@@ -606,6 +607,13 @@ impl AgentRunSessionState {
 
     pub fn provider_usage(&self, turn_id: &str) -> Option<&Value> {
         self.provider_usages.get(turn_id)
+    }
+
+    pub fn reported_output_tokens(&self) -> Option<u64> {
+        self.provider_usages
+            .values()
+            .filter_map(|usage| usage.get("outputTokens").and_then(Value::as_u64))
+            .reduce(u64::saturating_add)
     }
 
     pub fn has_supplement(&self, supplement_id: &str) -> bool {
@@ -6549,6 +6557,12 @@ mod tests {
         assert_eq!(usage.latest.input_tokens, Some(20));
         assert_eq!(usage.session.input_tokens, Some(30));
         assert_eq!(usage.session.output_tokens, Some(5));
+
+        let mut run = AgentRunSessionState::new("session-1", "agent-run-1").expect("empty run");
+        assert_eq!(run.reported_output_tokens(), None);
+        run.record(first.clone()).expect("first committed usage");
+        run.record(second.clone()).expect("second committed usage");
+        assert_eq!(run.reported_output_tokens(), Some(5));
 
         let error = reduce_events("session-1", [&first, &first])
             .expect_err("duplicate turn usage must fail");

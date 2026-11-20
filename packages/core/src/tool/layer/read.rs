@@ -380,7 +380,7 @@ fn execute_read(
         .map_err(|message| {
             FileToolError::new(FileToolErrorKind::Io, message).with_model_path(lookup_path)
         })?;
-    let (display_path, file_hash, content) =
+    let (display_path, file_hash, bytes) =
         if binding.mode() == crate::execution::ExecutionHostMode::Remote {
             let output = binding
                 .run_file_system_operation(
@@ -425,11 +425,7 @@ fn execute_read(
                 )
                 .with_model_path(lookup_path));
             }
-            (
-                output.identity.display_path,
-                output.file_hash,
-                String::from_utf8_lossy(output.bytes.as_slice()).into_owned(),
-            )
+            (output.identity.display_path, output.file_hash, output.bytes)
         } else {
             let resolved = resolve_manifest_physical_path(runtime_context, lookup_path)?;
             let display_path = resolved.display_path.clone();
@@ -473,9 +469,21 @@ fn execute_read(
             )? {
                 return Ok(outcome);
             }
-            let content = read_bounded_text(resolved.path.as_path(), display_path.as_str())?;
-            (display_path, file_hash, content)
+            if bytes.len() as u64 > MAX_DIRECT_READ_BYTES {
+                return Err(FileToolError::new(
+                    FileToolErrorKind::InvalidInput,
+                    format!("Read {display_path} exceeds the bounded direct-read limit"),
+                ));
+            }
+            if bytes.contains(&0) {
+                return Err(FileToolError::new(
+                    FileToolErrorKind::InvalidInput,
+                    format!("binary file not supported: {display_path}"),
+                ));
+            }
+            (display_path, file_hash, bytes)
         };
+    let content = String::from_utf8_lossy(&bytes);
     let mut outcome = text_read_outcome(display_path, file_hash.clone(), &content, offset, limit)?;
     outcome.source_association_ref = resolved_input
         .as_ref()
@@ -552,7 +560,7 @@ fn execute_workspace_read(
         )
         .with_model_path(display_path.as_str()));
     }
-    let content = String::from_utf8_lossy(output.bytes.as_slice()).into_owned();
+    let content = String::from_utf8_lossy(output.bytes.as_slice());
     let outcome = text_read_outcome(display_path, file_hash.clone(), &content, offset, limit)?;
     Ok(FileToolOutcome::Read(Box::new(outcome)))
 }
@@ -566,9 +574,12 @@ fn text_read_outcome(
     limit: Option<usize>,
 ) -> Result<FileReadOutcome, FileToolError> {
     let total_bytes = content.len();
-    let all_lines = content.lines().collect::<Vec<_>>();
-    let offset = offset.unwrap_or(0);
-    if offset > all_lines.len() {
+    let mut lines = content.lines();
+    let start_line = offset.unwrap_or(1).max(1);
+    let skipped = start_line - 1;
+    if lines.by_ref().take(skipped).count() != skipped
+        || (skipped > 0 && !content.ends_with('\n') && lines.clone().next().is_none())
+    {
         return Err(FileToolError::new(
             FileToolErrorKind::InvalidInput,
             "Read start line exceeds available content",
@@ -581,25 +592,45 @@ fn text_read_outcome(
             format!("read file limit must be between 1 and {READ_MAX_LINES}"),
         ));
     }
-    let selection = select_bounded_read_lines(all_lines.as_slice(), offset, limit);
-    let selected = selection.lines;
-    let start_line = offset.saturating_add(1);
-    let end_line = offset.saturating_add(selected.len());
+    let mut page = String::new();
+    let mut selected_lines = 0;
+    let mut truncated_by = None;
+    for line in lines.by_ref() {
+        if selected_lines == limit {
+            truncated_by = Some("lines");
+            break;
+        }
+        let separator_bytes = usize::from(selected_lines > 0);
+        if page.len() + separator_bytes + line.len() > READ_MAX_BYTES {
+            truncated_by = Some("bytes");
+            break;
+        }
+        if selected_lines > 0 {
+            page.push('\n');
+        }
+        page.push_str(line);
+        selected_lines += 1;
+    }
+    let end_line = skipped + selected_lines;
+    let truncated = truncated_by.is_some();
+    // On truncation the loop consumed the first omitted line.
+    let total_lines = end_line + usize::from(truncated) + lines.count();
+    let first_line_exceeds_limit = truncated && selected_lines == 0;
     Ok(FileReadOutcome {
         path: display_path,
         start_line,
         end_line,
-        total_lines: all_lines.len(),
+        total_lines,
         total_bytes,
-        output_bytes: selection.output_bytes,
+        output_bytes: page.len(),
         max_lines: limit,
         max_bytes: READ_MAX_BYTES,
-        truncated: selection.truncated,
-        truncated_by: selection.truncated_by,
-        first_line_exceeds_limit: selection.first_line_exceeds_limit,
-        next_offset: selection.next_offset,
+        truncated,
+        truncated_by,
+        first_line_exceeds_limit,
+        next_offset: (truncated && !first_line_exceeds_limit).then_some(end_line + 1),
         file_hash,
-        content: selected.join("\n"),
+        content: page,
         input_ref: None,
         display_name: None,
         source_identity: None,
@@ -689,89 +720,6 @@ fn is_supported_model_image_path(path: &Path) -> bool {
                 "png" | "jpg" | "jpeg" | "webp"
             )
         })
-}
-
-struct BoundedReadSelection<'a> {
-    lines: Vec<&'a str>,
-    output_bytes: usize,
-    truncated: bool,
-    truncated_by: Option<&'static str>,
-    first_line_exceeds_limit: bool,
-    next_offset: Option<usize>,
-}
-
-fn select_bounded_read_lines<'a>(
-    all_lines: &'a [&'a str],
-    offset: usize,
-    max_lines: usize,
-) -> BoundedReadSelection<'a> {
-    let mut lines = Vec::with_capacity(max_lines.min(all_lines.len().saturating_sub(offset)));
-    let mut output_bytes = 0usize;
-    let mut truncated_by = None;
-    let mut first_line_exceeds_limit = false;
-
-    for line in all_lines.iter().skip(offset) {
-        if lines.len() == max_lines {
-            truncated_by = Some("lines");
-            break;
-        }
-        let separator_bytes = usize::from(!lines.is_empty());
-        let next_bytes = output_bytes
-            .saturating_add(separator_bytes)
-            .saturating_add(line.len());
-        if next_bytes > READ_MAX_BYTES {
-            truncated_by = Some("bytes");
-            first_line_exceeds_limit = lines.is_empty();
-            break;
-        }
-        lines.push(*line);
-        output_bytes = next_bytes;
-    }
-
-    let end_offset = offset.saturating_add(lines.len());
-    let truncated = end_offset < all_lines.len();
-    if !truncated {
-        truncated_by = None;
-        first_line_exceeds_limit = false;
-    }
-    let next_offset = (truncated && !first_line_exceeds_limit).then_some(end_offset);
-    BoundedReadSelection {
-        lines,
-        output_bytes,
-        truncated,
-        truncated_by,
-        first_line_exceeds_limit,
-        next_offset,
-    }
-}
-
-fn read_bounded_text(path: &Path, label: &str) -> Result<String, FileToolError> {
-    let size = std::fs::metadata(path)
-        .map_err(|error| {
-            FileToolError::new(
-                FileToolErrorKind::Io,
-                format!("read file metadata failed: {error}"),
-            )
-            .with_model_path(label)
-        })?
-        .len();
-    if size > MAX_DIRECT_READ_BYTES {
-        return Err(FileToolError::new(
-            FileToolErrorKind::InvalidInput,
-            format!("Read {label} exceeds the bounded direct-read limit"),
-        ));
-    }
-    let bytes = fs::read(path).map_err(|error| {
-        FileToolError::new(FileToolErrorKind::Io, format!("read file failed: {error}"))
-            .with_model_path(label)
-    })?;
-    if bytes.contains(&0) {
-        return Err(FileToolError::new(
-            FileToolErrorKind::InvalidInput,
-            format!("binary file not supported: {label}"),
-        ));
-    }
-    Ok(String::from_utf8_lossy(bytes.as_slice()).into_owned())
 }
 
 fn resolve_manifest_input(
@@ -959,6 +907,27 @@ mod tests {
     }
 
     #[test]
+    fn text_offsets_select_the_named_line_and_clamp_zero_like_pi() {
+        let page =
+            |text, offset| text_read_outcome("x".into(), "hash".into(), text, offset, Some(1));
+        for offset in [None, Some(0), Some(1)] {
+            let first = page("a\nb", offset).unwrap();
+            assert_eq!(
+                (first.content.as_str(), first.start_line, first.next_offset),
+                ("a", 1, Some(2))
+            );
+        }
+        let last = page("a\nb", Some(2)).unwrap();
+        assert_eq!(
+            (last.content.as_str(), last.start_line, last.next_offset),
+            ("b", 2, None)
+        );
+        assert!(page("a\nb", Some(3)).is_err());
+        assert!(page("a\nb\n", Some(3)).unwrap().content.is_empty());
+        assert!(page("", None).unwrap().content.is_empty());
+    }
+
+    #[test]
     fn read_defaults_to_two_thousand_lines_and_returns_a_rolling_offset() {
         let root = read_limit_test_root("lines");
         std::fs::create_dir_all(root.as_path()).expect("create read workspace");
@@ -977,7 +946,7 @@ mod tests {
         assert_eq!(first.details["maxLines"], READ_MAX_LINES);
         assert_eq!(first.details["maxBytes"], READ_MAX_BYTES);
         assert_eq!(first.details["truncatedBy"], "lines");
-        assert_eq!(first.details["nextOffset"], READ_MAX_LINES);
+        assert_eq!(first.details["nextOffset"], READ_MAX_LINES + 1);
         assert_eq!(
             first.details["content"]
                 .as_str()
@@ -989,15 +958,15 @@ mod tests {
         assert!(first.content.lines().next().is_some_and(|line| line
             .starts_with("Read large.txt: lines 1-2000 of 2005 ")
             && line.ends_with(
-                "truncated=true by lines. Continue with read(path=\"large.txt\", offset=2000)."
+                "truncated=true by lines. Continue with read(path=\"large.txt\", offset=2001)."
             )));
         assert!(first
             .content
-            .contains("Continuation: read(path=\"large.txt\", offset=2000)."));
+            .contains("Continuation: read(path=\"large.txt\", offset=2001)."));
 
         let second = test_handler()
             .invoke(
-                json!({"path": "large.txt", "offset": READ_MAX_LINES})
+                json!({"path": "large.txt", "offset": first.details["nextOffset"]})
                     .to_string()
                     .as_str(),
                 &context,
@@ -1034,7 +1003,10 @@ mod tests {
         assert!(output_bytes <= READ_MAX_BYTES);
         assert_eq!(output.details["truncatedBy"], "bytes");
         assert_eq!(output.details["firstLineExceedsLimit"], false);
-        assert_eq!(output.details["nextOffset"], output.details["endLine"]);
+        assert_eq!(
+            output.details["nextOffset"],
+            output.details["endLine"].as_u64().unwrap() + 1
+        );
         assert!(returned.lines().all(|item| item.len() == 1_024));
 
         std::fs::remove_dir_all(root).expect("cleanup read workspace");
@@ -1439,7 +1411,7 @@ mod tests {
 
         let first = input_handler
             .invoke(
-                json!({"input_ref": "input_1", "offset": 1, "limit": 2})
+                json!({"input_ref": "input_1", "offset": 2, "limit": 2})
                     .to_string()
                     .as_str(),
                 &context,
@@ -1447,7 +1419,7 @@ mod tests {
             .expect("read input");
         let second = path_handler
             .invoke(
-                json!({"path": "sources/srcobj_1/notice.md", "offset": 1, "limit": 2})
+                json!({"path": "sources/srcobj_1/notice.md", "offset": 2, "limit": 2})
                     .to_string()
                     .as_str(),
                 &context,
@@ -1455,6 +1427,8 @@ mod tests {
             .expect("read virtual path");
         let first = first.details;
         let second = second.details;
+        assert_eq!(first["startLine"], 2);
+        assert_eq!(first["content"], "术前注意事项\n第三行");
         assert_eq!(first["inputRef"], "input_1");
         assert_eq!(
             first["sourceAssociationRef"],

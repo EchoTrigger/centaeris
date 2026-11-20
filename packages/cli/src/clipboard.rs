@@ -5,17 +5,32 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static CLIPBOARD_IMAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) trait TextClipboard {
+    fn store(&mut self, text: &str) -> Result<(), String>;
+}
+
+#[derive(Default)]
+pub(crate) struct SystemClipboard(Option<arboard::Clipboard>);
+
+impl TextClipboard for SystemClipboard {
+    fn store(&mut self, text: &str) -> Result<(), String> {
+        if self.0.is_none() {
+            self.0 = Some(
+                arboard::Clipboard::new()
+                    .map_err(|error| format!("clipboard unavailable: {error}"))?,
+            );
+        }
+        self.0
+            .as_mut()
+            .expect("clipboard initialized")
+            .set_text(text)
+            .map_err(|error| format!("copy text failed: {error}"))
+    }
+}
+
 pub(crate) enum ClipboardContent {
     Image(PathBuf),
     Text(String),
-}
-
-pub(crate) fn copy_text(text: &str) -> Result<(), String> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|error| format!("clipboard unavailable: {error}"))?;
-    clipboard
-        .set_text(text)
-        .map_err(|error| format!("copy text failed: {error}"))
 }
 
 pub(crate) fn paste() -> Result<ClipboardContent, String> {
@@ -66,7 +81,7 @@ pub(crate) fn image_from_pasted_text(text: &str) -> Result<Option<PathBuf>, Stri
     write_temp_png(image).map(Some)
 }
 
-fn write_temp_png(image: image::DynamicImage) -> Result<PathBuf, String> {
+pub(crate) fn write_temp_png(image: image::DynamicImage) -> Result<PathBuf, String> {
     let mut encoded = Vec::new();
     image
         .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)

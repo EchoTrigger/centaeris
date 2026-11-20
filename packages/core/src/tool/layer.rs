@@ -772,6 +772,20 @@ impl ToolLayer {
         self.runtime_context.execution_cancellation_probe.as_deref()
     }
 
+    pub(crate) fn with_additional_execution_cancellation_probe(
+        self,
+        probe: Arc<ExecutionCancellationProbe>,
+    ) -> Self {
+        let existing = self.runtime_context.execution_cancellation_probe.clone();
+        self.with_execution_cancellation_probe(Arc::new(move || match probe()? {
+            Some(reason) => Ok(Some(reason)),
+            None => match &existing {
+                Some(existing) => existing(),
+                None => Ok(None),
+            },
+        }))
+    }
+
     pub fn with_sandbox_filesystem_paths(
         mut self,
         additional_writable_roots: Vec<PathBuf>,

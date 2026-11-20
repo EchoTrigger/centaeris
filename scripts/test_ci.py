@@ -41,16 +41,16 @@ class PortableGateTests(unittest.TestCase):
             self.assertIn([ci.sys.executable, "-B", "-m", "unittest", "discover", "-s",
                            "scripts/harbor", "-p", "test_runner.py"], calls)
             self.assertIn(["cargo", "test", "--locked", "-p", "centaeris-runtime-sqlite", "--test", "core_runtime"], calls)
-            self.assertIn(["cargo", "run", "--locked", "-p", "centaeris-desktop-services", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"], calls)
+            self.assertIn(["cargo", "run", "--locked", "-p", "centaeris-cli-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"], calls)
             self.assertEqual(calls[-1], ["cargo", "test", "--locked", *ci.package_flags()])
             self.assertFalse(any("pwsh" in c for c in calls))
             self.assertFalse(any("runtime_server" in c or "hosted_execution" in c for c in calls))
 
-    def test_node_source_gate_preserves_build_lint_host_parity_and_licenses(self):
+    def test_node_source_gate_checks_lint_and_licenses(self):
         calls = []
         ci.run_gate("Node", lambda args, **kw: calls.append(args) or "", platform="linux")
-        for script in ("build:renderer", "lint:source", "check:syntax", "check:host-parity", "test:third-party-licenses"):
-            self.assertTrue(any(script in c for c in calls), script)
+        self.assertIn(["pnpm", "run", "lint:ui"], calls)
+        self.assertIn(["node", "--test", "scripts/system-skills.test.mjs", "scripts/product-licenses.test.mjs"], calls)
         self.assertIn(["pnpm", "--filter", "@centaeris/sdk", "run", "typecheck"], calls)
         self.assertIn(["pnpm", "--filter", "@centaeris/sdk", "run", "test"], calls)
         self.assertFalse(any("smoke:window" in c for c in calls))

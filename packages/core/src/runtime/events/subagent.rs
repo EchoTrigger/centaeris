@@ -173,13 +173,15 @@ impl SubagentEventPayload {
     }
 }
 
-pub(crate) fn build_runtime_event_subagent_spawned_from_tool_result(
+pub(crate) fn build_runtime_event_subagent_submission_from_tool_result(
     session_id: &str,
     turn_id: &str,
     parent_task_id: &str,
     report: &ToolExecutionResult,
 ) -> Result<Option<RuntimeEventProjection>, String> {
-    if report.tool_name != "agent" || report.status != "ok" {
+    if !matches!(report.tool_name.as_str(), "spawn_agent" | "followup_task")
+        || report.status != "ok"
+    {
         return Ok(None);
     }
     if report.details.get("schema").and_then(Value::as_str) != Some("agent_tool_result_v1") {
@@ -229,7 +231,11 @@ pub(crate) fn build_runtime_event_subagent_spawned_from_tool_result(
         turn_id,
         subagent_id.as_str(),
         parent_task_id,
-        SubagentEventKind::Spawned,
+        if report.tool_name == "spawn_agent" {
+            SubagentEventKind::Spawned
+        } else {
+            SubagentEventKind::Progress
+        },
         &payload,
         report.started_at_ms,
     )))
@@ -277,6 +283,7 @@ fn build_runtime_event_subagent_event_at(
             event_type,
             at_ms_text.as_str(),
             payload.tool_group_id.as_deref().unwrap_or_default(),
+            payload.runtime_job_id.as_deref().unwrap_or_default(),
         ],
     );
     typed_runtime_event(json!({
@@ -350,6 +357,7 @@ pub(crate) fn build_runtime_event_subagent_event_from_scheduler_event(
     );
     let child_session_id = scheduler_event.child_session_id.clone();
     payload.child_session_id = Some(child_session_id.clone());
+    payload.runtime_job_id = Some(scheduler_event.job_id.clone());
     if let Some(result_ref) = scheduler_event
         .result_ref
         .as_deref()

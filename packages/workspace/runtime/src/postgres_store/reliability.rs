@@ -3,6 +3,11 @@ use std::time::{Duration, Instant};
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::{Client, GenericClient, Row};
 
+use centaeris_core::runtime::subagent::SUBAGENT_RUN_JOB_KIND;
+use centaeris_core::session::reliability::{
+    subagent_cancel_request_id, RequestSubagentJobCancellation, SubagentJobCancellationReceipt,
+    SUBAGENT_CANCEL_REASON, SUBAGENT_CANCEL_REQUESTED_EVENT, SUBAGENT_CANCEL_UNCONFIRMED,
+};
 use centaeris_core::session::reliability::{
     AcquireResourceClaimDisposition, AcquireResourceClaimRequest, AcquireResourceClaimResult,
     CancelRuntimeJobRequest, ClaimDueRuntimeJobsRequest, CompleteRuntimeJobRequest,
@@ -422,6 +427,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
                 .transaction()
                 .map_err(|e| format!("begin Postgres complete runtime job failed: {e}"))?;
             super::lifecycle_control::require_lifecycle_completion(&mut tx,&r.job_id)?;
+            ensure_no_subagent_job_cancellation(&mut tx, &r.job_id)?;
             updated(tx.execute("UPDATE runtime_jobs SET status='succeeded',output_refs_json=$1,updated_at_ms=$2,lease_owner=NULL,lease_expires_at_ms=NULL,last_error=NULL WHERE job_id=$3 AND status IN('leased','running') AND lease_owner=$4 AND lease_expires_at_ms>$2", &[&out,&r.completed_at_ms,&r.job_id,&r.lease_owner]),"complete runtime job")?;
             upsert_job_outbox(&mut tx, r.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
             tx.commit()
@@ -441,6 +447,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|e| format!("begin Postgres fail runtime job failed: {e}"))?;
+            ensure_no_subagent_job_cancellation(&mut tx, &r.job_id)?;
             updated(tx.execute("UPDATE runtime_jobs SET status=$1,run_at_ms=$2,retry_count=retry_count+1,updated_at_ms=$3,lease_owner=NULL,lease_expires_at_ms=NULL,last_error=$4 WHERE job_id=$5 AND status IN('leased','running') AND lease_owner=$6 AND lease_expires_at_ms>$3", &[&status,&run,&r.failed_at_ms,&r.last_error,&r.job_id,&r.lease_owner]),"fail runtime job")?;
             if !matches!(r.disposition, RuntimeJobFailureDisposition::RetryScheduled) {
                 upsert_job_outbox(&mut tx, r.job_id.as_str(), RUNTIME_JOB_TERMINAL_EVENT)?;
@@ -461,6 +468,43 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
                 .map_err(|e| format!("commit Postgres cancel runtime job failed: {e}"))
         })
     }
+
+    fn request_subagent_job_cancellation(
+        &self,
+        req: RequestSubagentJobCancellation,
+    ) -> Result<SubagentJobCancellationReceipt, String> {
+        self.with_client(|client| {
+            let mut tx = client.transaction().map_err(|e| e.to_string())?;
+            self.lock_subagent_persistence_write(&mut tx, Some(&req.session_id))?;
+            let status = job_status_from(&tx.query_opt(
+                "SELECT status FROM runtime_jobs WHERE job_id=$1 AND session_id=$2 AND job_kind=$3 FOR UPDATE",
+                &[&req.job_id, &req.session_id, &SUBAGENT_RUN_JOB_KIND],
+            ).map_err(|e| e.to_string())?
+                .ok_or("subagent Job is missing from the Session")?
+                .get::<_, String>(0))?;
+            let already_requested = !status.is_terminal()
+                && subagent_job_cancellation_requested(&mut tx, &req.job_id)?;
+            let receipt = SubagentJobCancellationReceipt::decide(status, already_requested);
+            if receipt.accepted {
+                let event_id = subagent_cancel_request_id(&req.job_id);
+                let payload = serde_json::json!({"runtimeJobId": req.job_id}).to_string();
+                tx.execute(
+                    "INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES($1,$2,$3,$4,$5,'internal',$6)",
+                    &[&event_id,&req.session_id,&req.job_id,&SUBAGENT_CANCEL_REQUESTED_EVENT,&req.requested_at_ms,&payload],
+                ).map_err(|e| e.to_string())?;
+                if receipt.status == RuntimeJobStatus::Cancelled {
+                    finish_requested_subagent_cancellation(&mut tx, &req.job_id, req.requested_at_ms)?;
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(receipt)
+        })
+    }
+
+    fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, String> {
+        self.with_client(|client| subagent_job_cancellation_requested(client, job_id))
+    }
+
     fn reclaim_expired_runtime_job_leases(&self, now: i64) -> Result<usize, String> {
         self.with_client(|client| {
             let mut tx = client.transaction().map_err(|error| format!("begin expired lease reclaim failed: {error}"))?;
@@ -470,6 +514,15 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
             let policy = RuntimeJobLeaseReclaimPolicy::default();
             for row in &expired {
                 let job_id = row.get::<_, String>(0);
+                if subagent_job_cancellation_requested(&mut tx, &job_id)? {
+                    // A lost claim prevents replay but does not attest process exit.
+                    updated(tx.execute(
+                        "UPDATE runtime_jobs SET status='failed',updated_at_ms=$1,lease_owner=NULL,lease_expires_at_ms=NULL,heartbeat_at_ms=NULL,last_error=$2 WHERE job_id=$3",
+                        &[&now, &SUBAGENT_CANCEL_UNCONFIRMED, &job_id],
+                    ), "fail expired subagent cancellation")?;
+                    upsert_job_outbox(&mut tx, &job_id, RUNTIME_JOB_TERMINAL_EVENT)?;
+                    continue;
+                }
                 let session_id = row.get::<_, Option<String>>(1);
                 let lease_owner = row.get::<_, Option<String>>(2);
                 let prior_status = job_status_from(&row.get::<_, String>(4))?;
@@ -500,6 +553,53 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
             Ok(expired.len())
         })
     }
+}
+
+fn subagent_job_cancellation_requested(
+    client: &mut impl GenericClient,
+    job_id: &str,
+) -> Result<bool, String> {
+    client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE event_id=$1 AND event_type=$2)",
+            &[
+                &subagent_cancel_request_id(job_id),
+                &SUBAGENT_CANCEL_REQUESTED_EVENT,
+            ],
+        )
+        .map(|row| row.get(0))
+        .map_err(|e| e.to_string())
+}
+
+pub(super) fn ensure_no_subagent_job_cancellation(
+    tx: &mut postgres::Transaction<'_>,
+    job_id: &str,
+) -> Result<(), String> {
+    // The request and terminal write serialize on the same row. Read the
+    // marker in a new statement after obtaining the row lock.
+    let subagent = tx
+        .query_opt(
+            "SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND job_kind=$2 FOR UPDATE",
+            &[&job_id, &SUBAGENT_RUN_JOB_KIND],
+        )
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if subagent && subagent_job_cancellation_requested(tx, job_id)? {
+        return Err("subagent Job cancellation was requested".into());
+    }
+    Ok(())
+}
+
+fn finish_requested_subagent_cancellation(
+    tx: &mut postgres::Transaction<'_>,
+    job_id: &str,
+    now: i64,
+) -> Result<(), String> {
+    updated(tx.execute(
+        "UPDATE runtime_jobs SET status='cancelled',updated_at_ms=$1,lease_owner=NULL,lease_expires_at_ms=NULL,heartbeat_at_ms=NULL,last_error=$2 WHERE job_id=$3",
+        &[&now, &SUBAGENT_CANCEL_REASON, &job_id],
+    ), "finish requested subagent cancellation")?;
+    upsert_job_outbox(tx, job_id, RUNTIME_JOB_TERMINAL_EVENT)
 }
 
 impl RuntimeJobOutboxPort for PostgresRuntimeStore {

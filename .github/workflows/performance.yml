@@ -9,9 +9,9 @@ on:
       - Cargo.toml
       - rust-toolchain.toml
       - packages/agent/Cargo.toml
-      - packages/desktop/src/services/Cargo.toml
-      - packages/desktop/src/services/message_log.rs
-      - packages/desktop/src/services/message_log/**
+      - packages/cli/runtime/Cargo.toml
+      - packages/cli/runtime/src/message_log.rs
+      - packages/cli/runtime/src/message_log/**
   push:
     branches:
       - main
@@ -21,9 +21,9 @@ on:
       - Cargo.toml
       - rust-toolchain.toml
       - packages/agent/Cargo.toml
-      - packages/desktop/src/services/Cargo.toml
-      - packages/desktop/src/services/message_log.rs
-      - packages/desktop/src/services/message_log/**
+      - packages/cli/runtime/Cargo.toml
+      - packages/cli/runtime/src/message_log.rs
+      - packages/cli/runtime/src/message_log/**
 
 permissions:
   contents: read
@@ -48,6 +48,6 @@ jobs:
 
       - name: Run observation storage growth gate
         run: >-
-          cargo test --locked -p centaeris-desktop-services
+          cargo test --locked -p centaeris-cli-runtime --lib
           message_log::observation_cas::tests::observation_manifest_growth_is_linear_with_early_changes_through_4095_observations
           -- --ignored --exact --nocapture --test-threads=1

@@ -1,6 +1,6 @@
 //! Immutable message revisions behind the bounded runtime working state.
 
-use postgres::GenericClient;
+use postgres::{GenericClient, Row};
 
 use centaeris_core::session::history::{
     SessionHistoryEntryV1, SessionHistoryRecordV1, SessionHistorySelectionV1,
@@ -103,19 +103,58 @@ pub(in crate::postgres_store) fn load_session_history_page(
         "SELECT h.position,h.message_id,h.current_record_id,e.entry_json FROM runtime.session_message_history_heads h JOIN runtime.session_message_history_entries e ON e.session_id=h.session_id AND e.record_id=h.current_record_id WHERE h.session_id=$1 AND NOT h.retired AND ($2::bigint IS NULL OR h.position<$2) AND (NOT $3::boolean OR h.is_original_user_request) ORDER BY h.position DESC LIMIT $4",
         &[&session_id, &before, &original_users, &limit],
     ).map_err(|e| format!("read Session history page failed: {e}"))?
-        .into_iter().map(|row| {
-            let position = u64::try_from(row.get::<_, i64>(0))
-                .map_err(|_| "Session history position is negative")?;
-            let entry: SessionHistoryEntryV1 = serde_json::from_str(&row.get::<_, String>(3))
-                .map_err(|e| e.to_string())?;
-            entry.validate()?;
-            if entry.message.message_id != row.get::<_, String>(1)
-                || entry.record_id != row.get::<_, String>(2)
-            {
-                return Err("Session history head body binding mismatch".into());
-            }
-            Ok(SessionHistoryRecordV1 { position, entry })
-        }).collect()
+        .into_iter().map(decode_history_record).collect()
+}
+
+/// Reads one task's original input and all subsequent model rounds before the
+/// next original input. A queued task without a persisted input has no history.
+pub(in crate::postgres_store) fn load_original_user_request_history(
+    client: &mut impl GenericClient,
+    session_id: &str,
+    message_id: &str,
+) -> Result<Vec<SessionHistoryRecordV1>, String> {
+    client
+        .query(
+            "WITH requested_input AS (
+                 SELECT position FROM runtime.session_message_history_heads
+                 WHERE session_id=$1 AND message_id=$2 AND is_original_user_request AND NOT retired
+             ),
+             bounds AS (
+                 SELECT requested_input.position AS first_position, (
+                     SELECT position FROM runtime.session_message_history_heads
+                     WHERE session_id=$1 AND position>requested_input.position AND is_original_user_request
+                     ORDER BY position LIMIT 1
+                 ) AS next_position
+                 FROM requested_input
+             )
+             SELECT h.position,h.message_id,h.current_record_id,e.entry_json
+             FROM bounds b
+             JOIN runtime.session_message_history_heads h
+               ON h.session_id=$1 AND h.position>=b.first_position
+                   AND (b.next_position IS NULL OR h.position<b.next_position) AND NOT h.retired
+             JOIN runtime.session_message_history_entries e
+               ON e.session_id=h.session_id AND e.record_id=h.current_record_id
+             ORDER BY h.position",
+            &[&session_id, &message_id],
+        )
+        .map_err(|error| format!("read original user request history failed: {error}"))?
+        .into_iter()
+        .map(decode_history_record)
+        .collect()
+}
+
+fn decode_history_record(row: Row) -> Result<SessionHistoryRecordV1, String> {
+    let position =
+        u64::try_from(row.get::<_, i64>(0)).map_err(|_| "Session history position is negative")?;
+    let entry: SessionHistoryEntryV1 =
+        serde_json::from_str(&row.get::<_, String>(3)).map_err(|error| error.to_string())?;
+    entry.validate()?;
+    if entry.message.message_id != row.get::<_, String>(1)
+        || entry.record_id != row.get::<_, String>(2)
+    {
+        return Err("Session history head body binding mismatch".into());
+    }
+    Ok(SessionHistoryRecordV1 { position, entry })
 }
 
 /// Explicit history consumers may hydrate the transcript; execution uses only

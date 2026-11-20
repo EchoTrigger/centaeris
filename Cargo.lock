@@ -339,35 +339,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "centaeris-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "centaeris-model-catalog",
- "futures",
- "hmac 0.12.1",
- "httpdate",
- "image",
- "libc",
- "pulldown-cmark",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tree-sitter",
- "tree-sitter-bash",
- "unicode-normalization",
- "url",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "centaeris-desktop-services"
+name = "centaeris-cli-runtime"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -398,6 +370,34 @@ dependencies = [
  "toml",
  "windows-sys 0.59.0",
  "zstd",
+]
+
+[[package]]
+name = "centaeris-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "centaeris-model-catalog",
+ "futures",
+ "hmac 0.12.1",
+ "httpdate",
+ "image",
+ "libc",
+ "pulldown-cmark",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "unicode-normalization",
+ "url",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -459,19 +459,21 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "centaeris-agent",
+ "centaeris-cli-runtime",
  "centaeris-core",
- "centaeris-desktop-services",
- "crossterm",
+ "crossterm 0.29.0",
  "getrandom 0.4.3",
  "image",
+ "pulldown-cmark",
  "ratatui",
  "ratatui-image",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "shell-words",
  "tokio",
+ "unicode-segmentation",
  "unicode-width 0.2.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -659,6 +661,21 @@ dependencies = [
  "mio",
  "parking_lot",
  "rustix 0.38.44",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm"
+version = "0.29.0"
+source = "git+https://github.com/crossterm-rs/crossterm?rev=954acceea63028799cd9657b266a5647418e55d3#954acceea63028799cd9657b266a5647418e55d3"
+dependencies = [
+ "bitflags 2.13.1",
+ "crossterm_winapi",
+ "mio",
+ "parking_lot",
+ "rustix 1.1.4",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -2363,7 +2380,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cassowary",
  "compact_str",
- "crossterm",
+ "crossterm 0.28.1",
  "indoc",
  "instability",
  "itertools",

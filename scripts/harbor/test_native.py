@@ -8,29 +8,26 @@ import shlex
 from pathlib import Path
 import tempfile
 import unittest
-from types import SimpleNamespace
 
-from runner import connect, run_trial, collect_provider_usage, cancel
+from runner import Rpc, initialize, run_trial, collect_provider_usage
 
 
 @unittest.skipUnless(os.name == "posix" and os.environ.get("CENTAERIS_RUNTIME_BINARY"),
                      "requires a built Linux Runtime")
 class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cancel_initializes_real_runtime_and_shuts_it_down_within_outer_budget(self):
+    async def test_stdio_initializes_and_shuts_down_within_outer_budget(self):
         with tempfile.TemporaryDirectory(prefix="cancel-") as directory:
             root = Path(directory)
             env = {**os.environ, "CENTAERIS_DESKTOP_DATA_DIR": directory}
             binary = os.environ["CENTAERIS_RUNTIME_BINARY"]
-            endpoint_process = await asyncio.create_subprocess_exec(
-                binary, "--runtime-server-endpoint", env=env, stdout=asyncio.subprocess.PIPE)
-            stdout, _ = await endpoint_process.communicate()
-            self.assertEqual(endpoint_process.returncode, 0)
-            (root / "endpoint.json").write_bytes(stdout)
             runtime = await asyncio.create_subprocess_exec(
-                binary, "--runtime-server", env=env,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                binary, "--mode", "rpc", env=env, stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            rpc = Rpc(runtime.stdout, runtime.stdin, io.StringIO())
             try:
-                await asyncio.wait_for(cancel(SimpleNamespace(logs=directory)), 35)
+                await initialize(rpc)
+                await rpc.call("runtime/shutdown", {}, timeout=12)
+                await rpc.close()
                 self.assertEqual(await asyncio.wait_for(runtime.wait(), 6), 0)
             finally:
                 if runtime.returncode is None:
@@ -149,21 +146,17 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                        "HTTPS_PROXY": proxy_url, "https_proxy": proxy_url,
                        "ALL_PROXY": proxy_url, "all_proxy": proxy_url}
                 binary = os.environ["CENTAERIS_RUNTIME_BINARY"]
-                endpoint_process = await asyncio.create_subprocess_exec(
-                    binary, "--runtime-server-endpoint", env=env,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                stdout, stderr = await endpoint_process.communicate()
-                self.assertEqual(endpoint_process.returncode, 0, stderr.decode())
-                endpoint = json.loads(stdout)["endpoint"]
                 with (root / "runtime.log").open("wb") as log:
                     runtime = await asyncio.create_subprocess_exec(
-                        binary, "--runtime-server", env=env, stdout=log, stderr=log)
+                        binary, "--mode", "rpc", env=env, stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE, stderr=log, limit=160 * 1024 * 1024)
                     rpc = None
                     try:
                         class BrokenMirror(io.StringIO):
                             def write(self, value):
                                 raise OSError(5, 'Injected host-mount write failure')
-                        rpc = await connect(endpoint, BrokenMirror())
+                        rpc = Rpc(runtime.stdout, runtime.stdin, BrokenMirror())
+                        await initialize(rpc)
                         port = server.sockets[0].getsockname()[1]
                         await rpc.call("agent_runtime_config_set", {"customModelProviders": [{
                             "providerId": "custom.benchmark-mock", "name": "Benchmark mock",

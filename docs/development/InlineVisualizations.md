@@ -1,15 +1,15 @@
 # Inline visualizations
 
 Initial implementation provides a Core catalog, strict validation and text
-projection, a shared json-render React adapter, and Desktop/TUI integration.
-The compact light reference has passed visual acceptance. The complete Desktop
+projection, a shared json-render React adapter, and CLI/Workspace integration.
+The compact light reference has passed visual acceptance. The complete product
 foundation integration is reviewed and verified before product acceptance; Web
 adoption follows that acceptance. See [Frontend foundations](FrontendFoundations.md).
 
 Assistant answers need a shared way to explain sequences, groups and state
-without losing information when a conversation moves between Desktop, Web and
+without losing information when a conversation moves between Web and
 TUI. The initial scope is compact cards, status rows, ordered flows and nested
-groups. Desktop uses json-render with a React registry prepared for Web adoption; TUI derives
+groups. Web uses json-render with a React registry; TUI derives
 readable text from the same component tree.
 
 ## Content format
@@ -98,7 +98,7 @@ acceptance aligned. Core retains pure Rust dependencies and no React runtime.
 
 A shared `packages/visuals` package owns the json-render wrapper,
 registry, theme styles, generated browser contract and block error boundary.
-Desktop in `packages/desktop/src/renderer` and Web in `packages/workspace/web`
+Web in `packages/workspace/web`
 consume that package.
 The shared Nova mapping, compact layout selection and theme styles live in
 `packages/ui`; both clients use that mapping rather than
@@ -183,7 +183,7 @@ that verifies browser artifacts verifies this reference. The skill is packaged
 and discovered alongside other built-in System Skills.
 
 The portable skill has one source at `system-skills/inline-visualizations/`.
-Desktop and TUI bundle that directory through their existing System Skill bundle.
+The TUI bundles that directory through their existing System Skill bundle.
 The Hosted Runtime and Executor Dockerfiles copy the same directory to
 `/opt/centaeris/system-skills/inline-visualizations`, alongside the Hosted
 skills from `skills/system/`. The Runtime's read-only filesystem route serves
@@ -199,7 +199,7 @@ answer surface's Markdown GFM, Mermaid fenced code, KaTeX math and
 requests discoverable; the body directs the model to emit inline syntax directly
 and use diagram-rendering tools when an exported file is requested. The portable
 skill retains its cross-client content contract; Web-specific formats do not
-enter the Core Harness or the Desktop/TUI skill catalog.
+enter the Core Harness or the CLI skill catalog.
 
 Updating the Runtime image makes the guidance discoverable and readable through
 the `read` tool in existing sessions, including environments with an older pinned
@@ -209,7 +209,7 @@ carry the same System Skills for direct shell access.
 Discovery and file reads remain owned by the established skill mechanism; the
 browser does not inject model instructions or change Agent execution semantics.
 
-The model emits one portable format for every client. Desktop and Web use the
+The model emits one portable format for every client. Web uses the
 shared Nova mapping, and TUI projects the same text and relationships.
 Skill content defines semantic structure; colors, spacing and
 platform interaction remain client responsibilities. A malformed block stays
@@ -234,7 +234,7 @@ preservation, following [Testing](Testing.md).
   validators must agree on the fixtures, including graph rules.
 - Observe reload, restart, pagination, referenced-content loading and reconnect
   recovery. Confirm original source, block identity and ordering survive.
-- Exercise actual Desktop and Web views in light and dark themes with long CJK
+- Exercise actual Web views in light and dark themes with long CJK
   labels and narrow available space. Confirm readable wrapping, containment,
   text selection, copying and assistive-technology reading order. Status meaning
   must remain available without color or an icon.
@@ -250,29 +250,6 @@ Implementation commits report their actual checks and results. Automated
 functional checks cover validation, ordered text projection, interruption,
 reference loading and renderer-failure isolation. Manual product interaction,
 appearance and performance acceptance remain required before merge.
-
-## Manual preview
-
-Run `pnpm --filter @centaeris/electron-host run preview:visualizations` and open
-`http://127.0.0.1:5179/visualization-preview.html`. This development page renders
-the two reference examples and four additional scenarios through the actual
-shared adapter: Session lifecycle, resource control, delivery, recovery, task
-ownership and long text. The selected visual direction follows the supplied
-references with a narrower content column and compact spacing. Run labels sit
-beside their prose, with a single separator between Runs. The resource chain is
-centered on one vertical axis; its nested regions represent actual containment.
-Sibling tasks remain stacked vertically. Other sequences read as titled
-paragraphs with local status icons. The light theme follows the supplied white
-reference with a pale blue resource region and a neutral inner container.
-Visual review covers completed content. Choose one example, the containment-only
-filter, or all six; switch light/dark and narrow layout. Expand the text
-projection to compare reading order. The page uses the production Desktop
-Markdown renderer, Nova component mapping and visualization styles. Only the
-example chooser and inspection controls are specific to this development page;
-the page itself is not a production entry.
-
-The preview and automated functional checks do not establish visual acceptance.
-The maintainer accepts appearance and product interaction manually before merge.
 
 ## References
 

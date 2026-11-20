@@ -29,8 +29,24 @@ use crate::session::store::job::JobStoreError;
 use crate::session::store::{AsyncJobStorePort, UpsertExternalContextLinkAndCompleteJobRequest};
 use crate::tool::layer::ToolLayer;
 
+mod task_control;
+pub(crate) use task_control::delegated_agent_retired;
+pub use task_control::{
+    list_session_subagent_tasks, request_subagent_task_cancellation, SessionSubagentTasks,
+    SubagentTask, SubagentTaskScope,
+};
+
 pub const SUBAGENT_RUN_JOB_KIND: &str = runtime_job_keys::SUBAGENT_RUN;
 const SUBAGENT_AGENT_RUN_IDENTITY_SCHEMA: &str = "subagent_agent_run_identity_v1";
+
+pub(crate) fn delegation_id_suffix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value.strip_prefix(prefix).filter(|id| {
+        id.len() == 16
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -455,7 +471,17 @@ pub fn subagent_work_packet_runtime_binding(
     envelope: &SubagentWorkPacketEnvelope,
     job: &RuntimeJobRecord,
 ) -> Result<SubagentWorkPacketRuntimeBindingV1, String> {
-    let packet = decode_work_packet_for_resource_claim(&envelope.content_json)?;
+    let mut packet = decode_work_packet_for_resource_claim(&envelope.content_json)?;
+    for contract in &mut packet.delegated_tool_contracts {
+        let migrated = crate::tool::migrate_recorded_tool_digest(
+            &contract.name,
+            &contract.provider_id,
+            &contract.contract_digest,
+        );
+        if migrated != contract.contract_digest {
+            contract.contract_digest = migrated.to_owned();
+        }
+    }
     let child_session_id = required_non_empty(
         "workPacket.runContext.branchId",
         packet.run_context.branch_id.as_str(),
@@ -1036,6 +1062,8 @@ where
     R: AsyncSubagentWorkerRunner,
     O: AsyncSubagentLifecycleObserver,
 {
+    use crate::session::reliability::SUBAGENT_CANCEL_REASON;
+
     let lease_owner = subagent_job_lease_owner(&claimed.job)?.to_string();
     if let Err(error) = store
         .start_runtime_job(StartRuntimeJobRequest {
@@ -1150,14 +1178,6 @@ where
             .await?;
         return Ok(result);
     }
-    observer
-        .on_subagent_start(build_subagent_start_hook_event(
-            &running_job,
-            &running_lifecycle,
-            &work_packet,
-            req.started_at_ms,
-        )?)
-        .await?;
     let lease_ms = claimed
         .job
         .lease_expires_at_ms
@@ -1175,40 +1195,57 @@ where
             )
         })?;
     let agent_run_started = Instant::now();
-    let mut heartbeat = tokio::time::interval(Duration::from_millis((lease_ms / 3).max(1)));
-    heartbeat.tick().await;
-    let mut run_future = runner.run_async(SubagentWorkerRunRequest {
-        job: running_job.clone(),
-        lifecycle: running_lifecycle.clone(),
-        work_packet: work_packet.clone(),
-    });
-    let outcome = loop {
-        tokio::select! {
-            outcome = &mut run_future => break outcome,
-            _ = heartbeat.tick() => {
-                let renewal = store.renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
-                    job_id: running_job.job_id.clone(),
-                    lease_owner: lease_owner.clone(),
-                    heartbeat_at_ms: req.started_at_ms.saturating_add(
-                        i64::try_from(agent_run_started.elapsed().as_millis()).unwrap_or(i64::MAX),
-                    ),
-                    lease_ms,
-                }).await;
-                if let Err(error) = renewal {
-                    settle_before_reconciliation(store, &error).await?;
-                    if cancelled_subagent_event_if_requested_async(
-                        store,
-                        running_job.job_id.as_str(),
-                        req.started_at_ms,
-                    )
-                    .await?
-                    .is_some()
-                    {
-                        break SubagentWorkerRunOutcome::Cancelled {
-                            reason: "subagent_cancelled".to_string(),
-                        };
+    let outcome = if store
+        .subagent_job_cancellation_requested(&running_job.job_id)
+        .await?
+    {
+        SubagentWorkerRunOutcome::Cancelled {
+            reason: SUBAGENT_CANCEL_REASON.into(),
+        }
+    } else {
+        observer
+            .on_subagent_start(build_subagent_start_hook_event(
+                &running_job,
+                &running_lifecycle,
+                &work_packet,
+                req.started_at_ms,
+            )?)
+            .await?;
+        let mut heartbeat = tokio::time::interval(Duration::from_millis((lease_ms / 3).max(1)));
+        heartbeat.tick().await;
+        let mut run_future = runner.run_async(SubagentWorkerRunRequest {
+            job: running_job.clone(),
+            lifecycle: running_lifecycle.clone(),
+            work_packet: work_packet.clone(),
+        });
+        loop {
+            tokio::select! {
+                outcome = &mut run_future => break outcome,
+                _ = heartbeat.tick() => {
+                    let renewal = store.renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
+                        job_id: running_job.job_id.clone(),
+                        lease_owner: lease_owner.clone(),
+                        heartbeat_at_ms: req.started_at_ms.saturating_add(
+                            i64::try_from(agent_run_started.elapsed().as_millis()).unwrap_or(i64::MAX),
+                        ),
+                        lease_ms,
+                    }).await;
+                    if let Err(error) = renewal {
+                        settle_before_reconciliation(store, &error).await?;
+                        if cancelled_subagent_event_if_requested_async(
+                            store,
+                            running_job.job_id.as_str(),
+                            req.started_at_ms,
+                        )
+                        .await?
+                        .is_some()
+                        {
+                            break SubagentWorkerRunOutcome::Cancelled {
+                                reason: "subagent_cancelled".to_string(),
+                            };
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
                 }
             }
         }
@@ -1242,90 +1279,132 @@ where
         return Ok(result);
     }
 
-    let final_event = match outcome {
+    let outcome = match outcome {
         SubagentWorkerRunOutcome::StorageError { error } => return Err(error),
-        SubagentWorkerRunOutcome::Succeeded { summary, .. } => {
-            let result_ref =
-                runtime_external_context_keys::subagent_result_ref(running_job.job_id.as_str());
-            let packet = decode_work_packet_for_resource_claim(&work_packet.content_json)?;
-            store
-                .upsert_external_context_link_and_complete_job(
-                    UpsertExternalContextLinkAndCompleteJobRequest {
-                        object: Some(ExternalContextObject {
-                            schema_version: EXTERNAL_CONTEXT_SCHEMA_VERSION.to_string(),
-                            object_id: result_ref.clone(),
-                            object_kind: "subagent_result".to_string(),
-                            source_provider_id: "centaeris.core".to_string(),
-                            source_tool_name: "agent".to_string(),
-                            title: packet
-                                .task_brief
-                                .output_hint
-                                .unwrap_or_else(|| "Agent result".to_string()),
-                            content: summary,
-                            metadata: serde_json::json!({
-                                "schema": "subagent_result_v1",
-                                "runtimeJobId": running_job.job_id,
-                                "parentSessionId": running_lifecycle.session_id,
-                                "parentTurnId": running_lifecycle.parent_turn_id,
-                                "subagentId": running_lifecycle.subagent_id,
-                                "childSessionId": packet.run_context.branch_id,
+        outcome => outcome,
+    };
+    let transition: Result<_, JobStoreError> = async {
+        match outcome {
+            SubagentWorkerRunOutcome::StorageError { error } => Err(error),
+            SubagentWorkerRunOutcome::Succeeded { summary, .. } => {
+                let result_ref =
+                    runtime_external_context_keys::subagent_result_ref(running_job.job_id.as_str());
+                let packet = decode_work_packet_for_resource_claim(&work_packet.content_json)?;
+                store
+                    .upsert_external_context_link_and_complete_job(
+                        UpsertExternalContextLinkAndCompleteJobRequest {
+                            object: Some(ExternalContextObject {
+                                schema_version: EXTERNAL_CONTEXT_SCHEMA_VERSION.to_string(),
+                                object_id: result_ref.clone(),
+                                object_kind: "subagent_result".to_string(),
+                                source_provider_id: "centaeris.core".to_string(),
+                                source_tool_name: "agent".to_string(),
+                                title: packet
+                                    .task_brief
+                                    .output_hint
+                                    .unwrap_or_else(|| "Agent result".to_string()),
+                                content: summary,
+                                metadata: serde_json::json!({
+                                    "schema": "subagent_result_v1",
+                                    "runtimeJobId": running_job.job_id,
+                                    "parentSessionId": running_lifecycle.session_id,
+                                    "parentTurnId": running_lifecycle.parent_turn_id,
+                                    "subagentId": running_lifecycle.subagent_id,
+                                    "childSessionId": packet.run_context.branch_id,
+                                }),
+                                updated_at_ms: finished_at_ms,
                             }),
-                            updated_at_ms: finished_at_ms,
-                        }),
-                        link: None,
-                        complete_job: CompleteRuntimeJobRequest {
-                            job_id: running_job.job_id.clone(),
-                            lease_owner: lease_owner.clone(),
-                            output_refs: vec![result_ref],
-                            completed_at_ms: finished_at_ms,
+                            link: None,
+                            complete_job: CompleteRuntimeJobRequest {
+                                job_id: running_job.job_id.clone(),
+                                lease_owner: lease_owner.clone(),
+                                output_refs: vec![result_ref],
+                                completed_at_ms: finished_at_ms,
+                            },
                         },
+                    )
+                    .await?;
+                scheduler_event_from_job(
+                    &store
+                        .get_runtime_job(running_job.job_id.as_str())
+                        .await?
+                        .ok_or_else(|| {
+                            JobStoreError::committed(
+                                crate::session::store::job::JobStoreOperation::Complete,
+                                format!(
+                                    "completed subagent runtime job disappeared: {}",
+                                    running_job.job_id
+                                ),
+                            )
+                        })?,
+                    SubagentSchedulerEventKind::Succeeded,
+                    SubagentLifecycleStatus::Succeeded,
+                    Some(lease_owner.clone()),
+                    "Subagent job completed.",
+                    finished_at_ms,
+                )
+                .map_err(Into::into)
+            }
+            SubagentWorkerRunOutcome::Failed { error, retry } => {
+                fail_subagent_run_job_async(
+                    store,
+                    FailSubagentRunJobRequest {
+                        job_id: running_job.job_id.clone(),
+                        lease_owner: lease_owner.clone(),
+                        failed_at_ms: finished_at_ms,
+                        last_error: error,
+                        retry,
                     },
                 )
-                .await?;
-            scheduler_event_from_job(
-                &store
-                    .get_runtime_job(running_job.job_id.as_str())
-                    .await?
-                    .ok_or_else(|| {
-                        JobStoreError::committed(
-                            crate::session::store::job::JobStoreOperation::Complete,
-                            format!(
-                                "completed subagent runtime job disappeared: {}",
-                                running_job.job_id
-                            ),
-                        )
-                    })?,
-                SubagentSchedulerEventKind::Succeeded,
-                SubagentLifecycleStatus::Succeeded,
-                Some(lease_owner),
-                "Subagent job completed.",
+                .await
+            }
+            SubagentWorkerRunOutcome::Cancelled { reason } => {
+                cancel_subagent_run_job_with_lease_async(
+                    store,
+                    CancelSubagentRunJobRequest {
+                        job_id: running_job.job_id.clone(),
+                        reason,
+                        cancelled_at_ms: finished_at_ms,
+                    },
+                    Some(lease_owner.clone()),
+                )
+                .await
+            }
+        }
+    }
+    .await;
+    let final_event = match transition {
+        Ok(event) => event,
+        Err(error) => {
+            // A request can beat a success/failure commit after the runner
+            // exits. The store fences that write; finalize with the live claim.
+            settle_before_reconciliation(store, &error).await?;
+            if !store
+                .subagent_job_cancellation_requested(&running_job.job_id)
+                .await?
+            {
+                return Err(error);
+            }
+            if let Some((_, event)) = cancelled_subagent_event_if_requested_async(
+                store,
+                &running_job.job_id,
                 finished_at_ms,
-            )?
-        }
-        SubagentWorkerRunOutcome::Failed { error, retry } => {
-            fail_subagent_run_job_async(
-                store,
-                FailSubagentRunJobRequest {
-                    job_id: running_job.job_id.clone(),
-                    lease_owner,
-                    failed_at_ms: finished_at_ms,
-                    last_error: error,
-                    retry,
-                },
             )
             .await?
-        }
-        SubagentWorkerRunOutcome::Cancelled { reason } => {
-            cancel_subagent_run_job_with_lease_async(
-                store,
-                CancelSubagentRunJobRequest {
-                    job_id: running_job.job_id.clone(),
-                    reason,
-                    cancelled_at_ms: finished_at_ms,
-                },
-                Some(lease_owner),
-            )
-            .await?
+            {
+                event
+            } else {
+                cancel_subagent_run_job_with_lease_async(
+                    store,
+                    CancelSubagentRunJobRequest {
+                        job_id: running_job.job_id.clone(),
+                        reason: SUBAGENT_CANCEL_REASON.into(),
+                        cancelled_at_ms: finished_at_ms,
+                    },
+                    Some(lease_owner),
+                )
+                .await?
+            }
         }
     };
     let final_operation = match &final_event.kind {
@@ -1812,6 +1891,7 @@ async fn next_subagent_worker_batch_async<S: AsyncJobStorePort + ?Sized>(
 ) -> Result<Vec<(usize, ClaimedSubagentRunJob)>, JobStoreError> {
     let mut batch = Vec::with_capacity(max_parallelism.max(1));
     let mut active_claims = Vec::with_capacity(max_parallelism.max(1));
+    let mut child_sessions = std::collections::HashSet::new();
     let scan_len = pending.len();
     for _ in 0..scan_len {
         let Some(item) = pending.pop_front() else {
@@ -1821,8 +1901,14 @@ async fn next_subagent_worker_batch_async<S: AsyncJobStorePort + ?Sized>(
             pending.push_back(item);
             continue;
         }
-        let resource_claim = subagent_resource_claim_for_job_async(store, &item.1.job).await?;
-        if subagent_resource_claim_can_join(&active_claims, &resource_claim) {
+        let job = &item.1.job;
+        let packet = load_subagent_work_packet_for_resource_claim(store, job).await?;
+        let resource_claim = subagent_resource_claim_from_packet(job, &packet);
+        // Reserve the child's queue position even if a resource conflict
+        // postpones its first task. A later task may require fewer resources.
+        if child_sessions.insert(packet.run_context.branch_id)
+            && subagent_resource_claim_can_join(&active_claims, &resource_claim)
+        {
             active_claims.push(resource_claim);
             batch.push(item);
         } else {
@@ -1861,6 +1947,14 @@ pub async fn subagent_resource_claim_for_job_async<S: AsyncJobStorePort + ?Sized
     store: &S,
     job: &RuntimeJobRecord,
 ) -> Result<SubagentResourceClaim, JobStoreError> {
+    let packet = load_subagent_work_packet_for_resource_claim(store, job).await?;
+    Ok(subagent_resource_claim_from_packet(job, &packet))
+}
+
+async fn load_subagent_work_packet_for_resource_claim<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
+    job: &RuntimeJobRecord,
+) -> Result<SubAgentWorkPacket, JobStoreError> {
     let envelope = load_subagent_work_packet_async(store, job)
         .await
         .map_err(|error| {
@@ -1870,14 +1964,13 @@ pub async fn subagent_resource_claim_for_job_async<S: AsyncJobStorePort + ?Sized
             );
             error.with_message(message)
         })?;
-    let packet =
-        decode_work_packet_for_resource_claim(&envelope.content_json).map_err(|error| {
-            format!(
-                "decode subagent resource claim failed: job_id={} ref_id={} error={error}",
-                job.job_id, envelope.ref_id
-            )
-        })?;
-    Ok(subagent_resource_claim_from_packet(job, &packet))
+    decode_work_packet_for_resource_claim(&envelope.content_json).map_err(|error| {
+        format!(
+            "decode subagent resource claim failed: job_id={} ref_id={} error={error}",
+            job.job_id, envelope.ref_id
+        )
+        .into()
+    })
 }
 
 fn decode_work_packet_for_resource_claim(value: &Value) -> Result<SubAgentWorkPacket, String> {
@@ -2181,7 +2274,7 @@ fn required_subagent_job_field<'a>(
         })
 }
 
-fn subagent_id_from_job(job: &RuntimeJobRecord) -> Result<String, String> {
+pub(super) fn subagent_id_from_job(job: &RuntimeJobRecord) -> Result<String, String> {
     if job.job_kind != SUBAGENT_RUN_JOB_KIND {
         return Err(format!(
             "subagent runtime job has invalid job kind: job_id={} job_kind={}",
@@ -2417,6 +2510,16 @@ mod tests {
                 .parent_turn_id,
             "turn-1:2"
         );
+        envelope.content_json["workPacket"]["delegatedToolContracts"][0]["contractDigest"] =
+            "sha256:bffd554ad13c0e892e14cbc160f04ba5ab6c863221f8a1cbcd25f2476c37b0ed".into();
+        let migrated = subagent_work_packet_runtime_binding(&envelope, &job).unwrap();
+        migrated.validate_tool_contracts(&ToolLayer::new()).unwrap();
+        assert_ne!(
+            migrated.delegated_tool_contracts[0].contract_digest,
+            envelope.content_json["workPacket"]["delegatedToolContracts"][0]["contractDigest"]
+                .as_str()
+                .unwrap()
+        );
         for inherited_cancellation in [true, false] {
             envelope.content_json["workPacket"]["run_context"]["cancelOnParentCancel"] =
                 inherited_cancellation.into();
@@ -2573,6 +2676,17 @@ mod tests {
 
         fn cancel_runtime_job(&self, req: CancelRuntimeJobRequest) -> Result<(), String> {
             Err(format!("forced cancel failure: {}", req.job_id))
+        }
+
+        fn request_subagent_job_cancellation(
+            &self,
+            _req: crate::session::reliability::RequestSubagentJobCancellation,
+        ) -> Result<crate::session::reliability::SubagentJobCancellationReceipt, String> {
+            Err("unexpected request_subagent_job_cancellation".into())
+        }
+
+        fn subagent_job_cancellation_requested(&self, _job_id: &str) -> Result<bool, String> {
+            Err("unexpected subagent_job_cancellation_requested".into())
         }
 
         fn reclaim_expired_runtime_job_leases(

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-pub(crate) const HELP: &str = "cet [--mode tui] [--workspace <directory>]\ncet --mode print|json [--session <id> | --cwd <directory>] <prompt>\ncet --mode rpc\ncet --help | --version\n\nPrint waits for the durable Run outcome and writes its final assistant text.\nJSON writes acceptance, canonical session/update notifications and the durable outcome.\nRPC forwards the existing Agent JSON-RPC protocol over standard input/output.\nUse -- before prompt text that begins with a dash.";
+pub(crate) const HELP: &str = "cet [--mode tui] [--workspace <directory>]\ncet --mode print|json [--session <id> | --cwd <directory>] <prompt>\ncet --mode rpc\ncet --help | --version\n\nPrint waits for the durable Run outcome and writes its final assistant text.\nJSON writes acceptance, canonical session/update notifications and the durable outcome.\nRPC serves the Agent JSON-RPC protocol over standard input/output.\nUse -- before prompt text that begins with a dash.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Invocation {

@@ -5,6 +5,25 @@ fn cli() -> Command {
 }
 
 #[test]
+fn retired_background_commands_are_rejected_before_runtime_start() {
+    for args in [
+        &["schedule", "list"][..],
+        &["schedule", "service", "start"][..],
+        &["ssh", "exec", "fixture-host", "echo fixture"][..],
+    ] {
+        let output = cli().args(args).output().expect("run retired command");
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("does not accept prompt options")
+                || stderr.contains("cet ssh connect <host>"),
+            "{stderr}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
 fn help_and_version_work_without_starting_a_runtime() {
     let absent_runtime = std::env::temp_dir().join(format!(
         "cet-missing-runtime-{}-{}",

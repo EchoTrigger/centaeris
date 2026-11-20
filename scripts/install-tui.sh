@@ -168,7 +168,7 @@ if ! grep -q '"schema": "centaeris-package.v1"' "$manifest"; then
   echo "Unsupported package manifest schema." >&2
   exit 1
 fi
-path_list="$(printf '%s\n' cet centaeris-runtime)"
+path_list=cet
 ok=1
 while IFS= read -r path; do
   file_size="$(wc -c < "$install_dir/$path" | tr -d ' ')"
@@ -198,9 +198,6 @@ ln -s "$install_dir" "$CURRENT_LINK"
 
 mkdir -p "$BIN_DIR"
 cp "$CURRENT_LINK/cet" "$BIN_PATH"
-if [ -f "$CURRENT_LINK/centaeris-runtime" ]; then
-  cp "$CURRENT_LINK/centaeris-runtime" "$BIN_DIR/centaeris-runtime"
-fi
 step "Installed: $BIN_PATH"
 step "Current version: $version"
 step "Run: $BIN_PATH"

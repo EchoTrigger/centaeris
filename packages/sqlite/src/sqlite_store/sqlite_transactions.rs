@@ -248,6 +248,21 @@ pub(super) fn upsert_external_context_and_schedule_job_conn(
         "commit upsert_external_context_and_schedule_job transaction failed",
         observe,
         |tx| {
+            if req.object.source_provider_id == "centaeris.core"
+                && req.object.source_tool_name == "followup_task"
+            {
+                let origin_ref = req.object.metadata["originWorkPacketRef"]
+                    .as_str()
+                    .ok_or("followup_task origin WorkPacket is missing")?;
+                let origin = super::sqlite_external_context::load_external_context_object_conn(
+                    tx, origin_ref,
+                )
+                .map_err(|error| error.to_string())?
+                .ok_or("followup_task origin WorkPacket is missing")?;
+                if !origin.metadata["agentRetiredAtMs"].is_null() {
+                    return Err("agent_id has been retired by Session deletion".to_string());
+                }
+            }
             super::sqlite_external_context::upsert_external_context_object_conn(tx, &req.object)?;
             let inserted = super::sqlite_reliability::insert_runtime_job(tx, &req.job)?;
             let result = if inserted {

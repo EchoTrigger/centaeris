@@ -237,7 +237,11 @@ Server startup after an abnormal exit conservatively marks unfinished Runs as
 
 `session_meta.sessionKind` is `main` or `subagent`. A main Session has null
 `parentSessionId` and `runtimeJobId` and a non-null `sortOrder`. A subagent has
-non-empty parent and job identities and a null `sortOrder`.
+non-empty parent and origin Job identities and a null `sortOrder`.
+`session_meta.runtimeJobId` identifies the first task that created the child
+Session. Later tasks keep that child Session and have their own AgentRun and
+Job identities. Subagent lifecycle events carry the individual Job identity
+in `payload.runtimeJobId`.
 
 A message attachment has exact fields `inputRef`, `displayName`, `contentType`,
 and optional `placeholder`. A placeholder is valid only for an `image/*`

@@ -1,6 +1,6 @@
 # Local OpenSSH and schedules
 
-These are local Host/application features shared by Desktop and TUI. Core's
+These are local Host/application features provided by the CLI Runtime. Core's
 runtime contracts, turn loop and execution semantics are unchanged. Hosted
 Workspace is outside this implementation.
 
@@ -11,29 +11,16 @@ credentials agent and known-host policy. No credentials are copied into Centaeri
 
 ```text
 cet ssh connect dev
-cet ssh exec dev "uname -a"
 ```
 
 `connect` inherits the native terminal, before TUI raw mode starts. OpenSSH handles
 interactive login and host-key prompts. It does not open an embedded terminal.
-`exec` creates a local Session in the current directory and starts a managed
-background SSH process, printing its Session and process identities as JSON.
-Open that Session in Desktop Task or TUI to inspect output and stop the process.
 
-Inside an existing TUI Session:
-
-```text
-/ssh dev uname -a
-/process list
-/process output <processSessionId>
-/process stop <processSessionId>
-```
-
-Desktop and TUI Agents receive `ssh_start` with `destination`, `command` and
+Local Agents receive `ssh_start` with `destination`, `command` and
 optional `timeout_ms` (zero/omitted means no deadline) and optional
 `connect_timeout_seconds`; completion and output use the existing `process_list`,
 `process_read` and `process_stop` tools. Agent starts receive automatic completion
-notifications; direct user CLI/TUI starts remain user-managed processes.
+notifications.
 
 The Host method `ssh_start` takes `sessionId`, `serviceInstanceId`, `operationId`,
 `destination`, `command`, and `timeoutMs` inside the usual `request` envelope.
@@ -57,7 +44,7 @@ browser or reconnectable remote process service.
 ## Persistent local schedules
 
 The primary creation and management surface is conversation with the Agent in
-Desktop or TUI. For example: "Every day at 09:00 UTC, review this workspace using
+the CLI. For example: "Every day at 09:00 UTC, review this workspace using
 the current model and tell me what needs attention." The Agent creates the plan;
 the user does not need to write a specification file or enter CLI commands.
 
@@ -70,7 +57,6 @@ clarified rather than guessed. Service enablement affects all enabled plans;
 the Agent should inspect existing plans when the service was stopped.
 
 Listing, changing, pausing and deleting plans are also conversational actions.
-The CLI below is a development/diagnostic surface, not a required user workflow.
 
 Plans, immutable occurrence specifications and history are stored atomically in
 the active profile's `runtime/schedules.sqlite3` (private schema version 1).
@@ -79,26 +65,12 @@ The previous `schedules.json` is imported once in a transaction, with an exact
 is stored there. It is a Host-owned store, not an automatically executed project
 file. Unknown schema versions and fields fail loudly.
 
-```text
-cet schedule create "C:/work/daily-review.json" review-plan-1
-cet schedule list [cursor]
-cet schedule service start
-cet schedule history <scheduleId> [cursor]
-cet schedule run <scheduleId> manual-review-1
-cet schedule pause <scheduleId>
-cet schedule resume <scheduleId>
-cet schedule update <scheduleId> <revision> "C:/work/daily-review.json"
-cet schedule delete <scheduleId>
-cet schedule service stop
-```
-
-In the TUI, replace `cet schedule` with `/schedule`; quote file paths containing
-spaces. Results use a scrollable panel. `operationId` arguments for create and
+`operationId` arguments for create and
 manual run are caller-selected stable identities: repeat the same identity only
 to reconcile that same operation. Updates require the revision returned by list
 or create. A conflict requires reading the plan again.
 
-A UTF-8 specification file has this shape (substitute a configured provider,
+The schedule specification has this shape (substitute a configured provider,
 model, supported effort and existing absolute directory):
 
 ```json
@@ -129,20 +101,16 @@ numbering, and an explicit IANA time zone. Presets can use `0 * * * *` (hourly),
 `0 9 * * *` (daily), or `0 9 * * 1` (Monday). Cron parsing and time-zone behavior
 come from `croner` and `chrono-tz`; the Host does not implement another parser.
 
-Desktop and TUI Agents use `schedule_manage` with an `action`:
+Local Agents use `schedule_manage` with an `action`:
 `context`, `list`, `create`, `update`, `pause`, `resume`, `delete`, `history`, `run`, or
 `service`. Tool parameters are `operation_id`, `schedule_id`,
 `expected_revision`, and `spec.model.provider_id` / `thinking_mode`.
 The corresponding Host method is also `schedule_manage`, with camelCase fields.
 `context` is Agent-only and bound to its Session; it is not a Host method action.
-Desktop currently uses these Agent tools and the Host bridge; this slice adds
-no separate scheduling form or remote-connection screen.
-
 ## Execution and recovery
 
 - Scheduling starts disabled. `service start` enables persistent background
-  scheduling. Enabled plans keep the shared Runtime alive after client windows
-  close. `service stop` disables automatic future triggers, without cancelling
+  scheduling. Enabled plans run while the owning CLI is open. `service stop` disables automatic future triggers, without cancelling
   admitted work. Manual `run` works even with automatic scheduling off.
 - The machine must be awake and the Runtime must be running. There is no OS
   startup registration, wake timer or cloud execution. After a full service exit
@@ -168,23 +136,9 @@ no separate scheduling form or remote-connection screen.
   indexed due plans and active occurrences only. Completed history and deleted
   plan identities stay on disk for history and deduplication. `list` and `history`
   return up to 50 rows by default (maximum 100), with `nextCursor`; pass that as
-  `cursor` to continue in the same scope. History is newest first. Desktop offers
-  Load more; Agent and diagnostic CLI callers can request subsequent pages.
+  `cursor` to continue in the same scope. History is newest first. Agents can request subsequent pages.
 
 ## Validation
 
-Run the normal Rust/Node source gates and:
-
-```text
-cargo build --locked -p centaeris-desktop-services --bin centaeris-runtime -p centaeris-tui --bin cet
-node scripts/test-host-automation.mjs
-node scripts/test-agent-schedules.mjs
-node scripts/test-process-agent.mjs
-node scripts/test-process-sessions.mjs
-```
-
-Automation acceptance uses an isolated profile, a loopback model server and an
-SSH executable fixture. It verifies argument forwarding and process integration,
-not authentication against a real remote SSH server. Manual real-host acceptance
-should cover a configured alias, native authentication, remote failure and
-disconnection without automatic command replay.
+Run the normal Rust source gate. Focused checks live in the CLI Runtime's
+`schedules`, `process_sessions` and `process_agent` modules.

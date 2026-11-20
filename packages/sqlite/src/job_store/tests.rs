@@ -50,6 +50,219 @@ async fn claim(jobs: &SqliteJobStore, id: &str, at: i64) -> RuntimeJobRecord {
     .unwrap()
 }
 
+async fn start_subagent_job(jobs: &SqliteJobStore, id: &str) -> String {
+    let job = jobs
+        .upsert_external_context_and_schedule_job(creation(id))
+        .await
+        .unwrap()
+        .job;
+    let lease_owner = claim(jobs, &job.job_id, 10).await.lease_owner.unwrap();
+    jobs.start_runtime_job(StartRuntimeJobRequest {
+        job_id: job.job_id.clone(),
+        lease_owner,
+        started_at_ms: 11,
+    })
+    .await
+    .unwrap();
+    job.job_id
+}
+
+fn subagent_cancellation_request(id: &str) -> RequestSubagentJobCancellation {
+    RequestSubagentJobCancellation {
+        job_id: id.to_owned(),
+        session_id: "parent".into(),
+        requested_at_ms: 20,
+    }
+}
+
+#[tokio::test]
+async fn subagent_cancellation_preserves_result_when_completion_wins() {
+    let directory = tempfile::tempdir().unwrap();
+    let jobs = SqliteJobStore::open(directory.path().join("runtime.db"), 2)
+        .await
+        .unwrap();
+    let job_id = start_subagent_job(&jobs, "completed").await;
+    let running = jobs.get_runtime_job(&job_id).await.unwrap().unwrap();
+    assert_eq!(running.status, RuntimeJobStatus::Running);
+    let cancel_request = subagent_cancellation_request(&job_id);
+    let output_refs = vec!["result:completed".to_owned()];
+    jobs.complete_runtime_job(CompleteRuntimeJobRequest {
+        job_id: job_id.clone(),
+        lease_owner: running.lease_owner.unwrap(),
+        output_refs: output_refs.clone(),
+        completed_at_ms: 19,
+    })
+    .await
+    .unwrap();
+
+    let receipt = jobs
+        .request_subagent_job_cancellation(cancel_request)
+        .await
+        .unwrap();
+    assert!(!receipt.accepted);
+    assert_eq!(receipt.status, RuntimeJobStatus::Succeeded);
+    assert_eq!(
+        jobs.get_runtime_job(&job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .output_refs,
+        output_refs
+    );
+    assert!(!jobs
+        .subagent_job_cancellation_requested(&job_id)
+        .await
+        .unwrap());
+    jobs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn subagent_cancellation_fences_results_but_preserves_lease_until_confirmation() {
+    let directory = tempfile::tempdir().unwrap();
+    let jobs = SqliteJobStore::open(directory.path().join("runtime.db"), 2)
+        .await
+        .unwrap();
+    let job_id = start_subagent_job(&jobs, "running").await;
+    let before = jobs.get_runtime_job(&job_id).await.unwrap().unwrap();
+    let lease_owner = before.lease_owner.clone().unwrap();
+    let mut foreign = subagent_cancellation_request(&job_id);
+    foreign.session_id = "another-session".into();
+    assert!(jobs
+        .request_subagent_job_cancellation(foreign)
+        .await
+        .is_err());
+    let receipt = jobs
+        .request_subagent_job_cancellation(subagent_cancellation_request(&job_id))
+        .await
+        .unwrap();
+    assert!(receipt.accepted);
+    assert_eq!(receipt.status, RuntimeJobStatus::Running);
+    let replay = jobs
+        .request_subagent_job_cancellation(subagent_cancellation_request(&job_id))
+        .await
+        .unwrap();
+    assert!(!replay.accepted);
+    assert_eq!(replay.status, RuntimeJobStatus::Running);
+    assert!(jobs
+        .subagent_job_cancellation_requested(&job_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        jobs.get_runtime_job(&job_id).await.unwrap().unwrap(),
+        before
+    );
+    assert!(jobs
+        .pending_terminal_deliveries(64, None)
+        .await
+        .unwrap()
+        .is_empty());
+
+    assert!(jobs
+        .complete_runtime_job(CompleteRuntimeJobRequest {
+            job_id: job_id.clone(),
+            lease_owner: lease_owner.clone(),
+            output_refs: vec!["result:too-late".into()],
+            completed_at_ms: 21,
+        })
+        .await
+        .is_err());
+    assert!(jobs
+        .fail_runtime_job(FailRuntimeJobRequest {
+            job_id: job_id.clone(),
+            lease_owner: lease_owner.clone(),
+            failed_at_ms: 21,
+            last_error: "tool failed while stopping".into(),
+            next_run_at_ms: None,
+            disposition: RuntimeJobFailureDisposition::Failed,
+        })
+        .await
+        .is_err());
+    jobs.cancel_runtime_job(CancelRuntimeJobRequest {
+        job_id: job_id.clone(),
+        expected_lease_owner: Some(lease_owner),
+        expected_status: Some(RuntimeJobStatus::Running),
+        reason: SUBAGENT_CANCEL_REASON.into(),
+        cancelled_at_ms: 22,
+    })
+    .await
+    .unwrap();
+    let terminal = jobs.get_runtime_job(&job_id).await.unwrap().unwrap();
+    assert_eq!(terminal.status, RuntimeJobStatus::Cancelled);
+    assert!(terminal.output_refs.is_empty());
+    let pending = jobs.pending_terminal_deliveries(64, None).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].job_id, job_id);
+    jobs.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn subagent_cancellation_never_admits_queued_or_reclaimed_jobs() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.db");
+    let jobs = SqliteJobStore::open(path.clone(), 2).await.unwrap();
+    let active_id = start_subagent_job(&jobs, "active").await;
+    let queued_id = jobs
+        .upsert_external_context_and_schedule_job(creation("queued"))
+        .await
+        .unwrap()
+        .job
+        .job_id;
+    let active = jobs
+        .request_subagent_job_cancellation(subagent_cancellation_request(&active_id))
+        .await
+        .unwrap();
+    assert!(active.accepted);
+    assert_eq!(active.status, RuntimeJobStatus::Running);
+    let queued = jobs
+        .request_subagent_job_cancellation(subagent_cancellation_request(&queued_id))
+        .await
+        .unwrap();
+    assert!(queued.accepted);
+    assert_eq!(queued.status, RuntimeJobStatus::Cancelled);
+    jobs.close().await.unwrap();
+
+    let reopened = SqliteJobStore::open(path, 2).await.unwrap();
+    assert!(reopened
+        .subagent_job_cancellation_requested(&active_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        reopened
+            .reclaim_expired_runtime_job_leases(111)
+            .await
+            .unwrap(),
+        1
+    );
+    let expired = reopened.get_runtime_job(&active_id).await.unwrap().unwrap();
+    assert_eq!(expired.status, RuntimeJobStatus::Failed);
+    assert_eq!(
+        expired.last_error.as_deref(),
+        Some(centaeris_core::session::reliability::SUBAGENT_CANCEL_UNCONFIRMED)
+    );
+    let rerunnable = reopened
+        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+            worker_id: "restarted-worker".into(),
+            now_ms: 1_000,
+            lease_ms: 100,
+            job_id: None,
+            job_kind: None,
+            session_id: Some("parent".into()),
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert!(rerunnable.is_empty());
+    assert_eq!(
+        reopened
+            .pending_terminal_deliveries(64, None)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    reopened.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn service_stop_provenance_commits_with_cancellation_and_cannot_be_faked_by_reason() {
     let directory = tempfile::tempdir().unwrap();

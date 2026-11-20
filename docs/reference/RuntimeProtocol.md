@@ -1,11 +1,9 @@
 # Local Runtime protocol
 
-The Local Runtime protocol is the versioned boundary currently used by Desktop
-and TUI to share one profile-scoped Runtime. Runtime semantics remain in Core;
-this protocol owns local transport, connection identity, command routing,
-projections, and Host lifecycle. This page records the v1 implementation that
-ships in this repository. It does not turn possible later handshake or schema
-work into a requirement for the current release.
+The Local Runtime protocol is the versioned JSON-RPC interface exposed by
+`cet --mode rpc`. The TUI and headless modes use the same app service in process.
+Core owns Runtime semantics. This interface owns transport, client registration,
+command routing and projections.
 
 The v1 identity is:
 
@@ -17,24 +15,9 @@ coreProtocolVersion = 1.0.0
 
 ## Server and transport
 
-One Runtime Server owns one user-data profile. A profile-wide writer lock
-prevents a second server from opening the same writable state. The endpoint is
-scoped by the profile identity and Core protocol version:
-
-- Windows uses a local named pipe.
-- Unix builds use a Unix domain socket below the Runtime data directory.
-
-Only Windows x64 packages are currently built and release-tested. The Unix
-transport implementation does not by itself advertise a macOS or Linux
-artifact.
-
-The endpoint name and `viewerId` are not credentials. v1 has no application
-authentication exchange on this connection and relies on the operating
-system's local endpoint protections. Tokio rejects remote Windows named-pipe
-clients by default. Every Windows pipe instance also uses an explicit DACL that
-grants access only to the profile-owning user and LocalSystem. The Unix socket
-inherits the permissions of the Runtime data directory and process environment;
-only Windows x64 is currently release-tested.
+RPC runs on the process standard input and output. The RPC process acquires the
+exclusive profile lock before opening writable state. Launch the process with
+`cet --mode rpc` and initialize the connection before sending application requests.
 
 Frames are UTF-8 JSON-RPC 2.0 objects separated by `LF`. JSON strings escape
 embedded newlines, so one frame occupies exactly one JSONL line. Empty lines are
@@ -43,7 +26,7 @@ notification closes that client connection.
 
 The local transport has explicit process-memory boundaries. Each input line
 is limited to 16 MiB; encoded output frames are limited to 160 MiB (including LF).
-The output limit accommodates the existing 25 MiB desktop-preview contract even
+The output limit accommodates the existing 25 MiB local preview payloads even
 with JSON's worst-case six-byte escaping, with room for its envelope. These finite
 resource caps are not throughput targets. Previously unbounded `session/load`
 and `session/list` results exceeding the output limit return the typed error
@@ -51,10 +34,9 @@ and `session/list` results exceeding the output limit return the typed error
 Serialization writes directly into a capped buffer and stops before adding bytes
 beyond the output limit, including the final LF. Domain-result construction is
 separate and is not claimed to have a process-wide memory bound.
-Desktop and TUI restore transcripts through bounded `transcript/page`, patches
+The TUI restores transcripts through bounded `transcript/page`, patches
 and content ranges; the Session metadata list itself currently has no pagination. Oversized input closes that connection before JSON
-parsing. Up to 32 connections are accepted; excess connections close without
-stopping the listener.
+parsing.
 
 Request admission happens before spawning: at most eight ordinary requests per
 connection and 32 across the server. Only initialization, AgentRun cancel/detach/
@@ -81,16 +63,6 @@ admitted host actions. Clients must resynchronize through the existing durable
 read methods after reconnecting. Broadcast delivery is transient, not a durable
 acknowledgement.
 
-The Runtime executable exposes two transport entry points:
-
-```text
-centaeris-runtime --runtime-server-endpoint
-centaeris-runtime --runtime-server
-```
-
-The first prints one JSONL object containing `endpoint`. The second acquires the
-profile writer lock and serves that endpoint.
-
 ## JSON-RPC envelope
 
 A request has the exact envelope:
@@ -109,7 +81,7 @@ A request has the exact envelope:
 - `id` is a non-empty string or signed JSON integer. `null` is invalid for a
   request.
 - `method` is non-empty and has no surrounding whitespace.
-- Desktop and TUI emit `params` as an object containing `request`. If a method
+- Clients emit `params` as an object containing `request`. If a method
   has an empty request type, the canonical client form is `request: {}`.
 - The current server decoder also accepts an omitted or `null` `params`, maps
   `null` to an empty object, and supplies `{}` when `request` is absent. It reads
@@ -172,8 +144,8 @@ until initialization succeeds.
   "method": "initialize",
   "params": {
     "request": {
-      "clientKind": "desktop",
-      "viewerId": "desktop-main"
+      "clientKind": "tui",
+      "viewerId": "rpc-client"
     }
   }
 }
@@ -185,7 +157,7 @@ connection is idempotent; changing either field or reusing a connected
 `viewerId` fails.
 
 The initialize request does not declare a desired Runtime or Core protocol
-identity. The server returns its descriptor and the current Desktop and TUI
+identity. The server returns its descriptor and the current client
 clients validate that descriptor after receiving it. This is a
 server-advertised, client-validated v1 handshake, not version negotiation.
 
@@ -301,6 +273,7 @@ authorization grant.
 | `_centaeris/session/delete` | `identityMutation` | `noAutomaticRetry` | `session/list` |
 | `_centaeris/session/diagnostics` | `read` | `safeRetry` | — |
 | `_centaeris/session/reorder` | `desiredStateWrite` | `noAutomaticRetry` | `session/list` |
+| `_centaeris/session/search` | `read` | `safeRetry` | — |
 | `_centaeris/session/agent-runs` | `read` | `safeRetry` | — |
 | `_centaeris/session/agent-runs/live-snapshot` | `read` | `safeRetry` | — |
 | `_centaeris/session/agent-runs/attach` | `identityMutation` | `noAutomaticRetry` | — |
@@ -392,20 +365,16 @@ authorization grant.
 
 <!-- END GENERATED:RUNTIME_METHOD_REGISTRY -->
 
-Electron-only actions such as opening a directory picker, revealing a local
-Plugin source, and tray events remain outside this registry. They do not become
-Core or Runtime methods merely because Desktop exposes them.
-
 Method-specific payloads are the strict v1 request and response structures
-owned by the modules routed from `packages/desktop/src/services/handlers.rs`. The method
+owned by the modules routed from `packages/cli/runtime/src/handlers.rs`. The method
 name, request structure, response structure, error behavior, and command scope
 change together; a Host must not infer a generic CRUD schema from similarly
 named methods.
 
 The generated registry above and
-`packages/desktop/src/services/generated/runtime-methods.json` come from the declarative
-Rust source in `packages/desktop/src/services/runtime_command_registry.rs`. Run
-`cargo run --locked -p centaeris-desktop-services --bin
+`packages/cli/runtime/src/generated/runtime-methods.json` come from the declarative
+Rust source in `packages/cli/runtime/src/runtime_command_registry.rs`. Run
+`cargo run --locked -p centaeris-cli-runtime --bin
 centaeris-runtime-protocol-docs -- --write` after changing that source; the
 local CI gate runs the generator with `--check` and rejects stale artifacts.
 
@@ -469,8 +438,7 @@ turn cannot race that cleanup. Failed input closure retains the lease.
 An initialized client can request service shutdown with `runtime/shutdown` and
 exact empty params `{}`. Its response is `{"disposition":"requested"}`; it
 acknowledges the request, not process termination.
-The Desktop renderer has no route for this service command; its `app_exit`
-continues to close only the application client. Shutdown stops admission,
+Shutdown stops admission,
 allows five seconds for active work to finish, then requests Core interruption
 with `reasonType: "shutdown"` and allows five seconds for cleanup. A committed
 shutdown interruption projects as `stopped`, distinct from user cancellation.
@@ -482,13 +450,8 @@ After an abnormal exit, startup reconciles unfinished runs as `stopped` with
 and uses Core's tool intent/receipt recovery without replaying unknown external
 effects. A completed assistant message alone never proves AgentRun success.
 
-The Runtime Server exits only after it has no connected clients, no active
-AgentRuns or admitted host actions, and no queued, leased, or running background Runtime jobs for one
-continuous idle window. The current implementation uses five seconds; that
-duration is not a protocol identity and clients must not synchronize behavior
-to it. Active work keeps the service alive even when no client is connected.
-The profile writer lock remains held until the server process exits, including
-bounded executor teardown after a shutdown timeout.
+Closing stdio ends the RPC service and starts bounded cleanup. The exclusive
+profile lock remains held until the process exits.
 
 ## Failure and retry behavior
 
@@ -591,18 +554,8 @@ reported. Deleting a Session or its subtree is rejected while it owns active
 processes. Start and deletion share an admission gate; successful deletion discards
 closed process records but preserves receipt tombstones.
 
-Verification: `cargo test --locked -p centaeris-desktop-services --lib
-process_sessions`; after building the debug Runtime, run
-`node scripts/test-process-sessions.mjs` for isolated-profile, real Desktop/TUI
-transport checks, disconnect survival, deletion fencing and shutdown cleanup.
-
-
-Desktop and TUI process observers consume the same fixture in
-`packages/desktop/src/services/generated/process-session-samples.json`. Runtime serialization,
-Desktop decoding/requests and TUI decoding are covered by parity tests. Desktop
-Tasks tabs are bound to a Session, and TUI `/process` provides explicit background
-start/list/output/stop commands. Their view lifetimes never own process lifetimes.
-See [manual acceptance](../eval/FrontendManualAcceptance.md#background-process-observers-before-embedded-terminal).
+Run `cargo test --locked -p centaeris-cli-runtime process_sessions`.
+The wire fixtures are in `packages/cli/runtime/src/generated/process-session-samples.json`.
 
 ### Agent background commands and completion delivery
 
@@ -640,7 +593,7 @@ means a follow-up run was admitted, not that the model successfully interpreted 
 A lost outbox acknowledgement reuses the same receipt and does not create a second run.
 
 Internal admission is independent of connected clients but shares the existing
-Session lease, deletion fence and service-draining lock. Desktop observes unknown
+Session lease, deletion fence and service-draining lock. Clients observe unknown
 same-Session runs by reloading the authoritative transcript and attaching to its
 active replay; workspace changes invalidate outstanding reloads. TUI ignores other
 Sessions' updates and attaches to an idle visible Session's new run. Closing a Task
@@ -651,9 +604,7 @@ remain explicitly unknown. Completed output can be read by cursor even after the
 live record has expired. Model-facing text is a lossy UTF-8 display; exact bytes
 remain in the retained output records.
 
-Run `node scripts/test-process-agent.mjs` after building the debug Runtime. Its
-isolated loopback model exercises tool start, busy-session deferral, client detach,
-automatic continuation/output read, duplicate acknowledgement and cancelled origin.
+Run `cargo test --locked -p centaeris-cli-runtime process_agent` for focused checks.
 
 ## Local automation methods
 

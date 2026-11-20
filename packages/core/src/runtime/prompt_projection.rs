@@ -153,7 +153,8 @@ fn xml_escape(value: &str) -> String {
     escaped
 }
 
-pub(super) fn driver_user_message_id(session_id: &str, turn_id: &str) -> String {
+/// Returns the persisted identity of the user request staged for a driver turn.
+pub fn driver_user_message_id(session_id: &str, turn_id: &str) -> String {
     format!("msg:{session_id}:{turn_id}:driver_user")
 }
 

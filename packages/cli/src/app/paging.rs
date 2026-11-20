@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use centaeris_core::session::transcript::{
     TranscriptBlockBodyV1, TranscriptBlockStatusV1, TranscriptPagePolicyV1, TranscriptPageV1,
     TranscriptPatchV1, TranscriptTextContentV1, TranscriptViewStateV1,
@@ -53,22 +51,49 @@ where
     Request: FnMut(Value) -> Result<Value, String>,
     Wait: FnMut(),
 {
-    let mut fixed_generation = projection_generation.map(str::to_string);
-    let mut fixed_source_high_water = source_high_water;
-    let mut last_projected_source_high_water = None;
-    let mut stalled_polls = 0usize;
+    let mut read = PageRead::new(session_id, projection_generation, source_high_water);
     loop {
-        let response = request(json!({
+        if let Some(page) = read.receive(request(read.request(older_cursor))?)? {
+            return Ok(page);
+        }
+        wait();
+    }
+}
+
+pub(super) struct PageRead {
+    session_id: String,
+    generation: Option<String>,
+    target: Option<u64>,
+    last_projected: Option<u64>,
+    stalled_polls: usize,
+}
+
+impl PageRead {
+    pub(super) fn new(session_id: &str, generation: Option<&str>, target: Option<u64>) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            generation: generation.map(str::to_owned),
+            target,
+            last_projected: None,
+            stalled_polls: 0,
+        }
+    }
+
+    pub(super) fn request(&self, older_cursor: Option<&str>) -> Value {
+        json!({
             "request": {
-                "sessionId": session_id,
-                "projectionGeneration": fixed_generation,
-                "sourceHighWater": fixed_source_high_water.map(|value| value.to_string()),
+                "sessionId": self.session_id,
+                "projectionGeneration": self.generation,
+                "sourceHighWater": self.target.map(|value| value.to_string()),
                 "olderCursor": older_cursor,
             }
-        }))?;
+        })
+    }
+
+    pub(super) fn receive(&mut self, response: Value) -> Result<Option<TranscriptPageV1>, String> {
         let response = serde_json::from_value::<TranscriptPageRpcResponseV1>(response)
             .map_err(|error| format!("invalid transcript/page response: {error}"))?;
-        validate_page_rpc_identity(&response, session_id)?;
+        validate_page_rpc_identity(&response, &self.session_id)?;
         let projected_source_high_water = parse_waterline(
             response.projected_source_high_water.as_str(),
             "projectedSourceHighWater",
@@ -80,42 +105,46 @@ where
         if projected_source_high_water > target_source_high_water {
             return Err("transcript/page projected waterline exceeds target".to_string());
         }
-        if fixed_generation
+        if self
+            .generation
             .as_deref()
             .is_some_and(|value| value != response.projection_generation)
-            || fixed_source_high_water.is_some_and(|value| value != target_source_high_water)
+            || self
+                .target
+                .is_some_and(|value| value != target_source_high_water)
         {
             return Err("transcript/page view identity changed while polling".to_string());
         }
-        fixed_generation.get_or_insert(response.projection_generation.clone());
-        fixed_source_high_water.get_or_insert(target_source_high_water);
+        self.generation
+            .get_or_insert(response.projection_generation.clone());
+        self.target.get_or_insert(target_source_high_water);
 
         if response.target_reached {
             let page = response
                 .page
                 .ok_or_else(|| "transcript/page reached target without a page".to_string())?;
             page.validate(TranscriptPagePolicyV1::default())?;
-            if page.session_id != session_id
+            if page.session_id != self.session_id
                 || page.projection_generation != response.projection_generation
                 || page.source_high_water != response.target_source_high_water
             {
                 return Err("transcript/page payload identity mismatch".to_string());
             }
-            return Ok(page);
+            return Ok(Some(page));
         }
         if response.page.is_some() {
             return Err("transcript/page returned a page before reaching target".to_string());
         }
-        if last_projected_source_high_water == Some(projected_source_high_water) {
-            stalled_polls = stalled_polls.saturating_add(1);
-            if stalled_polls >= TRANSCRIPT_PROJECTION_STALL_MAX_POLLS {
+        if self.last_projected == Some(projected_source_high_water) {
+            self.stalled_polls += 1;
+            if self.stalled_polls >= TRANSCRIPT_PROJECTION_STALL_MAX_POLLS {
                 return Err("transcript/page projection did not make progress".to_string());
             }
         } else {
-            stalled_polls = 0;
-            last_projected_source_high_water = Some(projected_source_high_water);
+            self.stalled_polls = 0;
+            self.last_projected = Some(projected_source_high_water);
         }
-        wait();
+        Ok(None)
     }
 }
 
@@ -252,8 +281,6 @@ pub(super) struct TranscriptPagingState {
     base_source_high_water: u64,
     current_source_high_water: u64,
     older_cursor: Option<String>,
-    tail_block_ids: HashSet<String>,
-    tail_older_cursor: Option<String>,
 }
 
 impl TranscriptPagingState {
@@ -265,12 +292,6 @@ impl TranscriptPagingState {
             .parse::<u64>()
             .map_err(|_| "transcript page sourceHighWater is invalid".to_string())?;
         let older_cursor = page.older_cursor.clone();
-        let tail_older_cursor = older_cursor.clone();
-        let tail_block_ids = page
-            .blocks
-            .iter()
-            .map(|block| block.block_id.clone())
-            .collect();
         let view = TranscriptViewStateV1::open("tui-session-view".to_string(), page)?;
         Ok(Self {
             view,
@@ -279,8 +300,6 @@ impl TranscriptPagingState {
             base_source_high_water,
             current_source_high_water: base_source_high_water,
             older_cursor,
-            tail_block_ids,
-            tail_older_cursor,
         })
     }
 
@@ -327,12 +346,6 @@ impl TranscriptPagingState {
 
     pub(super) fn older_cursor(&self) -> Option<&str> {
         self.older_cursor.as_deref()
-    }
-
-    pub(super) fn release_loaded_history(&mut self) -> usize {
-        let removed = self.view.release_loaded_history(&self.tail_block_ids);
-        self.older_cursor = self.tail_older_cursor.clone();
-        removed
     }
 
     pub(super) fn tool_output_reference(
@@ -425,6 +438,16 @@ fn materialize_block(
                 op.get("contentByteLength")?.as_u64()?,
             ))
         });
+        if tool.is_bash {
+            tool.description_title = facts.display_target.is_some();
+            if let Some(operation) = &facts.operation {
+                tool.exit_code = operation.get("exitCode").and_then(Value::as_i64);
+                tool.command = operation
+                    .get("commandPreview")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+        }
     }
     if let Some(facts) = &block.presentation {
         if let TranscriptBlockBodyV1::Notice {
@@ -437,7 +460,10 @@ fn materialize_block(
                 if let Some(run_id) = &facts.agent_run_id {
                     return TranscriptLine::RunBoundary {
                         run_id: run_id.clone(),
-                        state: super::runs::RunState::from_source(&facts.source_type),
+                        state: super::runs::RunState::from_source(
+                            &facts.source_type,
+                            facts.reason_type.as_deref(),
+                        ),
                         reason: if content.source_ref.is_some() {
                             "Loading error details…"
                         } else {
@@ -504,7 +530,7 @@ fn materialize_block_body(
             summary,
             summary_ref,
             output_ref,
-        } => TranscriptLine::Tool(transcript_page_tool_line(
+        } => TranscriptLine::tool(transcript_page_tool_line(
             call_id,
             tool_name,
             *status,

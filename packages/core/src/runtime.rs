@@ -75,6 +75,7 @@ pub use self::lifecycle_hooks_runtime::{
 };
 pub use self::loop_runtime::persist_answer_now_requested_fact;
 use self::prompt_compaction_metadata::*;
+pub use self::prompt_projection::driver_user_message_id;
 use self::provider_polling::*;
 pub use self::request_preparation::{
     RequestPreparationObserver, RequestPreparationStage, RequestPreparationTiming,
@@ -99,7 +100,7 @@ use self::events::{
     build_runtime_event_prompt_compaction_event, build_runtime_event_question_required_event,
     build_runtime_event_runtime_wait_changed, build_runtime_event_status_event,
     build_runtime_event_subagent_event_from_scheduler_event,
-    build_runtime_event_subagent_spawned_from_tool_result,
+    build_runtime_event_subagent_submission_from_tool_result,
     build_runtime_event_subagent_tool_group_events_from_tool_results,
     build_runtime_event_tool_call_events, build_runtime_event_tool_progress_event,
     build_runtime_event_tool_result_events,
@@ -697,15 +698,8 @@ impl<
     }
 }
 
-fn canonical_task_runtime_tool_name(tool_name: &str) -> Option<&'static str> {
-    if tool_name == "task_output" {
-        return Some("task_output");
-    }
-    None
-}
-
 fn is_task_runtime_tool_name(tool_name: &str) -> bool {
-    canonical_task_runtime_tool_name(tool_name).is_some()
+    matches!(tool_name, "wait_agent" | "interrupt_agent" | "list_agents")
 }
 
 fn append_lifecycle_hook_context_messages<'a>(

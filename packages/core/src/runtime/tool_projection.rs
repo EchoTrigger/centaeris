@@ -3,8 +3,7 @@ use crate::execution::ExecutionHostKind;
 use crate::tool::list_tool_contracts_with_dynamic;
 use std::collections::HashSet;
 
-const TASK_OUTPUT_TOOL_NAME: &str = "task_output";
-const AGENT_TOOL_NAME: &str = "agent";
+use crate::tool::AGENT_CONTROL_TOOL_NAMES;
 const WORKSPACE_CODING_TOOL_NAMES: &[&str] = &["read", "bash", "edit", "write"];
 
 pub(super) fn build_generate_tool_projection(
@@ -39,7 +38,7 @@ pub(super) fn build_generate_tool_contracts(
             let mut names = Vec::with_capacity(allowed.len());
             let mut seen = HashSet::with_capacity(allowed.len());
             for name in allowed {
-                if matches!(name.as_str(), AGENT_TOOL_NAME | TASK_OUTPUT_TOOL_NAME) {
+                if AGENT_CONTROL_TOOL_NAMES.contains(&name.as_str()) {
                     return Err(format!("tool is not delegatable: {name}"));
                 }
                 if !seen.insert(name.as_str()) {
@@ -55,7 +54,7 @@ pub(super) fn build_generate_tool_contracts(
         None => WORKSPACE_CODING_TOOL_NAMES
             .iter()
             .copied()
-            .chain([AGENT_TOOL_NAME, TASK_OUTPUT_TOOL_NAME])
+            .chain(AGENT_CONTROL_TOOL_NAMES.iter().copied())
             .map(str::to_string)
             .collect::<Vec<_>>(),
     };
@@ -116,8 +115,11 @@ mod tests {
                 "bash",
                 "edit",
                 "write",
-                "task_output",
-                "agent",
+                "spawn_agent",
+                "followup_task",
+                "wait_agent",
+                "interrupt_agent",
+                "list_agents",
                 "weather_lookup"
             ]
         );
@@ -125,17 +127,16 @@ mod tests {
     }
 
     #[test]
-    fn root_projection_always_includes_agent_and_task_output() {
+    fn root_projection_exposes_agent_lifecycle() {
         let registry = DynamicToolRegistry::empty();
         let session = SessionStateSnapshot::new("chat-task-output".to_string(), 0);
         let (definitions, _) = build_generate_tool_projection(&session, &registry, None, None)
             .expect("root projection");
-        assert!(definitions
-            .iter()
-            .any(|definition| definition.name == TASK_OUTPUT_TOOL_NAME));
-        assert!(definitions
-            .iter()
-            .any(|definition| definition.name == AGENT_TOOL_NAME));
+        for name in AGENT_CONTROL_TOOL_NAMES {
+            assert!(definitions
+                .iter()
+                .any(|definition| definition.name == *name));
+        }
     }
 
     #[test]
@@ -173,14 +174,18 @@ mod tests {
         .expect_err("unknown child tool must fail");
         assert!(error.contains("banana"));
 
-        let error =
-            build_generate_tool_projection(&session, &registry, Some(&["agent".to_string()]), None)
-                .expect_err("recursive delegation must fail");
+        let error = build_generate_tool_projection(
+            &session,
+            &registry,
+            Some(&["spawn_agent".to_string()]),
+            None,
+        )
+        .expect_err("recursive delegation must fail");
         assert!(error.contains("not delegatable"));
     }
 
     #[test]
-    fn root_projection_keeps_the_sixty_four_tool_limit_with_six_core_tools() {
+    fn root_projection_keeps_the_sixty_four_tool_limit_with_nine_core_tools() {
         let dynamic_contracts = |count: usize| {
             (0..count)
                 .map(|index| DynamicToolContract {
@@ -197,16 +202,16 @@ mod tests {
         };
         let session = SessionStateSnapshot::new("chat-tool-limit".to_string(), 0);
         let registry =
-            DynamicToolRegistry::from_contracts(dynamic_contracts(58)).expect("58 dynamic tools");
+            DynamicToolRegistry::from_contracts(dynamic_contracts(55)).expect("55 dynamic tools");
         let (definitions, _) = build_generate_tool_projection(&session, &registry, None, None)
-            .expect("six Core plus 58 dynamic tools");
+            .expect("nine Core plus 55 dynamic tools");
         assert_eq!(definitions.len(), 64);
 
         let registry =
-            DynamicToolRegistry::from_contracts(dynamic_contracts(59)).expect("59 dynamic tools");
+            DynamicToolRegistry::from_contracts(dynamic_contracts(56)).expect("56 dynamic tools");
         assert_eq!(
             build_generate_tool_projection(&session, &registry, None, None)
-                .expect_err("six Core plus 59 dynamic tools must exceed the limit"),
+                .expect_err("nine Core plus 56 dynamic tools must exceed the limit"),
             "model tool projection exceeds contract limit: 65"
         );
     }

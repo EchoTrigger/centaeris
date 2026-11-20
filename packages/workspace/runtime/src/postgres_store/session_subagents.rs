@@ -1,11 +1,11 @@
-//! Authorized presentation reads of Core's durable subagent jobs and snapshots.
+//! Authorized presentation reads of Core's durable subagent jobs and task history.
+use centaeris_core::runtime::driver_user_message_id;
 use centaeris_core::runtime::subagent::{
     subagent_work_packet_runtime_binding, SubagentWorkPacketEnvelope, SUBAGENT_RUN_JOB_KIND,
 };
+use centaeris_core::session::history::SessionHistoryRecordV1;
 use centaeris_core::session::reliability::{RuntimeJobRecord, RuntimeJobStatus};
-use centaeris_core::session::state::{
-    MessageRole, ModelMessageSemanticsV1, ModelToolCallStateV1, SessionStateSnapshot,
-};
+use centaeris_core::session::state::{MessageRole, ModelMessageSemanticsV1, ModelToolCallStateV1};
 use postgres::{GenericClient, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +56,8 @@ pub(crate) struct SessionSubagent {
     pub runtime_job_id: String,
     pub call_id: String,
     pub child_session_id: String,
+    #[serde(skip)]
+    child_turn_id: String,
     pub parent_agent_run_id: String,
     pub parent_turn_id: String,
     pub description: String,
@@ -170,6 +172,7 @@ fn present_agent(
         runtime_job_id: job.job_id.clone(),
         call_id: call_id.to_string(),
         child_session_id: binding.child_session_id,
+        child_turn_id: binding.child_turn_id,
         parent_agent_run_id: binding.parent_agent_run_id,
         parent_turn_id: binding.parent_turn_id,
         description: binding.description,
@@ -197,7 +200,10 @@ fn load_agent(
     if row.get::<_, String>(0) != "external_context.v1"
         || row.get::<_, String>(1) != "subagent_work_packet"
         || row.get::<_, String>(2) != "centaeris.core"
-        || row.get::<_, String>(3) != "agent"
+        || !matches!(
+            row.get::<_, String>(3).as_str(),
+            "agent" | "spawn_agent" | "followup_task"
+        )
     {
         return Err("session_subagent_packet_source_invalid".into());
     }
@@ -219,24 +225,22 @@ fn load_agent(
     Ok(agent)
 }
 
-fn present_messages(
-    snapshot: SessionStateSnapshot,
-    child_session_id: &str,
-) -> Result<Vec<SessionSubagentMessage>, String> {
-    if snapshot.session_id != child_session_id {
-        return Err("session_subagent_snapshot_scope_invalid".into());
-    }
-    let mut messages = Vec::with_capacity(snapshot.messages.len());
-    for message in &snapshot.messages {
+fn present_messages(history: Vec<SessionHistoryRecordV1>) -> Vec<SessionSubagentMessage> {
+    let mut messages = Vec::with_capacity(history.len());
+    for record in history {
+        // Prompt context may replay another task's input after compaction.
+        // Only the selected task's original user request belongs in this view.
+        let role = match record.entry.message.role {
+            MessageRole::User if record.entry.is_original_user_request() => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+            MessageRole::User | MessageRole::System => continue,
+        };
+        let message = record.entry.message;
         let mut presented = SessionSubagentMessage {
-            message_id: message.message_id.clone(),
-            role: match message.role {
-                MessageRole::System => "system",
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::Tool => "tool",
-            },
-            content: message.content.clone(),
+            message_id: message.message_id,
+            role,
+            content: message.content,
             created_at_ms: message.created_at_ms,
             reasoning_content: None,
             tool_calls: vec![],
@@ -244,14 +248,14 @@ fn present_messages(
             tool_name: None,
             result_state: None,
         };
-        match snapshot.model_semantics_for(&message.message_id)? {
+        match record.entry.model_semantics {
             ModelMessageSemanticsV1::Plain => {}
             ModelMessageSemanticsV1::Assistant {
                 reasoning_content,
                 tool_calls,
             } => {
-                presented.reasoning_content = reasoning_content.clone();
-                presented.tool_calls = tool_calls.clone();
+                presented.reasoning_content = reasoning_content;
+                presented.tool_calls = tool_calls;
             }
             ModelMessageSemanticsV1::ToolResult {
                 tool_call_id,
@@ -259,14 +263,14 @@ fn present_messages(
                 result_state,
                 ..
             } => {
-                presented.tool_call_id = Some(tool_call_id.clone());
-                presented.tool_name = Some(tool_name.clone());
-                presented.result_state = Some(result_state.clone());
+                presented.tool_call_id = Some(tool_call_id);
+                presented.tool_name = Some(tool_name);
+                presented.result_state = Some(result_state);
             }
         }
         messages.push(presented);
     }
-    Ok(messages)
+    messages
 }
 
 impl PostgresRuntimeStore {
@@ -322,30 +326,18 @@ impl PostgresRuntimeStore {
                 return Ok(None);
             }
             let agent = load_agent(&mut tx, &job, &request.session_id)?;
-            let snapshot = tx.query_opt(
-                "SELECT snapshot_json FROM runtime.session_runtime_snapshots WHERE session_id=$1",
-                &[&agent.child_session_id],
-            ).map_err(|error| format!("load subagent snapshot failed: {error}"))?;
-            let messages = match snapshot {
-                Some(row) => {
-                    let snapshot =
-                        serde_json::from_str::<SessionStateSnapshot>(&row.get::<_, String>(0))
-                            .map_err(|error| format!("decode subagent snapshot failed: {error}"))?;
-                    let snapshot = super::runtime::session_history::hydrate_session_history(
-                        &mut tx,
-                        &agent.child_session_id,
-                        snapshot,
-                    )?;
-                    present_messages(snapshot, &agent.child_session_id)?
-                }
-                None => vec![],
-            };
+            let input_id = driver_user_message_id(&agent.child_session_id, &agent.child_turn_id);
+            let history = super::runtime::session_history::load_original_user_request_history(
+                &mut tx,
+                &agent.child_session_id,
+                &input_id,
+            )?;
             tx.commit().map_err(|error| error.to_string())?;
             Ok(Some(SessionSubagentDetail {
                 schema: "workspace.session.subagent.v1",
                 session_id: request.session_id.clone(),
                 agent,
-                messages,
+                messages: present_messages(history),
             }))
         })
     }

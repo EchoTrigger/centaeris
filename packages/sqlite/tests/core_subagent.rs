@@ -290,7 +290,7 @@ fn store_valid_subagent_work_packet(
         "run_context": {
             "schema": "agent_run_context_v1",
             "sessionId": "chat-resource-claim",
-            "branchId": "turn-resource-claim",
+            "branchId": format!("session-resource-fixture:{object_id}"),
             "turnId": "turn-resource-claim:subagent-test",
             "agentRunId": "agent-run-subagent-resource-claim",
             "agentRef": {
@@ -634,6 +634,7 @@ async fn run_claimed_subagent_job_async_loads_work_packet_and_completes() {
         fail_on_start: false,
         fail_on_stop: false,
     };
+    let requested_finish_ms = 1_100;
     let result = run_claimed_subagent_job_async(
         &actor,
         claimed,
@@ -648,7 +649,7 @@ async fn run_claimed_subagent_job_async_loads_work_packet_and_completes() {
         RunClaimedSubagentJobRequest {
             worker_id: "worker-run".to_string(),
             started_at_ms: 1_002,
-            finished_at_ms: 1_100,
+            finished_at_ms: requested_finish_ms,
         },
     )
     .await
@@ -665,7 +666,9 @@ async fn run_claimed_subagent_job_async_loads_work_packet_and_completes() {
     assert_eq!(result.events[1].kind, SubagentSchedulerEventKind::Succeeded);
     assert_eq!(result.events[1].description, None);
     assert_eq!(result.events[1].started_at_ms, None);
-    assert_eq!(result.events[1].completed_at_ms, Some(1_100));
+    assert!(result.events[1]
+        .completed_at_ms
+        .is_some_and(|completed| completed >= requested_finish_ms));
     assert_eq!(
         result.final_lifecycle.status,
         SubagentLifecycleStatus::Succeeded

@@ -10,7 +10,7 @@ Current Rust workspace and Node package metadata is `0.1.0`. This describes the
 source candidate; it does not assert that a public tag, package-registry
 publication, or GitHub Release already exists.
 
-Before a release, the exact source revision, tag, Desktop metadata, TUI package
+Before a release, the exact source revision, tag, CLI package
 manifest, bundled Runtime, third-party license payload, and release notes all
 carry the approved product version. An artifact built from another revision is
 not repaired by renaming the file.
@@ -18,7 +18,6 @@ not repaired by renaming the file.
 The current build matrix produces only:
 
 - a Windows x64 TUI archive named `centaeris-windows-x64.zip`;
-- an unpacked Windows Desktop directory containing `Centaeris Desktop.exe`.
 
 The source may compile on another operating system, and some Unix transport or
 sandbox code may exist, without creating a supported download or release

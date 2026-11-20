@@ -70,7 +70,7 @@ async fn query_loop_agent_creation_reconciles_lost_reply_without_repeating_the_w
             Some(&identity),
             &ToolCallEnvelope {
                 id: "agent-call".into(),
-                name: "agent".into(),
+                name: "spawn_agent".into(),
                 args_json: json!({ "prompt": "Read the file", "description": "File inspection" })
                     .to_string(),
             },
@@ -111,6 +111,7 @@ struct AgentRuntimeTestState {
     external_objects: HashMap<String, ExternalContextObject>,
     external_links: Vec<ExternalContextObjectLink>,
     jobs: HashMap<String, RuntimeJobRecord>,
+    subagent_cancel_requests: HashSet<String>,
     dead_letters: HashMap<String, crate::session::reliability::DeadLetterRecord>,
 }
 
@@ -226,6 +227,22 @@ impl crate::session::store::AsyncJobStorePort for AgentRuntimeTestStore {
                 )
             },
         )
+    }
+    async fn request_subagent_job_cancellation(
+        &self,
+        req: crate::session::reliability::RequestSubagentJobCancellation,
+    ) -> Result<
+        crate::session::reliability::SubagentJobCancellationReceipt,
+        crate::session::store::job::JobStoreError,
+    > {
+        RuntimeJobStorePort::request_subagent_job_cancellation(self, req).map_err(Into::into)
+    }
+
+    async fn subagent_job_cancellation_requested(
+        &self,
+        job_id: &str,
+    ) -> Result<bool, crate::session::store::job::JobStoreError> {
+        RuntimeJobStorePort::subagent_job_cancellation_requested(self, job_id).map_err(Into::into)
     }
     async fn reclaim_expired_runtime_job_leases(
         &self,
@@ -1105,6 +1122,42 @@ impl crate::session::reliability::RuntimeJobStorePort for AgentRuntimeTestStore 
             job.updated_at_ms = request.cancelled_at_ms;
         }
         Ok(())
+    }
+
+    fn request_subagent_job_cancellation(
+        &self,
+        request: crate::session::reliability::RequestSubagentJobCancellation,
+    ) -> Result<crate::session::reliability::SubagentJobCancellationReceipt, String> {
+        use crate::session::reliability::{SubagentJobCancellationReceipt, SUBAGENT_CANCEL_REASON};
+        let mut state = self.state()?;
+        let job = state
+            .jobs
+            .get(&request.job_id)
+            .filter(|job| {
+                job.session_id.as_deref() == Some(request.session_id.as_str())
+                    && job.job_kind == SUBAGENT_RUN_JOB_KIND
+            })
+            .ok_or("subagent Job is missing from the Session")?;
+        let receipt = SubagentJobCancellationReceipt::decide(
+            job.status.clone(),
+            state.subagent_cancel_requests.contains(&request.job_id),
+        );
+        if receipt.accepted {
+            state
+                .subagent_cancel_requests
+                .insert(request.job_id.clone());
+            if receipt.status == RuntimeJobStatus::Cancelled {
+                let job = state.jobs.get_mut(&request.job_id).expect("checked Job");
+                job.status = RuntimeJobStatus::Cancelled;
+                job.last_error = Some(SUBAGENT_CANCEL_REASON.into());
+                job.updated_at_ms = request.requested_at_ms;
+            }
+        }
+        Ok(receipt)
+    }
+
+    fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, String> {
+        Ok(self.state()?.subagent_cancel_requests.contains(job_id))
     }
 
     fn reclaim_expired_runtime_job_leases(&self, now_ms: i64) -> Result<usize, String> {
@@ -4557,6 +4610,29 @@ fn query_loop_readmission_recovers_formatted_receipts_without_reexecution_or_dig
 
 #[tokio::test]
 async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool() {
+    assert_unsettled_intent(
+        "stream_boundary_test_tool",
+        r#"{"value":"possibly executed"}"#,
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn zero_based_read_intent_is_never_reexecuted_with_one_based_offsets() {
+    assert_unsettled_intent(
+        "read",
+        r#"{"path":"original.txt","offset":1,"limit":1}"#,
+        Some("sha256:bffd554ad13c0e892e14cbc160f04ba5ab6c863221f8a1cbcd25f2476c37b0ed"),
+    )
+    .await;
+}
+
+async fn assert_unsettled_intent(
+    tool_name: &str,
+    args_json: &str,
+    historical_digest: Option<&str>,
+) {
     use sha2::{Digest, Sha256};
 
     let store = AgentRuntimeTestStore::new();
@@ -4569,7 +4645,17 @@ async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool()
     let session_id = "chat-tool-indeterminate";
     let turn_id = "turn-tool-indeterminate";
     let call_id = "call-tool-indeterminate";
-    let args_json = json!({ "value": "possibly executed" }).to_string();
+    let mut intent = tool_execution_intent_fixture(
+        &engine.tools_port,
+        session_id,
+        turn_id,
+        call_id,
+        tool_name,
+        args_json,
+    );
+    if let Some(digest) = historical_digest {
+        intent["toolContractDigest"] = digest.into();
+    }
     let event_identity = format!("{session_id}\0{turn_id}\0{call_id}");
     store
         .append_event_idempotent(RuntimeEvent {
@@ -4582,15 +4668,7 @@ async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool()
             event_type: "tool_execution.intent.v1".to_string(),
             at_ms: 1,
             visibility: EventVisibility::Internal,
-            payload_json: tool_execution_intent_fixture(
-                &engine.tools_port,
-                session_id,
-                turn_id,
-                call_id,
-                "stream_boundary_test_tool",
-                args_json.as_str(),
-            )
-            .to_string(),
+            payload_json: intent.to_string(),
         })
         .expect("persist interrupted tool intent");
 
@@ -4603,8 +4681,8 @@ async fn intent_without_receipt_reports_indeterminate_without_reexecuting_tool()
                 content: String::new(),
                 tool_calls: vec![ToolCallEnvelope {
                     id: call_id.to_string(),
-                    name: "stream_boundary_test_tool".to_string(),
-                    args_json,
+                    name: tool_name.into(),
+                    args_json: args_json.into(),
                 }],
                 continuation_reasoning_content: None,
                 reasoning_content: None,
@@ -4943,7 +5021,7 @@ async fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
             Some(&agent_run_identity),
             &ToolCallEnvelope {
                 id: "call-agent-1".to_string(),
-                name: "agent".to_string(),
+                name: "spawn_agent".to_string(),
                 args_json: json!({
                     "prompt": "Inspect the docs and return a one paragraph finding.",
                     "description": "Docs inspection",
@@ -4989,7 +5067,7 @@ async fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
         .expect("load work packet object")
         .expect("work packet object");
     assert_eq!(object.object_kind, "subagent_work_packet");
-    assert_eq!(object.source_tool_name, "agent");
+    assert_eq!(object.source_tool_name, "spawn_agent");
     let content = serde_json::from_str::<Value>(object.content.as_str()).expect("packet json");
     assert_eq!(
         content
@@ -5037,84 +5115,81 @@ async fn agent_tool_schedules_subagent_run_job_with_frozen_tool_contracts() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].payload_ref.as_deref(), Some(work_packet_ref));
 
-    let _ = std::fs::remove_dir_all(workspace_root);
-}
-
-#[tokio::test]
-async fn task_output_validates_agent_ref_and_returns_runtime_wait_marker() {
-    let store = AgentRuntimeTestStore::new();
-    let engine = AgentRuntime::new_for_test(store.clone(), AgentRuntimeConfig::default());
-    let session_id = "chat-task-output-ref";
-    let child_session_id = "session-agent-task-output-test";
-    let result_ref =
-        crate::runtime::keys::external_context::subagent_result_ref("task-output-test");
-    let work_packet_ref =
-        crate::runtime::keys::external_context::subagent_work_packet_ref("task-output-test");
-    let job = build_subagent_run_job(SubagentRunJobRequest {
-        session_id: session_id.to_string(),
-        parent_turn_id: "turn-task-output-ref".to_string(),
-        tool_call_id: "call-agent-task-output-ref".to_string(),
-        subagent_id: "agent-task-output-test".to_string(),
-        work_packet_ref: work_packet_ref.clone(),
-        checkpoint_id: None,
-        run_at_ms: now_ms(),
-        created_at_ms: now_ms(),
-        max_retries: 0,
-    });
-    store
-        .upsert_external_context_and_schedule_job(UpsertExternalContextAndScheduleJobRequest {
-            object: ExternalContextObject {
-                schema_version: EXTERNAL_CONTEXT_SCHEMA_VERSION.to_string(),
-                object_id: work_packet_ref,
-                object_kind: "subagent_work_packet".to_string(),
-                source_provider_id: "centaeris.core".to_string(),
-                source_tool_name: "agent".to_string(),
-                title: "Agent work packet".to_string(),
-                content: "{}".to_string(),
-                metadata: json!({
-                    "runtimeJobId": job.job_id,
-                    "childSessionId": child_session_id,
-                    "resultRef": result_ref,
-                }),
-                updated_at_ms: now_ms(),
-            },
-            job: job.clone(),
+    let followup_call = ToolCallEnvelope {
+        id: "call-followup-1".to_string(),
+        name: "followup_task".to_string(),
+        args_json: json!({
+            "agent_id": output["subagentId"],
+            "prompt": "Continue the inspection.",
+            "description": "Follow-up inspection",
         })
-        .expect("schedule Agent runtime job");
-
-    let report = engine
-        .execute_task_runtime_tool_call(
+        .to_string(),
+    };
+    let followup = engine
+        .execute_agent_tool_call(
             session_id,
-            &ToolCallEnvelope {
-                id: "call-task-output-ref".to_string(),
-                name: "task_output".to_string(),
-                args_json: json!({
-                    "output_ref": {
-                        "schema": "task_output_ref_v1",
-                        "kind": "agent",
-                        "runtime_job_id": job.job_id,
-                        "child_session_id": child_session_id,
-                        "result_ref": result_ref,
-                    }
-                })
-                .to_string(),
-            },
+            turn_id,
+            Some(&agent_run_identity),
+            &followup_call,
         )
         .await;
+    assert_eq!(followup.status, "ok", "{followup:?}");
+    assert_eq!(followup.details["childSessionId"], output["childSessionId"]);
+    assert_ne!(followup.details["runtimeJobId"], output["runtimeJobId"]);
+    let replay = engine
+        .execute_agent_tool_call(
+            session_id,
+            turn_id,
+            Some(&agent_run_identity),
+            &followup_call,
+        )
+        .await;
+    assert_eq!(replay.details, followup.details);
 
-    assert_eq!(report.status, "ok");
-    let output = &report.details;
+    let wait = ToolCallEnvelope {
+        id: "call-wait".to_string(),
+        name: "wait_agent".to_string(),
+        args_json: json!({"task_id": followup.details["runtimeJobId"]}).to_string(),
+    };
+    let report = engine
+        .execute_task_runtime_tool_call(session_id, &wait)
+        .await;
+    assert_eq!(report.status, "ok", "{report:?}");
     assert_eq!(
-        output.get("schema").and_then(Value::as_str),
-        Some("agent_task_output_wait_v1")
+        report.details["outputRef"]["runtimeJobId"],
+        followup.details["runtimeJobId"]
     );
-    assert_eq!(
-        output
-            .get("outputRef")
-            .and_then(|value| value.get("runtimeJobId"))
-            .and_then(Value::as_str),
-        Some(job.job_id.as_str())
-    );
+    let foreign = engine
+        .execute_task_runtime_tool_call("other-session", &wait)
+        .await;
+    assert_eq!(foreign.status, "error");
+    assert!(foreign.content.contains("Use list_agents"));
+
+    let interrupt = ToolCallEnvelope {
+        name: "interrupt_agent".to_string(),
+        ..wait
+    };
+    let foreign = engine
+        .execute_task_runtime_tool_call("other-session", &interrupt)
+        .await;
+    assert_eq!(foreign.status, "error");
+    let local = engine
+        .execute_task_runtime_tool_call(session_id, &interrupt)
+        .await;
+    assert_eq!(local.details["cancelAccepted"], true, "{local:?}");
+    assert_eq!(local.details["status"], "cancelled");
+    let first = store
+        .get_runtime_job(output["runtimeJobId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status, RuntimeJobStatus::Queued);
+    let second = store
+        .get_runtime_job(followup.details["runtimeJobId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(second.run_at_ms > first.run_at_ms);
+
+    let _ = std::fs::remove_dir_all(workspace_root);
 }
 
 #[test]
@@ -5272,7 +5347,7 @@ fn task_output_terminal_join_returns_only_the_bound_agent_result() {
 }
 
 #[tokio::test]
-async fn task_output_validates_canonical_output_ref_shape() {
+async fn wait_agent_rejects_unknown_parameter() {
     let store = AgentRuntimeTestStore::new();
     let engine = AgentRuntime::new_for_test(store.clone(), AgentRuntimeConfig::default());
     let report = engine
@@ -5280,13 +5355,10 @@ async fn task_output_validates_canonical_output_ref_shape() {
             "chat-parent",
             &ToolCallEnvelope {
                 id: "call-task-output-checkpoint".to_string(),
-                name: "task_output".to_string(),
+                name: "wait_agent".to_string(),
                 args_json: json!({
-                    "output_ref": {
-                        "kind": "agent",
-                        "banana": "unknown-value",
-                        "child_session_id": "chat-parent:subagent:agent-test"
-                    }
+                    "task_id": "subagent.run:1234567890abcdef",
+                    "banana": "unknown-value"
                 })
                 .to_string(),
             },
@@ -5625,7 +5697,7 @@ fn provider_prompt_cache_key_changes_when_skill_catalog_changes() {
 }
 
 #[tokio::test]
-async fn task_output_rejects_invalid_args_json() {
+async fn wait_agent_rejects_invalid_args_json() {
     let store = AgentRuntimeTestStore::new();
     let engine = AgentRuntime::new_for_test(store, AgentRuntimeConfig::default());
     let report = engine
@@ -5633,7 +5705,7 @@ async fn task_output_rejects_invalid_args_json() {
             "chat-task-runtime-invalid-args",
             &ToolCallEnvelope {
                 id: "call-invalid-task-runtime-args".to_string(),
-                name: "task_output".to_string(),
+                name: "wait_agent".to_string(),
                 args_json: "{".to_string(),
             },
         )
@@ -5649,7 +5721,7 @@ async fn task_output_rejects_invalid_args_json() {
         .as_ref()
         .map(|e| e.model_message.as_str())
         .unwrap_or_default()
-        .contains("args_json is invalid JSON"));
+        .contains("arguments are invalid"));
 }
 
 fn force_prompt_compaction_for_tests(config: &mut AgentRuntimeConfig) {
@@ -5997,7 +6069,17 @@ fn assert_model_tool_definitions_match_default_projection(
         .iter()
         .map(|definition| definition.name.as_str())
         .collect::<Vec<_>>();
-    let expected = vec!["read", "bash", "edit", "write", "task_output", "agent"];
+    let expected = vec![
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "spawn_agent",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+    ];
     assert_eq!(actual, expected);
     for definition in tool_definitions
         .iter()
@@ -11659,14 +11741,14 @@ fn read_observability_preserves_structured_coverage() {
         tool_call_id: "call-read-coverage".to_string(),
         tool_name: "read".to_string(),
         status: "ok".to_string(),
-        content: "Read castle/index.html lines 1-50 of 1642; next offset 50".to_string(),
+        content: "Read castle/index.html lines 1-50 of 1642; next offset 51".to_string(),
         details: serde_json::json!({
             "schema": "file_read_result_v1",
             "path": "castle/index.html",
             "startLine": 1,
             "endLine": 50,
             "totalLines": 1642,
-            "nextOffset": 50,
+            "nextOffset": 51,
             "truncatedBy": "lines",
             "truncated": true
         }),
@@ -11699,7 +11781,7 @@ fn read_observability_preserves_structured_coverage() {
     );
     assert_eq!(
         operation.get("nextOffset").and_then(Value::as_u64),
-        Some(50)
+        Some(51)
     );
     assert_eq!(
         operation.get("truncatedBy").and_then(Value::as_str),

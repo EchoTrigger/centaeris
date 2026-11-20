@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use crate::runtime::contracts::TimestampMs;
 
 pub const RUNTIME_JOB_TERMINAL_EVENT: &str = "runtime_job.terminal";
+pub const SUBAGENT_CANCEL_REQUESTED_EVENT: &str = "subagent.cancel_requested.v1";
+pub const SUBAGENT_CANCEL_REASON: &str = "interrupted_by_parent_agent";
+pub const SUBAGENT_CANCEL_UNCONFIRMED: &str = "subagent_cancellation_cleanup_unconfirmed";
+
+pub fn subagent_cancel_request_id(job_id: &str) -> String {
+    format!("subagent_cancel_requested:{job_id}")
+}
 pub const AGENT_RUN_LIFECYCLE_JOB_KIND: &str = "agent_run.lifecycle";
 
 pub fn agent_run_lifecycle_job_id(agent_run_id: &str) -> Result<String, String> {
@@ -341,6 +348,32 @@ pub struct CancelRuntimeJobRequest {
     pub expected_status: Option<RuntimeJobStatus>,
 }
 
+#[derive(Debug)]
+pub struct RequestSubagentJobCancellation {
+    pub job_id: String,
+    pub session_id: String,
+    pub requested_at_ms: TimestampMs,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SubagentJobCancellationReceipt {
+    pub accepted: bool,
+    pub status: RuntimeJobStatus,
+}
+
+impl SubagentJobCancellationReceipt {
+    /// Decide against the locked Job and its durable cancellation request.
+    pub fn decide(status: RuntimeJobStatus, already_requested: bool) -> Self {
+        let accepted = !status.is_terminal() && !already_requested;
+        let status = if accepted && status == RuntimeJobStatus::Queued {
+            RuntimeJobStatus::Cancelled
+        } else {
+            status
+        };
+        Self { accepted, status }
+    }
+}
+
 pub trait RuntimeJobStorePort {
     fn schedule_runtime_job(
         &self,
@@ -368,6 +401,13 @@ pub trait RuntimeJobStorePort {
     fn complete_runtime_job(&self, req: CompleteRuntimeJobRequest) -> Result<(), String>;
     fn fail_runtime_job(&self, req: FailRuntimeJobRequest) -> Result<(), String>;
     fn cancel_runtime_job(&self, req: CancelRuntimeJobRequest) -> Result<(), String>;
+    /// Requests interruption of a scoped child Job. A claim that can still
+    /// execute must keep its lease until the worker confirms cleanup.
+    fn request_subagent_job_cancellation(
+        &self,
+        req: RequestSubagentJobCancellation,
+    ) -> Result<SubagentJobCancellationReceipt, String>;
+    fn subagent_job_cancellation_requested(&self, job_id: &str) -> Result<bool, String>;
     /// Reclaim a bounded batch, returning the number of transitioned jobs.
     /// Remaining expired leases are handled by subsequent maintenance calls.
     fn reclaim_expired_runtime_job_leases(&self, now_ms: TimestampMs) -> Result<usize, String>;

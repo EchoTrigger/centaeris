@@ -17,14 +17,13 @@ pnpm install --frozen-lockfile
 ```sh
 cargo check --locked
 pnpm run typecheck
-pnpm --filter @centaeris/electron-host run dev:renderer
-pnpm --filter @centaeris/electron-host run dev
+cargo run --locked -p centaeris-tui --bin cet -- --workspace .
 ```
 
 ## Portable source checks
 
-Run `python scripts/ci.py Source --frontend-tests` on Windows, or
-`python3 scripts/ci.py Source --frontend-tests` on macOS/Linux. `Rust` and `Node`
+Run `python scripts/ci.py Source` on Windows, or
+`python3 scripts/ci.py Source` on macOS/Linux. `Rust` and `Node`
 select individual stages. The entry point resolves paths from the repository,
 uses the current Python interpreter, and stops at the first failed command.
 Windows Rust checks use Git Bash; Unix checks use native tools from PATH.
@@ -36,14 +35,11 @@ This source matrix does not produce installers or claim desktop packaging suppor
 ## Release targets
 
 ```powershell
-.\scripts\build-desktop.ps1
 .\scripts\build-tui.ps1
 ```
 
-The Desktop command builds the UI, release Runtime, Electron directory, and
-license payload, then checks Runtime freshness and identity. The TUI command
-builds `cet.exe`, the matching Runtime, licenses, built-in System Skills, and
-the package manifest before creating the Windows archive.
+The TUI command packages `cet.exe` with its embedded Runtime, licenses, built-in
+System Skills and the package manifest.
 
 Do not advertise an artifact for a platform that is absent from this build
 matrix and its acceptance tests.

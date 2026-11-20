@@ -143,7 +143,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const { blockIds, hasOlder, viewEpoch, sourceHighWater } = useTranscriptList(store);
   const hasAgentTools = blockIds.some(blockId => {
     const body = store.getBlockSnapshot(blockId)?.body;
-    return body?.kind === "tool" && (body.toolName === "agent" || body.toolName === "task_output");
+    return body?.kind === "tool" && ["agent", "task_output", "spawn_agent", "followup_task", "wait_agent"].includes(String(body.toolName));
   });
   const { agents: subagents } = useSessionSubagents(hasAgentTools ? sessionId : null, `${sourceHighWater}:${subagentsRevision}`, running);
   const targetBlockId = searchTarget?.blockId ?? "";

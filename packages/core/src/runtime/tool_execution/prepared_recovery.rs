@@ -91,13 +91,21 @@ impl<
                 || evidence.intent.session_tool_call_event_id
                     != crate::runtime::canonical_tool_call_event_id(session_id, &turn, &call.id)
                 || contract.provider_id.as_deref() != Some(evidence.intent.provider_id.as_str())
-                || contract.contract_digest()? != evidence.intent.tool_contract_digest
+                || contract.contract_digest()? != evidence.intent.migrated_contract_digest()
             {
                 return Err("prepared_tool_recovery_source_identity_mismatch".into());
             }
             if matches!(
                 evidence.effective_call.name.as_str(),
-                "agent" | "task_output" | "question" | "finalize"
+                "agent"
+                    | "task_output"
+                    | "spawn_agent"
+                    | "followup_task"
+                    | "wait_agent"
+                    | "interrupt_agent"
+                    | "list_agents"
+                    | "question"
+                    | "finalize"
             ) {
                 return Err(
                     "prepared_tool_recovery_requires_existing_wait_or_terminal_protocol".into(),

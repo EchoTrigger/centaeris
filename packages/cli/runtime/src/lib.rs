@@ -1,0 +1,67 @@
+//! In-process app service and local Agent host for cet.
+
+mod agent_runs;
+mod agent_runtime;
+mod app_service;
+mod atomic_file;
+mod commands;
+mod errors;
+mod handlers;
+mod host_automation;
+mod host_protocol;
+mod http_transport;
+mod local_attachments;
+mod local_execution_policy;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod local_hook_runner;
+mod local_host;
+mod local_work_store;
+mod mcp;
+mod message_log;
+mod model_budget;
+mod operation_receipts;
+mod plugins;
+mod process_agent;
+mod process_sessions;
+mod processes;
+mod protocol;
+mod rpc_stream;
+mod runtime_bridge;
+mod runtime_command_registry;
+mod runtime_config;
+mod runtime_garbage;
+mod runtime_ops;
+mod runtime_rpc;
+mod runtime_rpc_transport;
+mod runtime_server;
+mod schedules;
+mod session_api;
+mod session_catalog;
+mod session_files;
+mod sessions;
+mod sidecars;
+mod skills;
+mod source_reconstruction;
+mod terminal_sessions;
+use centaeris_runtime_sqlite as sqlite_store;
+#[cfg(feature = "native-job-store")]
+mod subagent_delivery;
+mod subagent_scheduler;
+mod system_skills_deployment;
+mod transcript_runtime;
+mod user_config;
+mod user_data_layout;
+mod workspace_git;
+mod workspaces;
+
+use centaeris_agent::{local_execution_host, openssh};
+pub mod rpc_client;
+pub use app_service::LocalAppService;
+pub use atomic_file::write_file_atomically;
+pub use local_host::LocalAgentHost;
+pub use rpc_stream::RpcConnection;
+pub use runtime_command_registry::{RuntimeOperationKind, RuntimeRetryPolicy};
+pub use runtime_rpc::encode_jsonl_value;
+pub use session_catalog::paging::cwd_key as session_catalog_workspace_key;
+pub use user_data_layout::{ensure_runtime_directory, profile_identity_for, profile_root};
+pub use workspace_git::current_branch as workspace_git_branch;

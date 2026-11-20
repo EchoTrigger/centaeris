@@ -33,6 +33,25 @@ current text; `write` creates or overwrites the target. Ordinary filesystem writ
 use direct file I/O, without a publication-time version check or temporary-file
 replacement guarantee. An interrupted write can leave partial content.
 
+`edit` matches all replacements against the same text with line endings
+normalized to LF. It copies original bytes outside each match, including a
+UTF-8 BOM. New lines in a replacement use the first line ending at or after
+the match start, falling back to the preceding ending at EOF and LF in a
+single-line file.
+
+Text `read` uses one-based line numbers. Omitting `offset` starts at line 1.
+Pass the returned `nextOffset` to continue after a partial page. Directory
+listings use a zero-based entry offset.
+
+Saved results from the former zero-based text contract retain their original
+arguments and receipts. To continue from such a result after upgrading, use
+its last returned line number (`endLine`) plus one.
+
+A workspace text `read` obtains the file and its whole-file hash in one Host
+response. Core scans the text and retains only the requested page when building
+the model result. Each page observes the version read by that invocation.
+The local and hosted `ReadFile` operation still returns the entire bounded file.
+
 The internal `WriteFile.observedFileHash` is the version observed during the
 current tool invocation. Resource-specific Hosts may use it for coordination;
 ordinary filesystem execution does not enforce it. It replaces `expectedFileHash`

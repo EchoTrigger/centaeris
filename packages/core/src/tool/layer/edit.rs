@@ -37,18 +37,6 @@ struct MatchedEdit<'a> {
     new_text: &'a str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OriginalLineEnding {
-    Lf,
-    CrLf,
-}
-
-struct NormalizedEditFile {
-    had_utf8_bom: bool,
-    line_ending: OriginalLineEnding,
-    content: String,
-}
-
 impl LocalToolHandler for EditToolHandler {
     fn name(&self) -> &'static str {
         "edit"
@@ -102,27 +90,10 @@ fn execute_edit_outcome(
         MutationKind::Edit,
         |display_path, previous_content| {
             let previous_content = previous_content.expect("edit requires an existing file");
-            let normalized_file = normalize_edit_file(previous_content)?;
-            let matched_edits = match_edits_against_original(
-                normalized_file.content.as_str(),
-                args.edits.as_slice(),
-            )?;
-            let mut updated_normalized = String::with_capacity(normalized_file.content.len());
-            let mut cursor = 0usize;
-            for edit in &matched_edits {
-                updated_normalized.push_str(&normalized_file.content[cursor..edit.start]);
-                updated_normalized.push_str(edit.new_text);
-                cursor = edit.end;
-            }
-            updated_normalized.push_str(&normalized_file.content[cursor..]);
-            let updated_content = restore_edit_file(&normalized_file, updated_normalized.as_str());
-            let diff = write_diff_preview(
-                display_path,
-                Some(previous_content),
-                updated_normalized.as_str(),
-            );
+            let updated = apply_edits(previous_content, &args.edits)?;
+            let diff = write_diff_preview(display_path, Some(previous_content), &updated);
             Ok(PreparedMutation {
-                content: updated_content,
+                content: updated.into_bytes(),
                 diff,
             })
         },
@@ -197,51 +168,82 @@ fn validate_and_normalize_edits(edits: &mut [EditItemRequest]) -> Result<(), Fil
     Ok(())
 }
 
-fn normalize_edit_file(bytes: &[u8]) -> Result<NormalizedEditFile, FileToolError> {
-    let had_utf8_bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
-    let text_bytes = if had_utf8_bom { &bytes[3..] } else { bytes };
-    let text = std::str::from_utf8(text_bytes).map_err(|error| {
-        FileToolError::new(
-            FileToolErrorKind::InvalidInput,
-            format!(
-                "edit only supports valid UTF-8 text; the target contains invalid UTF-8 at byte {}",
-                error.valid_up_to()
-            ),
-        )
-    })?;
-    let line_ending = if text.contains("\r\n") {
-        OriginalLineEnding::CrLf
-    } else {
-        OriginalLineEnding::Lf
-    };
-    Ok(NormalizedEditFile {
-        had_utf8_bom,
-        line_ending,
-        content: normalize_to_lf(text),
-    })
-}
-
 fn normalize_to_lf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn restore_edit_file(file: &NormalizedEditFile, normalized: &str) -> Vec<u8> {
-    let restored = match file.line_ending {
-        OriginalLineEnding::Lf => normalized.to_string(),
-        OriginalLineEnding::CrLf => normalized.replace('\n', "\r\n"),
-    };
-    let mut bytes = Vec::with_capacity(restored.len() + usize::from(file.had_utf8_bom) * 3);
-    if file.had_utf8_bom {
-        bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+fn local_line_ending(text: &str, start: usize) -> &'static str {
+    let ending = text[start..]
+        .find(['\r', '\n'])
+        .map(|i| start + i)
+        .or_else(|| text[..start].rfind(['\r', '\n']));
+    let Some(i) = ending else { return "\n" };
+    if text[i..].starts_with("\r\n") || text[..=i].ends_with("\r\n") {
+        "\r\n"
+    } else if text.as_bytes()[i] == b'\r' {
+        "\r"
+    } else {
+        "\n"
     }
-    bytes.extend_from_slice(restored.as_bytes());
-    bytes
+}
+
+/// Translates successive, increasing LF-normalized byte offsets into original offsets.
+fn original_offsets(original: &str) -> impl FnMut(usize) -> usize + '_ {
+    // Each CRLF before a match boundary accounts for one extra original byte.
+    let mut crlf = original.match_indices("\r\n").peekable();
+    let mut extra = 0;
+    move |offset: usize| {
+        while crlf.next_if(|(index, _)| *index < offset + extra).is_some() {
+            extra += 1;
+        }
+        offset + extra
+    }
+}
+
+fn apply_edits(bytes: &[u8], edits: &[EditItemRequest]) -> Result<String, FileToolError> {
+    let text = std::str::from_utf8(bytes).map_err(|error| {
+        FileToolError::new(
+            FileToolErrorKind::InvalidInput,
+            format!(
+                "edit only supports valid UTF-8 text; invalid UTF-8 at byte {}",
+                error.valid_up_to()
+            ),
+        )
+    })?;
+    let original = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let matches = match_edits_against_original(original, edits)?;
+    let mut original_offset = original_offsets(original);
+    let mut updated = String::with_capacity(text.len());
+    updated.push_str(&text[..text.len() - original.len()]);
+    let mut cursor = 0;
+    for edit in matches {
+        let start = original_offset(edit.start);
+        let end = original_offset(edit.end);
+        updated.push_str(&original[cursor..start]);
+        if edit.new_text.contains('\n') {
+            updated.push_str(
+                &edit
+                    .new_text
+                    .replace('\n', local_line_ending(original, start)),
+            );
+        } else {
+            updated.push_str(edit.new_text);
+        }
+        cursor = end;
+    }
+    updated.push_str(&original[cursor..]);
+    Ok(updated)
 }
 
 fn match_edits_against_original<'a>(
-    content: &str,
+    original: &str,
     edits: &'a [EditItemRequest],
 ) -> Result<Vec<MatchedEdit<'a>>, FileToolError> {
+    let content = if original.contains('\r') {
+        std::borrow::Cow::Owned(normalize_to_lf(original))
+    } else {
+        std::borrow::Cow::Borrowed(original)
+    };
     let mut matched = Vec::with_capacity(edits.len());
     for (request_index, edit) in edits.iter().enumerate() {
         let Some(start) = content.find(edit.old_text.as_str()) else {
@@ -258,11 +260,25 @@ fn match_edits_against_original<'a>(
             .expect("non-empty old_text match must start at a character")
             .len_utf8();
         let remaining_start = start.saturating_add(next_char_bytes);
-        if content[remaining_start..].contains(edit.old_text.as_str()) {
+        if let Some(relative) = content[remaining_start..].find(edit.old_text.as_str()) {
+            let second = remaining_start + relative;
+            // Report the same line numbers as read, including in files with lone CRs.
+            let mut original_offset = original_offsets(original);
+            let first_byte = original_offset(start);
+            let second_byte = original_offset(second);
+            let first_line = 1 + original[..first_byte]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count();
+            let second_line = first_line
+                + original[first_byte..second_byte]
+                    .bytes()
+                    .filter(|&b| b == b'\n')
+                    .count();
             return Err(FileToolError::new(
                 FileToolErrorKind::EditTextMismatch,
                 format!(
-                    "edits[{request_index}].old_text matched more than one location in the original file; include only enough surrounding context to make it unique"
+                    "edits[{request_index}].old_text matched more than one location in the original file (first matches start on lines {first_line} and {second_line}); include only enough surrounding context to make it unique"
                 ),
             ));
         }
@@ -330,23 +346,43 @@ mod tests {
     }
 
     #[test]
-    fn edit_normalization_preserves_bom_and_crlf() {
-        let source = b"\xEF\xBB\xBFalpha\r\nbeta\r\n";
-        let normalized = normalize_edit_file(source).expect("normalize source");
-        assert!(normalized.had_utf8_bom);
-        assert_eq!(normalized.line_ending, OriginalLineEnding::CrLf);
-        assert_eq!(normalized.content, "alpha\nbeta\n");
+    fn edit_preserves_bom_and_bytes_outside_mixed_line_endings() {
+        let source = "\u{feff}未改\nleft\rrename\r\nold\r\n尾\nlast";
+        let edits = [
+            EditItemRequest {
+                old_text: "rename\nold".into(),
+                new_text: "new\nblock".into(),
+            },
+            EditItemRequest {
+                old_text: "last".into(),
+                new_text: "a\nb".into(),
+            },
+        ];
         assert_eq!(
-            restore_edit_file(&normalized, "alpha\nbravo\n"),
-            b"\xEF\xBB\xBFalpha\r\nbravo\r\n"
+            apply_edits(source.as_bytes(), &edits).unwrap(),
+            "\u{feff}未改\nleft\rnew\r\nblock\r\n尾\na\nb"
         );
     }
 
     #[test]
+    fn ambiguous_edit_reports_read_line_numbers() {
+        let error = apply_edits(
+            b"first\r\nmid\rpiece\nmatch\r\nmatch",
+            &[EditItemRequest {
+                old_text: "match".into(),
+                new_text: "new".into(),
+            }],
+        )
+        .unwrap_err();
+        assert!(error
+            .to_local_error("edit")
+            .content
+            .contains("lines 3 and 4"));
+    }
+
+    #[test]
     fn edit_rejects_invalid_utf8_without_lossy_rewrite() {
-        let error = normalize_edit_file(&[0x66, 0x80, 0x6f])
-            .err()
-            .expect("invalid UTF-8 must fail");
+        let error = apply_edits(&[0x66, 0x80, 0x6f], &[]).expect_err("invalid UTF-8 must fail");
         assert!(error
             .to_local_error("edit")
             .content

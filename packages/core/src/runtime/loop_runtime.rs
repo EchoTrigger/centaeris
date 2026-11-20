@@ -1,5 +1,6 @@
 use super::driver::TurnControlInput;
 use super::*;
+use crate::session::reliability::SUBAGENT_CANCEL_REASON;
 use std::time::Duration;
 
 const MAX_OUTPUT_TOKEN_RECOVERY_ATTEMPTS: u8 = 5;
@@ -16,6 +17,26 @@ pub(super) struct WorkerJobCancellation<'a> {
     job_id: &'a str,
     jobs: &'a dyn crate::session::store::AsyncJobStorePort,
     storage_error: Mutex<Option<crate::session::store::job::JobStoreError>>,
+    tool_cancellation: Arc<Mutex<Option<String>>>,
+}
+
+impl WorkerJobCancellation<'_> {
+    fn signal_tool_cancellation(&self, reason: String) {
+        *self
+            .tool_cancellation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+    }
+
+    fn tool_probe(&self) -> Arc<crate::execution::ExecutionCancellationProbe> {
+        let signal = self.tool_cancellation.clone();
+        Arc::new(move || {
+            Ok(signal
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone())
+        })
+    }
 }
 
 async fn poll_loop_cancellation_async(
@@ -25,19 +46,27 @@ async fn poll_loop_cancellation_async(
     let Some(worker) = worker else {
         return poll_loop_cancellation(cancellation_probe);
     };
-    let observed = worker
-        .jobs
-        .get_runtime_job(worker.job_id)
-        .await
-        .and_then(|job| {
-            job.ok_or_else(|| {
+    let observed: Result<_, crate::session::store::job::JobStoreError> = async {
+        let job = worker
+            .jobs
+            .get_runtime_job(worker.job_id)
+            .await?
+            .ok_or_else(|| {
                 crate::session::store::job::JobStoreError::not_executed(
                     crate::session::store::job::JobStoreOperation::Read,
                     "subagent Job disappeared during cancellation polling".into(),
                 )
-            })
-            .map(|job| cancelled_job_reason(&job))
-        });
+            })?;
+        if let Some(reason) = cancelled_job_reason(&job) {
+            return Ok(Some(reason));
+        }
+        Ok(worker
+            .jobs
+            .subagent_job_cancellation_requested(worker.job_id)
+            .await?
+            .then(|| SUBAGENT_CANCEL_REASON.to_owned()))
+    }
+    .await;
     let reason = observed.map_err(|error| {
         let message = error.diagnostic_message();
         worker
@@ -639,8 +668,23 @@ impl<
                     wait.tool_call_id, wait.source_tool_name, call.name
                 ));
             }
-            let current_definition_digest =
-                self.projected_tool_definition_digest(&session, wait.source_tool_name.as_str())?;
+            let current_definition_digest = if wait.job_kind == SUBAGENT_RUN_JOB_KIND
+                && wait.source_tool_name == "task_output"
+            {
+                let contract = crate::tool::historical_task_output_contract();
+                let definition = crate::tool::ModelToolDefinition {
+                    name: contract.name,
+                    description: contract.summary,
+                    input_schema: contract.input_schema,
+                };
+                let bytes = serde_json::to_vec(&definition).map_err(|error| {
+                    format!("serialize historical tool definition failed: {error}")
+                })?;
+                use sha2::{Digest, Sha256};
+                format!("sha256:{:x}", Sha256::digest(bytes))
+            } else {
+                self.projected_tool_definition_digest(&session, wait.source_tool_name.as_str())?
+            };
             if current_definition_digest != wait.tool_definition_digest {
                 return Err(format!(
                     "runtime_job_wait_tool_definition_digest_mismatch: callId={}",
@@ -1069,7 +1113,7 @@ impl<
         wait: &RuntimeJobWaitV1,
         job: &RuntimeJobRecord,
     ) -> Result<Vec<ExternalContextObject>, String> {
-        if wait.source_tool_name != "task_output" {
+        if !matches!(wait.source_tool_name.as_str(), "wait_agent" | "task_output") {
             return Err(format!(
                 "subagent_runtime_job_wait_tool_mismatch: jobId={} expected=task_output actual={}",
                 job.job_id, wait.source_tool_name
@@ -1531,6 +1575,7 @@ impl<
             job_id: req.job.job_id.as_str(),
             jobs: self.job_store.as_ref(),
             storage_error: Mutex::new(None),
+            tool_cancellation: Arc::new(Mutex::new(None)),
         };
         let cancellation_probe: Option<&(dyn Fn() -> Result<Option<String>, String> + Sync)> = self
             .tools_port
@@ -2628,25 +2673,55 @@ impl<
                 }
             }
 
-            let mut response = if let Some(sink) = stream_sink.as_deref_mut() {
-                self.process_turn_request_with_stream_tracking_and_tool_safe_point_async(
-                    turn_req,
-                    sink,
-                    &mut streamed_session_event_ids,
-                    tool_safe_point,
-                    Some(&execution_tools),
-                    pending_usage.as_ref(),
-                )
-                .await?
-            } else {
-                self.process_turn_with_stream_sink_and_tool_safe_point_async(
-                    turn_req,
-                    None,
-                    tool_safe_point,
-                    Some(&execution_tools),
-                    pending_usage.as_ref(),
-                )
-                .await?
+            let (mut response, tool_interrupt) = {
+                let watch_tool =
+                    worker_cancellation.filter(|_| !turn_req.generate_result.tool_calls.is_empty());
+                let execution_tools = if let Some(worker) = watch_tool {
+                    execution_tools
+                        .with_additional_execution_cancellation_probe(worker.tool_probe())
+                } else {
+                    execution_tools
+                };
+                let execute = async {
+                    if let Some(sink) = stream_sink.as_deref_mut() {
+                        self.process_turn_request_with_stream_tracking_and_tool_safe_point_async(
+                            turn_req,
+                            sink,
+                            &mut streamed_session_event_ids,
+                            tool_safe_point,
+                            Some(&execution_tools),
+                            pending_usage.as_ref(),
+                        )
+                        .await
+                    } else {
+                        self.process_turn_with_stream_sink_and_tool_safe_point_async(
+                            turn_req,
+                            None,
+                            tool_safe_point,
+                            Some(&execution_tools),
+                            pending_usage.as_ref(),
+                        )
+                        .await
+                    }
+                };
+                tokio::pin!(execute);
+                if let Some(worker) = watch_tool {
+                    tokio::select! {
+                        result = &mut execute => (result?, None),
+                        reason = wait_for_loop_cancellation(cancellation_probe, Some(worker)) => {
+                            worker.signal_tool_cancellation(
+                                reason.as_ref().cloned()
+                                    .unwrap_or_else(|_| "subagent_cancellation_observation_failed".into()),
+                            );
+                            // The tool still owns any managed command. Let it confirm
+                            // shutdown and project its result before the worker exits.
+                            let result = execute.await;
+                            (result?, Some(reason?))
+                        }
+                    }
+                } else {
+                    (execute.await?, None)
+                }
             };
             if let Some(events) = applied_intervention_events {
                 response.runtime_events.splice(0..0, events);
@@ -2685,6 +2760,13 @@ impl<
                 );
             }
             responses.push(response);
+
+            if let Some(reason) = tool_interrupt {
+                return Ok(AgentRunResult::new(
+                    responses,
+                    AgentRunStop::Cancelled(reason),
+                ));
+            }
 
             if convergence_intervention.is_some() && continuation != QueryContinuation::Finalize {
                 return Err("answer_now_convergence_request_must_finalize".to_string());

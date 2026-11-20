@@ -1,5 +1,5 @@
 use crate::arguments::{OutputMode, PromptOptions};
-use centaeris_desktop_services::rpc_client::{RuntimeClient, RuntimeEvent, SessionCommand};
+use centaeris_cli_runtime::rpc_client::{RuntimeClient, RuntimeEvent, SessionCommand};
 use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::path::Path;
@@ -8,7 +8,12 @@ use std::time::Duration;
 pub(crate) fn run(options: PromptOptions) -> Result<i32, String> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    let result = run_prompt(&options, &mut output);
+    let viewer_id = format!("cli-{}", std::process::id());
+    let result = RuntimeClient::start_embedded(&viewer_id).and_then(|mut client| {
+        let outcome = run_prompt(&options, &mut output, &mut client, &viewer_id);
+        let shutdown = client.shutdown_embedded();
+        outcome.and_then(|outcome| shutdown.map(|()| outcome))
+    });
     match result {
         Ok(outcome) => {
             write_outcome(options.mode, &outcome, &mut output)?;
@@ -26,16 +31,12 @@ pub(crate) fn run(options: PromptOptions) -> Result<i32, String> {
     }
 }
 
-fn run_prompt(options: &PromptOptions, output: &mut impl Write) -> Result<RunOutcome, String> {
-    let mut client = RuntimeClient::start()?;
-    let viewer_id = format!("cli-{}", std::process::id());
-    let descriptor = client
-        .request(
-            "initialize",
-            json!({"request": {"clientKind": "tui", "viewerId": viewer_id}}),
-        )
-        .map_err(|error| error.to_string())?;
-    client.validate_initialize_descriptor(&descriptor)?;
+fn run_prompt(
+    options: &PromptOptions,
+    output: &mut impl Write,
+    client: &mut RuntimeClient,
+    viewer_id: &str,
+) -> Result<RunOutcome, String> {
     let operation = operation_id()?;
     let session_id = match &options.session_id {
         Some(session_id) => {

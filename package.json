@@ -8,12 +8,8 @@
     "url": "git+https://github.com/EchoTrigger/centaeris.git"
   },
   "scripts": {
-    "lint": "pnpm run lint:ui && pnpm run lint:desktop && pnpm run lint:web",
+    "lint": "pnpm run lint:ui && pnpm run lint:web",
     "lint:ui": "node ./node_modules/@biomejs/biome/bin/biome lint packages/ui/src packages/visuals/src",
-    "lint:ui-source": "node ./node_modules/@biomejs/biome/bin/biome lint packages/desktop/src/renderer packages/desktop/scripts packages/ui/src packages/visuals/src",
-    "lint:desktop": "node ./node_modules/@biomejs/biome/bin/biome lint packages/desktop/src packages/desktop/scripts packages/desktop/tests",
-    "lint:hooks": "node ./node_modules/@biomejs/biome/bin/biome lint packages/desktop/src/renderer packages/desktop/tests --only=lint/correctness/useExhaustiveDependencies",
-    "lint:unused": "node ./node_modules/@biomejs/biome/bin/biome lint packages/desktop/src packages/desktop/tests packages/desktop/scripts packages/ui/src packages/visuals/src --only=lint/correctness/noUnusedImports --only=lint/correctness/noUnusedVariables",
     "typecheck": "pnpm -r --if-present run typecheck",
     "lint:web": "node ./node_modules/@biomejs/biome/bin/biome lint packages/workspace/web/src packages/workspace/web/tests packages/visuals/src packages/ui/src",
     "lint:hooks:web": "node ./node_modules/@biomejs/biome/bin/biome lint packages/workspace/web/src packages/workspace/web/tests --only=lint/correctness/useExhaustiveDependencies",

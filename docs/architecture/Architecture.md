@@ -14,8 +14,8 @@ Hosts and adapters translate external systems into Core contracts:
 | `packages/sqlite` | Local `RuntimeStore` schema, transactions, and persistence |
 | `packages/mcp` | Lazy MCP connection, discovery validation, and call translation |
 | `packages/agent` | Rust Agent SDK, Session host interface and local execution adapters |
-| `packages/desktop/src/services` | Shared local product services, host composition and RPC transport |
-| `packages/desktop` | Desktop product services, Electron shell, renderer and controlled bridge |
+| `packages/cli/runtime` | In-process local Runtime and JSON-RPC transport |
+| `packages/electron-shell` | Dormant window, renderer isolation and packaging infrastructure |
 | `packages/cli` | Interactive terminal, Print, JSON and RPC mode entry points |
 | `packages/ui` | Shared frontend primitives and theme foundations |
 | `packages/visuals` | Shared inline visualization rendering |
@@ -44,14 +44,13 @@ the generic facts.
 
 The local Rust Session API and RPC handler share admission, operation receipts,
 Run controls and persistence. Native connections receive typed notifications;
-RPC connections encode the same method and params as JSONL. Desktop owns its
-product services and renderer, and CLI owns its terminal and headless behavior.
+RPC connections encode the same method and params as JSONL. The CLI owns
+terminal and headless interaction and composes the app service in process.
 A connection's lifetime is distinct from its service-owned Runs.
 
 Hosted requests enter Django and durable Worker scheduling, then Workspace
 Runtime composes Core with platform authorization, PostgreSQL and sandbox
-execution. The executor runs environment tasks. CLI is an additional client
-entry point to the local host.
+execution. The executor runs environment tasks.
 
 ## Tool concurrency ownership
 
@@ -104,7 +103,7 @@ boundary and pass the returned coordinator explicitly.
 5. Durable tool receipts, model output, continuation state, and terminal
    outcome are committed through the owning `SessionLogPort` or `RuntimeStore`
    adapter before Hosts publish their durable projections.
-6. Desktop and TUI render the same canonical events. They may differ in layout,
+6. Clients render the same canonical events. They may differ in layout,
    but not in runtime meaning.
 
 ## Model transport
@@ -135,7 +134,7 @@ this default case-insensitively. The host-owned MCP client retains its existing
 `x-`-only custom-header contract.
 
 This identifies the sending software, not an authenticated user or the currently
-attached Desktop/TUI viewer. It does not change browser page requests, Runtime
+attached local viewer. It does not change browser page requests, Runtime
 wire contracts, or persistent records. Request-level loopback tests cover the
 model JSON/SSE defaults and overrides, plus both MCP connection paths.
 
@@ -161,7 +160,7 @@ with `runtime_sqlite`; private Core tests use narrow fakes.
 The Local Runtime executes against the user's selected working directory.
 `ExecutionHost` file identities are opaque to Core. Hosts enforce their own
 platform process boundary and translate results back into canonical tool
-receipts. Windows Desktop and TUI run a native Windows Runtime that executes
+receipts. On Windows, the CLI runs its local Runtime natively and executes
 host commands through Git for Windows Bash; Linux and macOS run the same Runtime
 natively. The local Host claims no OS sandbox and reports that policy is not
 enforced.
@@ -171,13 +170,11 @@ isolation backends. Hosts report whether policy is enforced and explicit error
 categories. The [ExecutionHost contract](ExecutionHostContract.md) records the
 current native local Host and the macOS Runtime CI results.
 
-Process shutdown is owned by the Host and Runtime lifecycle. AgentRuns belong
-to the Runtime service and survive the last local client disconnecting. Explicit
-cancel and service shutdown use Core interruption semantics; idle shutdown
-waits until active runs and background jobs have finished.
+Process shutdown follows the runtime lifecycle. CLI AgentRuns
+belong to the `cet` process, which drains its runtime on exit. Explicit cancel
+and shutdown use Core interruption semantics.
 
-Local background commands use the same Runtime-owned process service for Desktop,
-TUI and the native `process_*` dynamic tools. The Agent adapter persists admission
+The local Runtime owns process sessions and the native `process_*` dynamic tools. The Agent adapter persists admission
 intent, provenance and bounded completion/output records. Its completion worker
 uses normal idempotent Session run admission after the Session becomes idle;
 cancelled/failed origins do not auto-resume. Internal admission shares client-run
@@ -197,13 +194,12 @@ owns host-agnostic contracts and runtime semantics; packages/workspace/api owns 
 control-plane facts, and packages/workspace/runtime adapts those contracts. Private
 plugins, credentials, customer data and local deployment configuration remain external.
 
-## Desktop Git workbench
+## Local Git workbench protocol
 
-The Desktop Review tab uses additive `workspace_git_review_get`,
+The local Runtime exposes `workspace_git_review_get`,
 `workspace_git_review_diff_get`, `workspace_git_stage` and `workspace_git_unstage`
 Host-surface commands. `workspace_git_commit` remains available at the Host boundary;
-Review has no manual commit form. Git/gh agent operations are the primary commit workflow. Existing Git read commands keep
-their meaning. System Git owns repository semantics; Core has no Git workbench
+Git/gh agent operations are the primary commit workflow. System Git owns repository semantics; Core has no Git workbench
 state. The Runtime adapter uses argument arrays and literal pathspecs, parses
 NUL-delimited porcelain v2 status, and displays index and working-tree diffs separately.
 Review operates on a selected repository root, including linked worktree roots;
@@ -224,15 +220,13 @@ and signing remain Git-owned; no hook bypass or automatic write retry is added.
 Each Git process has a 15-second bound and 1 MiB output capture limit. Incomplete
 status/index output is rejected; diff output may be explicitly truncated. A hook
 failure, timeout or lost response can leave an uncertain outcome. Callers must
-reconcile before retrying; the Review tab does not
-invoke commits or add preventive prompts or a confirmation dialog.
+reconcile before retrying.
 This feature does not provide durable command receipts or exactly-once commits.
 Successful Host commit responses include the resulting HEAD, checked against the expected parent;
 external processes can still race this observation.
 
-The shared `packages/desktop/src/services/generated/workspace-git-samples.json` fixture is
-checked against Rust serialization/strict request decoding and Desktop bridge
-payloads. Real temporary-repository tests cover partial staging, unborn HEAD,
+The shared `packages/cli/runtime/src/generated/workspace-git-samples.json` fixture is
+checked against Rust serialization and strict request decoding. Real temporary-repository tests cover partial staging, unborn HEAD,
 renames, literal paths, conflicts, hooks, and stale review rejection.
 
 ### Review view sources
@@ -259,7 +253,7 @@ process-output encoding heuristic; execution-host display decoding is unchanged.
 
 OpenSSH command adaptation and persistent local schedules live in Runtime Host.
 The scheduler uses ordinary idempotent Session/AgentRun admission; clocks and
-plan storage do not enter Core. Desktop and TUI share the Host methods and Agent
+plan storage do not enter Core. The CLI shares Host methods and Agent
 tools. See [Local automation](../reference/LocalAutomation.md) for lifecycle,
 command syntax, recovery boundaries and local-only limitations.
 

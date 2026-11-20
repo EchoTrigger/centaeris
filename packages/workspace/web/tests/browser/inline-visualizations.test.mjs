@@ -13,7 +13,7 @@ for (const width of [1280, 390]) for (const theme of ["light", "dark"]) test(`sh
   try {
     await server.listen();
     await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/inline-visualizations.html?theme=${theme}`, { width }, profile, async ({ evaluate, send, frame }) => {
-      await waitFor(() => evaluate('document.querySelectorAll("[data-example] .centaeris-visual").length === 6'), "six accepted Desktop visualization examples");
+      await waitFor(() => evaluate('document.querySelectorAll("[data-example] .centaeris-visual").length === 3'), "three Workspace visualization examples");
       assert.deepEqual(await evaluate(() => {
         const normalized = token => { const probe = document.createElement("span"); probe.style.color = `var(${token})`; document.body.append(probe); const color = getComputedStyle(probe).color; probe.remove(); return color; };
         return window.visualizationFixture.examples.flatMap(({ id, values }) => {
@@ -34,7 +34,7 @@ for (const width of [1280, 390]) for (const theme of ["light", "dark"]) test(`sh
       assert.equal(await evaluate(() => document.querySelector('[aria-label="Streaming visual"] [role=status]')?.getAttribute("aria-busy")), "true");
       assert.equal(await evaluate(() => document.querySelector('[aria-label="Streaming visual"]').textContent.includes("elements")), false, "unfinished JSON remains private");
       const nodes = await evaluate(() => {
-        const sequence = document.querySelector('[data-example="delivery"] ol');
+        const sequence = document.querySelector('[data-example="session"] ol');
         const items = [...sequence.children];
         return items.map((item, index) => {
           const node = getComputedStyle(item, "::after");

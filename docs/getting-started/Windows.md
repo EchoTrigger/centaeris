@@ -10,21 +10,11 @@ The first public release is planned as **v0.1.0 Windows Preview**, for Windows
 x64 (AMD64). Candidate artifacts may exist before a GitHub Release is published.
 Download only the artifacts attached to the intended release.
 
-For Desktop, run `Centaeris-Desktop-0.1.0-windows-x64-setup.exe`. Setup installs
-for the current user, allows a custom location and adds a Start menu entry.
-For a portable installation, extract the complete
-`centaeris-desktop-windows-x64.zip` before starting `Centaeris Desktop.exe`.
-Keep the accompanying resources and license files together.
-
 Install Git for Windows before running local commands. The packaged clients
 include their Runtime and System Skills; building Rust, Node.js or pnpm from
 source is not part of end-user installation.
 
-Open Settings > Model services and configure your own model service and
-credentials. Use File > Open Folder to select a workspace, then start a chat.
-Theme preferences are in Settings > Appearance.
-
-For TUI, extract `centaeris-windows-x64.zip` and run:
+Extract `centaeris-windows-x64.zip` and run:
 
 ```powershell
 .\cet.exe --workspace C:\path\to\project
@@ -32,14 +22,9 @@ For TUI, extract `centaeris-windows-x64.zip` and run:
 
 The first release is a pre-release: `scripts/install-tui.ps1 -Release v0.1.0`
 can select it explicitly once published; the default `latest` selects stable
-releases only. Desktop and TUI use the same local Runtime and user data root,
-normally `%USERPROFILE%\.centaeris`.
-
-To replace an installed Desktop, finish active tasks and exit Desktop using
-its tray menu. Close TUI clients if they use the Runtime in that installation.
-Then run the new installer. Setup refuses to replace an occupied Runtime.
-Uninstalling keeps existing sessions, settings, credentials and workspace files.
-Updates are downloaded manually; automatic updates are not enabled.
+releases only. The CLI defaults to the same user data root,
+`%USERPROFILE%\.centaeris`. The TUI runtime lives inside `cet.exe`. Multiple
+CLI windows can share the directory with one writer per session. The raw `rpc` mode needs exclusive access to their data directory.
 
 ## Build from source
 
@@ -60,31 +45,6 @@ pnpm install --frozen-lockfile
 cargo fetch --locked
 ```
 
-### Desktop source build
-
-Build the complete Desktop directory from the repository root:
-
-```powershell
-.\scripts\build-desktop.ps1
-```
-
-The executable is written to:
-
-```text
-packages/desktop/dist/Centaeris Desktop/Centaeris Desktop.exe
-```
-
-This command builds the complete application directory. To wrap it in an EXE
-installer, follow [the release process](../development/ReleaseProcess.md).
-Close a running packaged Desktop before rebuilding its directory.
-
-For development:
-
-```powershell
-pnpm --filter @centaeris/electron-host run dev:renderer
-pnpm --filter @centaeris/electron-host run dev
-```
-
 ### TUI source build
 
 Build the standalone TUI archive:
@@ -94,8 +54,8 @@ Build the standalone TUI archive:
 ```
 
 The archive is written to
-`packages/cli/dist/centaeris-windows-x64.zip`. It contains `cet.exe`, the
-matching native `centaeris-runtime.exe`, license material, and a file manifest
+`packages/cli/dist/centaeris-windows-x64.zip`. It contains `cet.exe`,
+license material, and a file manifest
 verified by the installer.
 
 After an official GitHub Release exists, `scripts/install-tui.ps1` can install a
@@ -104,7 +64,7 @@ the source build before release assets exist.
 
 ## First run
 
-Choose a working directory and configure a model in the client. For the TUI,
+Choose a working directory and configure a model with `/model`. To select the directory,
 pass `--workspace C:\path\to\project`. Local data is created in the user's data
-root. A missing or unverified Git Bash, an incompatible Runtime, or corrupt local
+root. A missing or unverified Git Bash or corrupt local
 state fails explicitly.

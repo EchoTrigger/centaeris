@@ -1,6 +1,5 @@
 packages:
   - packages/sdk
-  - packages/desktop
   - packages/ui
   - packages/visuals
   - packages/workspace/web
@@ -9,8 +8,6 @@ enablePrePostScripts: true
 storeDir: .cache/pnpm
 
 allowBuilds:
-  electron: true
-  electron-winstaller: false
   fsevents: true
 
 overrides:

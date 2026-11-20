@@ -7,21 +7,13 @@ for Windows is installed and that `bash.exe` is discoverable, following the
 [local execution setup](architecture/LocalExecution.md). A missing or unverified
 Bash fails explicitly instead of running an unsandboxed fallback.
 
-## Desktop build says the application is running
+## CLI build is stale
 
-Close the packaged `Centaeris Desktop.exe` from the same output directory and
-run `scripts/build-desktop.ps1` again.
-
-## Runtime is missing or stale
-
-Run the complete Desktop or TUI build from the repository root. Development may
-set `CENTAERIS_RUNTIME_EXE` to an explicit compatible Runtime executable. A
-protocol mismatch must be fixed by rebuilding the matching source, not by
-disabling validation.
+Rebuild `cet.exe` from the desired revision. The Runtime is embedded in the CLI.
 
 ## System Skills are missing
 
-Rebuild the Desktop or TUI distribution from a checkout containing
+Rebuild the TUI distribution from a checkout containing
 `system-skills/`, then restart the Host. The release build validates and bundles
 these Skills with their LICENSE and NOTICE files. For a standalone development
 Runtime, set `CENTAERIS_SYSTEM_SKILLS_SOURCE` to the checkout's

@@ -266,7 +266,7 @@ impl SubAgentWorkPacket {
             if !is_canonical_tool_name(tool) {
                 return Err("subagent_work_packet_invalid_allowed_tool".to_string());
             }
-            if matches!(tool.as_str(), "agent" | "task_output") {
+            if crate::tool::AGENT_CONTROL_TOOL_NAMES.contains(&tool.as_str()) {
                 return Err("subagent_work_packet_non_delegatable_tool".to_string());
             }
             if !allowed.insert(tool.as_str()) {
