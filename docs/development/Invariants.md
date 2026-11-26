@@ -5,7 +5,7 @@ own the details. Test pointers identify coverage, not a claim that the tests
 passed for the current revision. Use [Testing](Testing.md) to select validation
 for a change and report the commands actually run.
 
-## INV-01 Core owns runtime semantics
+## Core owns runtime semantics
 
 Owner: `packages/core`. Hosts adapt storage, transport, and execution without
 defining another runtime state machine.
@@ -13,12 +13,14 @@ defining another runtime state machine.
 - Contract: [runtime ownership](../architecture/Architecture.md#runtime-ownership).
 - Protection: Core's [query loop tests](../../packages/core/src/runtime/query_loop.rs)
   exercise continuation and tool routing. Run `cargo test --locked -p centaeris-core query_loop`.
-  The [source gate](../../scripts/ci.py) also checks Core's resolved dependency tree for SQLite adapters.
-- Limit: [boundary guardrails](../../packages/core/src/boundary_guardrails.rs)
-  still mix dependency checks with source spelling and file layout assertions.
-  These checks do not prove that every adapter preserves Core semantics.
+  Run `python -B scripts/check_core_dependencies.py` to check Core's direct normal
+  dependencies, including target-specific declarations, by their Cargo package names.
+  The [source gate](../../scripts/ci.py) runs this check and checks Core's resolved
+  dependency tree for SQLite adapters, including build and development edges.
+- Limit: dependency checks verify package boundaries. Use behavioral tests and
+  review to verify that adapters preserve Core semantics.
 
-## INV-02 Hosted execution requires a current Job lease
+## Hosted execution requires a current Job lease
 
 Owner: Workspace Runtime's lifecycle executor and PostgreSQL Job store.
 
@@ -32,7 +34,7 @@ Owner: Workspace Runtime's lifecycle executor and PostgreSQL Job store.
   The database gate requires isolated `TEST_POSTGRES_*` settings and owns its disposable database.
 - Limit: unit lease windows do not prove database fencing or physical container termination.
 
-## INV-03 Django owns hosted identity and admission
+## Django owns hosted identity and admission
 
 Owner: Workspace API. Admission binds the accepted operation to authorized
 Session, Workspace, model, and resource identities.
@@ -45,7 +47,7 @@ Session, Workspace, model, and resource identities.
   Use isolated `TEST_POSTGRES_*` settings.
 - Limit: authorization fixtures mock resource lookup; transaction tests isolate Runtime scheduling.
 
-## INV-04 Live delivery cannot replace durable facts
+## Live delivery cannot replace durable facts
 
 Owners: Runtime persists execution facts; Django projects them to SSE consumers.
 Redis holds transient delivery state.
@@ -57,7 +59,7 @@ Redis holds transient delivery state.
   [Real Redis acceptance](Testing.md#focused-core-gate) separately covers retention and expiry.
 - Limit: the API fault fixture mocks storage and Redis. It does not prove deployed proxy or reconnect behavior.
 
-## INV-05 An uncertain response does not authorize blind replay
+## An uncertain response does not authorize blind replay
 
 Owners: each command receiver persists its receipt; clients recover the accepted
 identity before resubmitting covered commands.
@@ -70,7 +72,7 @@ identity before resubmitting covered commands.
   or power-loss scenario. [Hosted retry investigations](SourceUnification.md#deferred-retry-investigations)
   remain unverified observations, not established behavior.
 
-## INV-06 Resource lifetime follows its owner
+## Resource lifetime follows its owner
 
 Owners: services own tool-concurrency registries; executors retain their scope
 coordinators independently of client connections.
@@ -83,7 +85,7 @@ coordinators independently of client connections.
 - Limit: these checks cover process-local coordination. Host-specific cleanup and
   persistent resource recovery need their owning adapter's tests.
 
-## INV-07 Wire identities and persistent transitions are explicit
+## Wire identities and persistent transitions are explicit
 
 Owners: protocol types define wire identities; each storage adapter owns its migrations.
 
