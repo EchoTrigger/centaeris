@@ -49,6 +49,8 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                 "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAIElEQVR4AQEVAOr/"
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAABUAAUzUbJkAAAAASUVORK5CYII="))
 
+            expected_image_url = 'data:image/png;base64,' + base64.b64encode(image.read_bytes()).decode('ascii')
+
             async def model(reader, writer):
                 nonlocal cleanup_requested
                 try:
@@ -67,7 +69,7 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                                      "timeout_ms": 30000})}}]}
                         finish = "tool_calls"
                         delta['tool_calls'].append({'index': 1, 'id': 'child-budget', 'type': 'function',
-                            'function': {'name': 'agent', 'arguments': json.dumps({
+                            'function': {'name': 'spawn_agent', 'arguments': json.dumps({
                                 'prompt': child_marker + ': Reply ready.',
                                 'description': 'Verify child model budgets'})}})
                         delta['tool_calls'].append({'index': 2, 'id': 'image-read', 'type': 'function',
@@ -179,8 +181,11 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(usage['subagents'][0]['nRequests'], 1)
                         self.assertEqual(usage['mainAgent']['nRequests'], len(requests) - 1)
                         self.assertFalse(image.exists(), 'agent must delete the observed source')
-                        self.assertTrue(any('Image observation unavailable' in str(message.get('content', ''))
-                                            for message in requests[-1]['messages']))
+                        last_image_urls = [part['image_url']['url'] for message in requests[-1]['messages']
+                                           if isinstance(message.get('content'), list)
+                                           for part in message['content'] if part.get('type') == 'image_url']
+                        self.assertIn(expected_image_url, last_image_urls,
+                                      'committed image pixels must remain available after deletion')
                         self.assertTrue(child_started.is_set(), 'child must reach the model provider')
                         image_parts = [part for request in requests for message in request['messages']
                                        if isinstance(message.get('content'), list)
@@ -189,7 +194,7 @@ class NativeTrialTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(all(part['image_url']['url'].startswith('data:image/png;base64,')
                                             for part in image_parts))
                         self.assertGreaterEqual(len(requests), 2)
-                        self.assertIn('agent', {tool['function']['name'] for tool in requests[0]['tools']})
+                        self.assertIn('spawn_agent', {tool['function']['name'] for tool in requests[0]['tools']})
                         self.assertEqual(proxy_domains, ["benchmark-model.invalid"] * len(requests))
                         for request in requests:
                             self.assertEqual(request["max_tokens"], 64000)
