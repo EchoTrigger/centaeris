@@ -8,8 +8,8 @@ are prepared, `python -B scripts/test_product_licensing.py --crate-payloads`
 also checks that independent crate payloads retain license and README files,
 including the model catalog's original logo notices.
 `node --test scripts/product-licenses.test.mjs` checks distribution license
-assembly and rejects missing or changed notices. Desktop and TUI packaging use
-the same assembly and validation helper; container builds copy the same license
+assembly and rejects missing or changed notices. TUI packaging uses
+the assembly and validation helper; container builds copy the same license
 texts and scope statement. A public release still requires the complete release
 gate and inspection of its final artifacts.
 
@@ -52,8 +52,9 @@ retain platform-specific build and behavior coverage, including macOS host
 sandbox and DNS contracts.
 
 Frontend visual design uses manual appearance acceptance rather than TDD.
-Frontend browser and Desktop window end-to-end checks are not CI or release
-gates. Maintainers manually accept visual appearance and interaction behavior.
+Frontend browser end-to-end checks are not CI or release gates. The dormant
+Electron shell has no product build or acceptance gate. Maintainers manually
+accept visual appearance and interaction behavior.
 Implement and iterate on layout, icons, spacing, color and typography directly.
 Focused behavioral tests still protect parsing, validation, requests, state
 transitions, streaming, recovery, accessibility interactions and content
@@ -92,10 +93,8 @@ unwind cleanup. Both paths use the same adapter transaction implementations.
 
 Run failure presentation uses shared input/output cases in
 `tests/fixtures/run-error-display.json`. Web validates the complete mapping and
-localized English copy against the local presentation catalog; Desktop tests
-actual rendered live and historical notices, replay deduplication, ordinary
-notice preservation and referenced-content retry. TUI tests rendered terminal
-notices, history replacement, plain-text wrapping, multi-page UTF-8 reads and
+localized English copy against the local presentation catalog. TUI tests cover
+rendered terminal notices, history replacement, plain-text wrapping, multi-page UTF-8 reads and
 stale/invalid reference rejection. Start/completion and existing tool/result
 coverage remain independent. Error UI tests assert visible content and behavior,
 not component or CSS names.
@@ -121,10 +120,9 @@ mentioning a prohibited dependency must not be mistaken for an actual import.
 Static checks supplement behavioral coverage; they do not establish that a
 feature works merely because certain source text is absent.
 
-Web and Desktop message-scroll tests execute both controllers against the same
-anchoring, reserved-space, manual-reading, return-to-latest and reset contract.
-Host animation adapters may differ. Before replacing the former file-equality
-assertion, an ignored-pause negative control was verified to fail for both hosts.
+Web's `tests/unit/message-scroll.test.ts` exercises anchoring, reserved space,
+manual reading, return-to-latest, and reset behavior through the scroll controller.
+Browser layout acceptance remains separate from these controlled geometry tests.
 
 Choose UI scenarios from observable risks such as wrapping, clipping, keyboard
 navigation, zoom, localization, and layout transitions. Viewport dimensions are
@@ -331,21 +329,40 @@ reasoning, and authority suites protect SSE snapshots, reconnect, committed
 cursors and durable terminal reconciliation during Redis failure. These bounded
 regressions do not establish a production concurrency limit or benchmark result.
 
+## Documentation and structural checks
+
+For documentation paths and repository structure, run:
+
+```sh
+python scripts/test_source_layout.py
+```
+
+The existing CI scope job runs this check even when no product build is selected.
+It checks local Markdown link destinations in root documentation, `docs/`, and
+`.github/`, excluding the frozen source snapshot and ignored local guidance.
+It does not validate heading anchors, external URLs, or semantic correctness.
+Review changed claims against their owners and existing checks in the
+[invariant index](Invariants.md). A passing path check is not behavioral evidence.
+
 ## Full local gate
 
 ```sh
-python3 scripts/ci.py Source --frontend-tests
+python3 scripts/ci.py Source
 ```
 
 On Windows use `python`. Windows distribution acceptance additionally runs
 `pwsh -File scripts/ci.ps1 Release`.
 
-The gate checks formatting, the Rust workspace, Clippy with warnings denied,
-focused Core and SQLite integration, all Rust tests and Desktop/UI source checks.
-Packaging, headless Runtime smoke checks and non-UI installer checks remain in
-the Windows release stage. Installer checks cover registration, versions, busy
-Runtime protection, replacement, uninstall/reinstall and retained Session/config
-data without launching a Desktop window.
+The gate checks formatting, local Rust products selected by `scripts/products.py`,
+Clippy with warnings denied, Core and SQLite integration, protocol generation,
+and shared frontend types and lint. It also runs SDK and distribution-content
+tests. The Windows release stage runs the Rust and Node gates and builds the
+TUI archive. It does not run Desktop packaging or installer lifecycle acceptance.
+
+Hosted Runtime, API, Web, and deployment checks use the separate
+[Workspace product gates](SourceUnification.md#product-gates) and
+[hosted release gate](../workspace/eval/ReleaseGate.md). `scripts/ci.py Source`
+does not run those hosted suites.
 
 Shared frontend primitive changes also run `pnpm --filter web run test:components`.
 These mounted React tests protect controlled model/effort choices, focus,

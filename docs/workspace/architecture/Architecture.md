@@ -2,20 +2,22 @@
 
 ## Ownership
 
-The external Runtime Framework owns Session, model, tool, continuation, and
-runtime-event semantics. Workspace composes that Runtime with hosted identity,
+The shared `packages/core` Runtime Framework owns Session, model, tool,
+continuation, and runtime-event semantics. Workspace composes it with hosted identity,
 authorization, storage, execution, and browser delivery. It does not redefine
 Core behavior.
 
 | Component | Responsibility |
 | --- | --- |
 | `packages/workspace/api` | Django identity, membership, workspace ACL, files, credentials, Plugin installation, AgentRun authorization, and durable product jobs |
-| `packages/workspace/runtime` | Core composition, PostgreSQL RuntimeStore adapter, Redis live projection, and Docker execution binding |
-
+| `packages/workspace/runtime` | Core composition, durable Job dispatch and lease fencing, PostgreSQL RuntimeStore adapter, Redis live projection, and Docker execution binding |
 | `packages/workspace/executor` | Fixed helper included in the AgentRun execution image |
 | `packages/workspace/documents` | Office, PDF, and image inspection plus bounded canonical representations |
 | `packages/workspace/web` | Browser product consuming REST and SSE |
 | `skills/system` | First-party built-in behavior, separate from installable Plugin inventory |
+
+[Ownership and invariants](../../development/Invariants.md) indexes the shared
+and hosted contracts, their existing checks, and validation limits.
 
 Runtime HTTP uses axum and Hyper; explicit routes call concrete operations through
 one shared admission/body reader and blocking-task boundary. The

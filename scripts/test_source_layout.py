@@ -2,13 +2,71 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import tempfile
 import tomllib
 import unittest
+
+from markdown_links import markdown_sources, missing_local_links
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class SourceLayoutTests(unittest.TestCase):
+    def test_documentation_local_links_exist(self):
+        missing = missing_local_links(markdown_sources(ROOT), ROOT)
+        self.assertFalse(missing, "Missing local Markdown destinations:\n" + "\n".join(missing))
+
+    def test_markdown_source_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            (root / ".gitignore").write_text("AGENTS.md\nlocal.md\n", encoding="utf-8")
+            for name in ("tracked.md", "docs/new.md", ".github/template.md", "packages/README.md",
+                         "docs/workspace/source-snapshot/README.md", "AGENTS.md", "local.md"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Fixture\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.md"], cwd=root, check=True)
+            self.assertEqual([path.relative_to(root).as_posix() for path in markdown_sources(root)], [
+                ".github/template.md", "docs/new.md", "tracked.md",
+            ])
+
+    def test_markdown_local_link_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "nested").mkdir()
+            (root / "target file.md").write_text("# Target\n", encoding="utf-8")
+            (root / "target(1).md").write_text("# Target\n", encoding="utf-8")
+            source = root / "nested" / "source.md"
+            source.write_text('''[relative](../target%20file.md?raw=1#heading)
+![image](<../target file.md> "Title")
+[root](/target%20file.md)
+[parentheses](../target(1).md)
+[full reference][target]
+[target]: ../target%20file.md "Title"
+[external](https://example.com/missing.md)
+[protocol relative](//example.com/missing.md)
+[mail](mailto:example@example.com)
+[fragment](#heading)
+`[inline code](missing-inline.md)`
+``[inline backticks ` code](missing-backticks.md)``
+`literal `` [example](missing-reverse-backticks.md) `` literal`
+```markdown
+[fenced example](missing-fenced.md)
+[fenced-reference]: missing-reference.md
+```
+~~~markdown
+[tilde fence](missing-tilde.md)
+~~~
+''', encoding="utf-8")
+            self.assertEqual(missing_local_links([source], root), [])
+            with source.open("a", encoding="utf-8") as output:
+                output.write("[missing](missing.md)\n[missing-reference]: missing-reference.md\n")
+            self.assertEqual(missing_local_links([source], root), [
+                "nested/source.md -> missing.md", "nested/source.md -> missing-reference.md",
+            ])
+
     def test_hosted_rust_products_use_this_workspace(self):
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]
         self.assertTrue({"packages/workspace/runtime", "packages/workspace/executor"}.issubset(workspace["members"]))

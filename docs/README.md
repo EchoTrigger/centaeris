@@ -1,8 +1,8 @@
 # Centaeris documentation
 
-This is the documentation index for the public Runtime Framework. These pages
-describe supported behavior and current boundaries. They do not preserve old
-implementation plans or compatibility aliases.
+This index covers the Runtime Framework, local CLI, shared frontend packages,
+and hosted Workspace product. The linked contracts describe current behavior.
+Frozen source snapshots record provenance rather than current requirements.
 
 ## Get started
 
@@ -14,6 +14,8 @@ implementation plans or compatibility aliases.
 ## Concepts and contracts
 
 - [Architecture](architecture/Architecture.md): ownership and request flow.
+- [Ownership and invariants](development/Invariants.md): contract owners,
+  existing checks, and validation limits.
 - [Public API index](reference/API.md): where public contracts live.
 - [Runtime protocol](reference/RuntimeProtocol.md): Local Runtime host boundary.
 - [Model HTTP](reference/ModelHTTP.md): response budgets, credential isolation and SSE contracts.
@@ -40,9 +42,9 @@ implementation plans or compatibility aliases.
 - [Release gate](eval/ReleaseGate.md): the current executable release gate.
 - [Persistence acceptance](eval/PersistenceAcceptance.md): schema validation, restart recovery, and history reconstruction.
 
-Hosted deployment, identity, workspace access control, commercial extension
-content, credentials, customer data, and private operations are outside this
-repository.
+Hosted identity, workspace access control, deployment templates, and operations
+guides live in this repository. Credentials, customer data, concrete commercial
+extensions, and private deployment configuration remain outside it.
 
 ## Hosted product and shared source
 
