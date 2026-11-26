@@ -21,6 +21,11 @@ Hosts and adapters translate external systems into Core contracts:
 | `packages/visuals` | Shared inline visualization rendering |
 | `packages/sdk` | Typed TypeScript Session RPC client |
 | `packages/model-http` | Shared bounded model HTTP and SSE transport |
+| `packages/workspace/api` | Hosted identity, authorization, admission, and product facts |
+| `packages/workspace/runtime` | Hosted Core composition, durable Job dispatch, lease fencing, and execution adapters |
+
+[Ownership and invariants](../development/Invariants.md) links these boundaries
+to their contracts and existing validation.
 
 An adapter may translate identities, transport, storage, or process behavior. It
 must not define a second prompt, tool loop, continuation state machine, or
@@ -48,9 +53,11 @@ RPC connections encode the same method and params as JSONL. The CLI owns
 terminal and headless interaction and composes the app service in process.
 A connection's lifetime is distinct from its service-owned Runs.
 
-Hosted requests enter Django and durable Worker scheduling, then Workspace
-Runtime composes Core with platform authorization, PostgreSQL and sandbox
-execution. The executor runs environment tasks.
+Hosted requests enter Django, which commits admission and authorization facts.
+Workspace Runtime claims durable lifecycle Jobs under leases and composes Core
+with platform authorization, PostgreSQL, and sandbox execution. The executor
+runs environment tasks. The material Worker processes documents; it does not
+schedule AgentRuns. See [hosted dispatch](../workspace/architecture/Architecture.md#run-lifecycle-dispatch).
 
 ## Tool concurrency ownership
 

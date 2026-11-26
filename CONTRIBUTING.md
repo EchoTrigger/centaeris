@@ -28,6 +28,11 @@ only material you have the right to share.
 1. Create a focused branch in your fork and link the relevant issue in the PR.
 2. Describe the problem, resulting behavior, and validation performed. Use a
    draft PR when the implementation is still in progress.
+   For contract changes, identify the affected invariant in the
+   [ownership index](docs/development/Invariants.md), update its authoritative
+   contract, and report evidence from the checks that protect it. Add an index
+   entry only for a new cross-component invariant; unrelated changes need no
+   new documentation.
 3. Follow the test policy below and sign off each contribution commit under
    the DCO. Documentation-only corrections need appropriate document checks,
    not unrelated runtime test suites.
