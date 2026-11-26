@@ -114,30 +114,6 @@ fn core_public_modules_are_the_framework_facades() {
 }
 
 #[test]
-fn core_has_no_production_adapter_dependencies() {
-    let manifest = read_src("Cargo.toml");
-    let mut section = "";
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            section = trimmed;
-            continue;
-        }
-        let production_dependencies = section == "[dependencies]"
-            || (section.starts_with("[target.") && section.ends_with(".dependencies]"));
-        if production_dependencies {
-            for dependency in ["rusqlite", "postgres", "windows-sys", "libc", "fs2", "zstd"] {
-                assert!(
-                    !trimmed.starts_with(format!("{dependency}.").as_str())
-                        && !trimmed.starts_with(format!("{dependency} =").as_str()),
-                    "Core production dependency must stay adapter-free: {dependency}"
-                );
-            }
-        }
-    }
-}
-
-#[test]
 fn core_source_paths_do_not_reach_host_implementations() {
     for path in collect_rs_files(manifest_dir().join("src")) {
         let source = read_repo_file(path.as_path());

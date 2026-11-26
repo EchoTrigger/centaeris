@@ -33,6 +33,8 @@ def run_gate(stage, run=run_command, platform=sys.platform, format_checked=False
     pnpm = "pnpm.cmd" if platform == "win32" else "pnpm"
     run([sys.executable, "-B", "scripts/test_product_version.py"])
     if stage in ("Rust", "Source"):
+        run([sys.executable, "-B", "scripts/check_core_dependencies.py"])
+        run([sys.executable, "-B", "scripts/test_core_dependencies.py"])
         run([sys.executable, "-B", "-m", "unittest", "discover", "-s",
              "scripts/harbor", "-p", "test_runner.py"])
         if not format_checked:

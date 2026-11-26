@@ -37,6 +37,8 @@ class PortableGateTests(unittest.TestCase):
         for platform in ("win32", "darwin", "linux"):
             calls = []
             ci.run_gate("Rust", lambda args, **kw: calls.append(args) or "", platform=platform)
+            self.assertIn([ci.sys.executable, "-B", "scripts/check_core_dependencies.py"], calls)
+            self.assertIn([ci.sys.executable, "-B", "scripts/test_core_dependencies.py"], calls)
             self.assertIn(["cargo", "test", "--locked", "-p", "centaeris-core", "query_loop"], calls)
             self.assertIn([ci.sys.executable, "-B", "-m", "unittest", "discover", "-s",
                            "scripts/harbor", "-p", "test_runner.py"], calls)
@@ -54,6 +56,8 @@ class PortableGateTests(unittest.TestCase):
         self.assertIn(["pnpm", "--filter", "@centaeris/sdk", "run", "typecheck"], calls)
         self.assertIn(["pnpm", "--filter", "@centaeris/sdk", "run", "test"], calls)
         self.assertFalse(any("smoke:window" in c for c in calls))
+        self.assertNotIn([ci.sys.executable, "-B", "scripts/check_core_dependencies.py"], calls)
+        self.assertNotIn([ci.sys.executable, "-B", "scripts/test_core_dependencies.py"], calls)
 
     def test_node_gate_checks_shared_visualization_types(self):
         calls = []
