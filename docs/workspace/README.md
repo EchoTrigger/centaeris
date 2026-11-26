@@ -38,6 +38,8 @@ boundaries, and release verification.
 ## Development
 
 - [Core dependency](development/CoreDependency.md): same-checkout source ownership and product gates.
+- [Product acceptance paths](../development/Acceptance.md):
+  isolated Run smoke, receipt recovery, SSE reconnect, and resource cleanup.
 
 ## Operations
 

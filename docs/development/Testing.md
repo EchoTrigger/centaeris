@@ -329,6 +329,11 @@ reasoning, and authority suites protect SSE snapshots, reconnect, committed
 cursors and durable terminal reconciliation during Redis failure. These bounded
 regressions do not establish a production concurrency limit or benchmark result.
 
+## Product acceptance
+
+Use [Reproducible product acceptance](Acceptance.md) for product paths,
+expected evidence, diagnostics, and fixture cleanup.
+
 ## Documentation and structural checks
 
 For documentation paths and repository structure, run:

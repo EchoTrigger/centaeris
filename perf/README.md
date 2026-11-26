@@ -21,9 +21,11 @@ bash perf/certs/generate.sh
 python perf/harness/control.py check
 python perf/harness/control.py build
 python perf/harness/control.py up
-python perf/harness/control.py smoke --experiment-id smoke-001
-python perf/harness/control.py smoke --experiment-id smoke-002
 ```
+
+Run the [single Hosted Run smoke](../docs/development/Acceptance.md#hosted-run)
+with an explicit Workspace and model. The older `control.py smoke` uses retired
+global model administration endpoints.
 
 For a short end-to-end harness check (not a capacity claim), use the pinned K6
 builder and a bounded load:
@@ -91,9 +93,10 @@ production volumes or reuse production accounts. Existing K6 scenarios are workl
 sources; accepted requests and completed iterations are not completed AgentRuns.
 Persist exact run IDs and verify their terminal states separately.
 
-The controller's smoke requires a completed run. It does not establish throughput,
-capacity, fairness, restart recovery, or historical-cost independence. Run failures
-must remain visible; cancellation must not count as successful draining.
+The single Run smoke requires a completed run and verified artifact bytes.
+Throughput, capacity, fairness, restart recovery, and historical cost each have
+separate checks. Run failures must remain visible. Cancellation does not count as
+successful draining.
 
 ## K6 scenarios
 
