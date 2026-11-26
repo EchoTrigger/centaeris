@@ -68,3 +68,21 @@ Choose a working directory and configure a model with `/model`. To select the di
 pass `--workspace C:\path\to\project`. Local data is created in the user's data
 root. A missing or unverified Git Bash or corrupt local
 state fails explicitly.
+
+## Verify native execution
+
+From a clean Windows x64 checkout, use the pinned Rust toolchain and verified
+[Git for Windows Bash](../architecture/LocalExecution.md#windows). Run:
+
+```powershell
+cargo test --locked -p centaeris-tui --test local_execution_sandbox native_windows_executes_commands_through_git_bash -- --exact
+```
+
+Cargo builds `cet` and the test uses that binary with a temporary workspace. It
+requires a successful Bash exit, a file written by Bash, and a file written
+through the host filesystem operation. The test removes its workspace on
+success. If it fails, inspect the reported error and only the temporary test
+workspace it created. This check uses no model credentials or user profile.
+
+See [product acceptance paths](../development/Acceptance.md)
+for Runtime persistence and hosted checks.
