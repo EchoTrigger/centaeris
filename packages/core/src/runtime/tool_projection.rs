@@ -32,9 +32,6 @@ pub(super) fn build_generate_tool_contracts(
     let all_contracts = list_tool_contracts_with_dynamic(dynamic_registry);
     let mut names = match allowed_tools {
         Some(allowed) => {
-            if allowed.is_empty() {
-                return Err("allowed tools must not be empty".to_string());
-            }
             let mut names = Vec::with_capacity(allowed.len());
             let mut seen = HashSet::with_capacity(allowed.len());
             for name in allowed {
@@ -137,6 +134,17 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == *name));
         }
+    }
+
+    #[test]
+    fn explicit_empty_host_policy_exposes_no_tools() {
+        let registry = DynamicToolRegistry::empty();
+        let session = SessionStateSnapshot::new("chat-only".to_string(), 0);
+        let (definitions, guidance) =
+            build_generate_tool_projection(&session, &registry, Some(&[]), None)
+                .expect("an explicitly tool-free host");
+        assert!(definitions.is_empty());
+        assert!(guidance.is_empty());
     }
 
     #[test]

@@ -345,3 +345,20 @@ fn observation_cas_gc_does_not_follow_directory_links_outside_sessions() {
         fs::remove_file(&link).unwrap();
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn durable_install_supports_long_dedicated_profile_paths() {
+    let root = tempfile::tempdir().expect("temporary profile");
+    let mut directory = root.path().to_path_buf();
+    while directory.as_os_str().len() < 280 {
+        directory.push("dedicated-profile-observation-content");
+    }
+    std::fs::create_dir_all(&directory).expect("long content directory");
+    let source = directory.join("pending.tmp");
+    let destination = directory.join("installed.json");
+    std::fs::write(&source, b"captured original").expect("temporary original");
+    super::durable_rename(&source, &destination).expect("durable long-path install");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"captured original");
+    assert!(!source.exists());
+}

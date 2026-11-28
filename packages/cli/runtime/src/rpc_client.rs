@@ -281,7 +281,7 @@ impl RuntimeClient {
             #[cfg(any(test, feature = "test-support"))]
             Runtime::Test { .. } => self
                 .request(
-                    "_centaeris/session/fork-before-user-turn",
+                    "test/fork-latest-user-turn",
                     serde_json::json!({"request": {"sessionId": session_id}}),
                 )
                 .map_err(Into::into),

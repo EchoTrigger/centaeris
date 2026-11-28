@@ -2534,7 +2534,9 @@ impl<
                     next_turn_id = new_turn_id();
                     let (rejected_tool_calls, has_incomplete_identity) =
                         rejected_tool_calls_for_recovery(error.truncated_tool_calls.as_slice());
-                    if output_token_recovery_attempts < MAX_OUTPUT_TOKEN_RECOVERY_ATTEMPTS {
+                    if self.config.max_recovery_attempts > 0
+                        && output_token_recovery_attempts < MAX_OUTPUT_TOKEN_RECOVERY_ATTEMPTS
+                    {
                         output_token_recovery_attempts =
                             output_token_recovery_attempts.saturating_add(1);
                         pending_output_token_recovery = Some(PendingOutputTokenRecovery {

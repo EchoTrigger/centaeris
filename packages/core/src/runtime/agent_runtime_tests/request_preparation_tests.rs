@@ -6,7 +6,266 @@ use crate::execution::{
     ExecutionHostHealth, ExecutionHostKind, ExecutionHostMode, ExecutionHostRunner,
     ExecutionHostStatus, ExecutionPolicy,
 };
+use crate::model::prepared_prompt::{ModelMessageRoleV1, ModelMessageV1, PreparedPromptV1};
 use base64::Engine as _;
+
+#[test]
+fn admitted_inputs_project_once_per_turn_after_recovery() {
+    assert_admitted_inputs_project_once(false);
+}
+
+#[test]
+fn forked_admitted_inputs_project_once_after_replaying_a_later_request() {
+    assert_admitted_inputs_project_once(true);
+}
+
+fn assert_admitted_inputs_project_once(legacy_fork: bool) {
+    let session_id = "admitted-history";
+    let body = "  Repeat this request.\n";
+    let first = "first";
+    let current = "current";
+    let mut records =
+        crate::session::started_agent_run_records(session_id, first, "run-first", body, 1)
+            .unwrap()
+            .to_vec();
+    let engine = AgentRuntime::new_for_test(
+        AgentRuntimeTestStore::new(),
+        AgentRuntimeConfig {
+            enable_prompt_compaction: false,
+            ..Default::default()
+        },
+    );
+    let driver_id = prompt_projection::driver_user_message_id(session_id, first);
+    let driver_id = if legacy_fork {
+        crate::session::stable_session_event_id("message", &[session_id, &driver_id])
+    } else {
+        driver_id
+    };
+    let envelope = "<environment_context>working directory</environment_context>";
+    let mut prior_messages = [
+        (format!("message:{first}:user"), body),
+        (
+            crate::session::stable_session_event_id("message", &[session_id, "environment"]),
+            envelope,
+        ),
+        (driver_id, body.trim()),
+    ]
+    .into_iter()
+    .map(|(message_id, content)| ModelMessageV1 {
+        message_id,
+        role: ModelMessageRoleV1::User,
+        content: content.to_owned(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        reasoning_content: None,
+    })
+    .collect::<Vec<_>>();
+    let opening =
+        observed_admitted_input_request(&engine, session_id, first, prior_messages.clone());
+    let mut request_records =
+        canonical_model_request_started_records("run-first", &opening, 2).unwrap();
+    if legacy_fork {
+        for record in records.iter_mut().chain(&mut request_records) {
+            record.event_id = crate::session::stable_session_event_id(
+                "fork_event",
+                &[session_id, &record.event_id],
+            );
+        }
+    }
+    records.extend(request_records);
+    if legacy_fork {
+        let follow_up = "follow-up";
+        let follow_up_body = "A different request";
+        records.extend(
+            crate::session::started_agent_run_records(
+                session_id,
+                follow_up,
+                "run-follow-up",
+                follow_up_body,
+                3,
+            )
+            .unwrap(),
+        );
+        prior_messages.push(ModelMessageV1 {
+            message_id: format!("message:{follow_up}:user"),
+            role: ModelMessageRoleV1::User,
+            content: follow_up_body.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+        let later = observed_admitted_input_request(&engine, session_id, follow_up, prior_messages);
+        records
+            .extend(canonical_model_request_started_records("run-follow-up", &later, 4).unwrap());
+    }
+    records.extend(
+        crate::session::started_agent_run_records(session_id, current, "run-current", body, 5)
+            .unwrap(),
+    );
+    let snapshot =
+        crate::session::restore_runtime_snapshot_from_session_records(session_id, &records)
+            .unwrap();
+    engine.session_manager.save_session(&snapshot).unwrap();
+    let request = engine
+        .build_generate_driver_request(session_id, current, body, 0)
+        .unwrap();
+    let copies = request
+        .prepared_prompt
+        .messages
+        .iter()
+        .filter(|message| message.content.trim() == body.trim())
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        copies,
+        [body.trim(), body],
+        "each turn must reach the provider once"
+    );
+    assert!(request
+        .prepared_prompt
+        .messages
+        .iter()
+        .any(|message| message.content == envelope));
+    let persisted = engine
+        .session_manager
+        .load_or_create_session(session_id)
+        .unwrap();
+    assert!(persisted
+        .messages
+        .iter()
+        .any(|message| message.message_id == "message:current:user"));
+}
+
+fn observed_admitted_input_request(
+    engine: &AgentRuntime<AgentRuntimeTestStore>,
+    session_id: &str,
+    turn_id: &str,
+    messages: Vec<ModelMessageV1>,
+) -> ModelRequestStartedV1 {
+    let prepared_prompt = PreparedPromptV1::new(
+        None,
+        messages.clone(),
+        Vec::new(),
+        ModelToolChoice::None,
+        1_024,
+    )
+    .unwrap();
+    let context_token_estimate = estimate_prepared_prompt_tokens(&prepared_prompt, None)
+        .unwrap()
+        .total_tokens();
+    let request = ModelClientRequest {
+        session_id: session_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        prepared_prompt,
+        context_token_estimate,
+        session_config: ModelSessionConfig::default(),
+        loop_index: 0,
+        provider_prompt_cache_key: None,
+        provider_prompt_cache_retention: None,
+        system_prompt_manifest_json: None,
+        compression_stats_json: None,
+    };
+    ModelRequestStartedV1::from_request(
+        ModelRequestPurposeV1::Main,
+        &request,
+        messages
+            .into_iter()
+            .map(|message| ModelObservationV1::ContextMessage { message })
+            .collect(),
+        engine
+            .agent_composition_environment()
+            .unwrap()
+            .resolve_request(&request)
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn admitted_user_batch_retains_its_steer_and_images_from_both_records() {
+    struct InputImages;
+    impl crate::model::prepared_prompt::ModelInputImageResolverPort for InputImages {
+        fn resolve(&self, _: &str, _: &str) -> Result<Vec<u8>, String> {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(2, 3)
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .map_err(|error| error.to_string())?;
+            Ok(bytes.into_inner())
+        }
+    }
+
+    let session_id = "admitted-batch";
+    let turn_id = "initial";
+    let records = crate::session::started_agent_run_records_with_attachments(
+        session_id,
+        turn_id,
+        "run-batch",
+        "Initial request [image:original-image]",
+        vec![json!({
+            "inputRef": "original-image",
+            "displayName": "original.png",
+            "contentType": "image/png",
+            "placeholder": "[image:original-image]",
+        })],
+        1,
+    )
+    .unwrap();
+    let snapshot =
+        crate::session::restore_runtime_snapshot_from_session_records(session_id, &records)
+            .unwrap();
+    let engine = AgentRuntime::new_for_test(
+        AgentRuntimeTestStore::new(),
+        AgentRuntimeConfig {
+            enable_prompt_compaction: false,
+            ..Default::default()
+        },
+    )
+    .with_model_input_image_resolver(Arc::new(InputImages));
+    engine.session_manager.save_session(&snapshot).unwrap();
+    let request = engine
+        .build_generate_driver_request_with_async_driver_and_runtime_scope(
+            session_id,
+            turn_id,
+            &mut TurnInput::UserMessageBatch {
+                message: "Initial request\n\nAccepted steer".into(),
+                supplement_ids: vec!["steer-input".into()],
+                attachments: vec![
+                    crate::session::turn_input::attachments::UserInputAttachment {
+                        input_ref: "steer-image".into(),
+                        display_name: "steer.png".into(),
+                        content_type: "image/png".into(),
+                    },
+                ],
+            },
+            0,
+            PromptCompactionScopeV1::main(),
+            None,
+            None,
+            &TestPromptCompactionAsyncDriver,
+            None,
+        )
+        .await
+        .unwrap();
+    let prompt = request.prepared_prompt;
+    let inputs = prompt
+        .messages
+        .iter()
+        .filter(|message| message.content.starts_with("Initial request"))
+        .collect::<Vec<_>>();
+    assert_eq!(inputs.len(), 1);
+    assert!(inputs[0]
+        .content
+        .starts_with("Initial request\n\nAccepted steer"));
+    assert_eq!(prompt.input_images.len(), 2);
+    for placeholder in ["[image:original-image]", "[image:steer-image]"] {
+        assert_eq!(inputs[0].content.matches(placeholder).count(), 1);
+        assert!(prompt
+            .input_images
+            .iter()
+            .any(|image| image.message_id == inputs[0].message_id
+                && image.placeholder == placeholder));
+    }
+}
 
 #[tokio::test]
 async fn query_loop_preserves_total_usage_anchor_when_later_responses_omit_usage() {

@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub use self::checkpoint::*;
-pub use self::config::AgentRuntimeConfig;
+pub use self::config::{AgentRuntimeConfig, HostPrompt};
 pub use self::contracts::RequiredCompletionDeliveryV1;
 pub use self::driver::{
     AgentRunInitialInput, AgentRunRequest, AgentRunResult, AgentRunResumeIntent, AgentRunStop,
@@ -643,9 +643,7 @@ impl<
             .unwrap_or_else(|| {
                 crate::extension::composition::empty_composition_digest("plugin_activation")
             })?;
-        let execution_profile_digest = crate::runtime::canonical_json::sha256(
-            "centaeris.session_runtime_execution_profile.v1",
-            &serde_json::json!({
+        let mut execution_profile = serde_json::json!({
                 "cwd": self.cwd_text(),
                 "agentInstructionsHash": stable_text_hash(self.config.agent_instructions.as_str()),
                 "maxMessageChars": self.config.max_message_chars,
@@ -661,7 +659,16 @@ impl<
                 "enableSystemPromptTemplate": self.config.enable_system_prompt_template,
                 "enableToolUseSummary": self.config.enable_tool_use_summary,
                 "allowedTools": self.config.allowed_tools,
-            }),
+        });
+        if let Some(host_prompt) = self.config.host_prompt.as_ref() {
+            execution_profile["hostPromptDigest"] = json!(crate::runtime::canonical_json::sha256(
+                "centaeris.host_prompt.v1",
+                host_prompt,
+            )?);
+        }
+        let execution_profile_digest = crate::runtime::canonical_json::sha256(
+            "centaeris.session_runtime_execution_profile.v1",
+            &execution_profile,
         )?;
         Ok(
             crate::extension::composition::AgentCompositionEnvironmentV1 {

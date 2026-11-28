@@ -977,12 +977,14 @@ fn durable_rename(source: &Path, destination: &Path) -> Result<(), std::io::Erro
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
-    let source = source
+    let source_path = crate::atomic_file::windows_file_path(source)?;
+    let destination_path = crate::atomic_file::windows_file_path(destination)?;
+    let source = source_path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let destination = destination
+    let destination = destination_path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))

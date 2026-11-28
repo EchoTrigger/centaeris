@@ -2660,6 +2660,56 @@ async fn failed_stream_retracts_tentative_content_before_runtime_error() {
 }
 
 #[tokio::test]
+async fn output_token_limit_with_zero_recovery_stops_after_the_first_request() {
+    let store = AgentRuntimeTestStore::new();
+    let engine = AgentRuntime::new_for_test(
+        store,
+        AgentRuntimeConfig {
+            max_recovery_attempts: 0,
+            ..AgentRuntimeConfig::default()
+        },
+    );
+    let model_client = OutputLimitRecoveryModelClient {
+        request_count: AtomicUsize::new(0),
+        succeed_at_request: Some(1),
+        emit_truncated_tool_call: false,
+        emit_incomplete_tool_identity: false,
+        request_messages: Mutex::new(vec![]),
+    };
+    let config_store = StaticModelSessionConfigStore {
+        config: Some(ModelSessionConfig::default()),
+    };
+    let mut events = Vec::new();
+    let error = engine
+        .process_turn_loop_online_with_model_client_stream_cancellable_async(
+            AgentRunRequest {
+                session_id: "chat-output-token-no-recovery".into(),
+                initial_turn_id: "turn-output-token-no-recovery".into(),
+                initial_input: AgentRunInitialInput::UserMessage("return one response".into()),
+                agent_run_identity: None,
+                runtime_scope: PromptCompactionScopeV1::main(),
+                resume_from_turn_id: None,
+                auto_continue_after_resume_wait: None,
+            },
+            &model_client,
+            &config_store,
+            &mut |event| events.push(event),
+            &|| Ok(None),
+        )
+        .await
+        .expect_err("zero recovery must not send a continuation");
+    assert!(error.contains("providerCode=incomplete_output_token_limit"));
+    assert_eq!(model_client.request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, TurnUpdate::ModelRequestStart { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn output_token_limit_continues_in_a_new_turn_and_preserves_partial_content() {
     let store = AgentRuntimeTestStore::new();
     let engine = AgentRuntime::new_for_test(store, AgentRuntimeConfig::default());

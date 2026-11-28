@@ -15,6 +15,7 @@ pub mod metadata {
     pub const SYSTEM_PROMPT_MANIFEST: &str = "system_prompt_manifest_json";
     pub const SUBAGENT_RESULT_PROJECTION: &str = "subagent_result_projection_v1_json";
     pub const MESSAGE_SEMANTIC_KIND: &str = "message_semantic_kind";
+    pub(crate) const LEGACY_FORK_USER_INPUT_SOURCE: &str = "legacy_fork_user_input_source";
     pub const MODEL_INPUT_IMAGES: &str = "model_input_images_v1_json";
     pub const MODEL_INPUT_IMAGE_SOURCES: &str = "model_input_image_sources_v1_json";
     pub const ACTIVE_OBJECTIVE: &str = "active_objective_v1_json";

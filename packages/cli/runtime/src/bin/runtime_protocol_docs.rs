@@ -302,6 +302,8 @@ mod tests {
         assert_eq!(
             same_operation_id,
             std::collections::BTreeSet::from([
+                "_centaeris/model/evaluate_typed",
+                "_centaeris/session/fork",
                 "process_session_start",
                 "ssh_start",
                 "session/new",

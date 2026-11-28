@@ -8,6 +8,13 @@
       "scope": "sharedRuntime"
     },
     {
+      "name": "_centaeris/session/model_requests",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
       "name": "_centaeris/session/compact_context",
       "operationKind": "oneShotAction",
       "reconcileMethod": null,
@@ -75,6 +82,13 @@
       "operationKind": "read",
       "reconcileMethod": null,
       "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/session/fork",
+      "operationKind": "creation",
+      "reconcileMethod": "_centaeris/session/fork",
+      "retryPolicy": "sameOperationId",
       "scope": "sharedRuntime"
     },
     {
@@ -166,6 +180,20 @@
       "operationKind": "desiredStateWrite",
       "reconcileMethod": "agent_runtime_config_get",
       "retryPolicy": "noAutomaticRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/model/typed_operation",
+      "operationKind": "read",
+      "reconcileMethod": null,
+      "retryPolicy": "safeRetry",
+      "scope": "sharedRuntime"
+    },
+    {
+      "name": "_centaeris/model/evaluate_typed",
+      "operationKind": "oneShotAction",
+      "reconcileMethod": "_centaeris/model/evaluate_typed",
+      "retryPolicy": "sameOperationId",
       "scope": "sharedRuntime"
     },
     {

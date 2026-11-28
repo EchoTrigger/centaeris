@@ -281,7 +281,7 @@ test("workspace settings replace the work navigation and return to the same draf
   expect(screen.getByRole("combobox", { name: "searchOverlay.searchConversationsAndNotes" })).toBe(document.activeElement);
   expect(screen.getByRole("navigation", { name: "shellSidebar.mainView" })).toBeTruthy();
   await user.keyboard("{Escape}");
-  expect(screen.queryByRole("search")).toBeNull();
+  await waitFor(() => expect(screen.queryByRole("search")).toBeNull());
   expect((screen.getByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("Keep this draft");
 
   const browsingSidebar = screen.getByRole("complementary", { name: "shellSidebar.conversationNavigation" });

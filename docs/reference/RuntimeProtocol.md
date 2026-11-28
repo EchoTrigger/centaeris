@@ -185,6 +185,7 @@ The v1 descriptor publishes these arrays:
 capabilities:
   json_rpc_2_over_jsonl
   session_log
+  session_fork
   question_resume
   agent_run_intervention
   stream_replay
@@ -205,6 +206,43 @@ projections:
 A packaged client also compares `buildId` with the SHA-256 digest of its bundled
 Runtime executable. A mismatch means another build owns the profile endpoint;
 the client must not continue against it.
+
+## Fork before a user turn
+
+`_centaeris/session/fork` creates a Session in the active profile from the
+committed history before a verified user turn. The `request` object contains
+`operationId`, the source `sessionId`, and `beforeTurnId`. The prefix excludes
+the selected opening and all subsequent records. Forking before the first
+opening creates a Session with empty history. The source history stays intact.
+
+The Runtime returns `session_fork_active` for an active source and
+`session_fork_stale` for a missing, stale, or ambiguous opening.
+The result contains `operationId`, `sourceSessionId`, `sourceTurnId`, and the
+child `sessionId`. A separate `session/prompt` request sends a prompt to the
+child. Retry with the same fields to retrieve the same child after publication,
+even if the source changes. Reusing an admitted operation ID with different
+fields returns `operation_id_conflict`.
+
+Set `params.recoverOnly` to `true` beside `params.request` to retrieve an
+already published child. If no child was published, the Runtime returns
+`session_fork_stale`. The recovery flag does not change the operation identity.
+
+## Session model request ledger
+
+`_centaeris/session/model_requests` pages model request starts and provider
+usage recorded by the requested Session. Forked history stays in the child
+conversation but does not count as a new request or charge. Editing a message
+does not remove the original Session's usage records. Pass `nextSequence` as
+`afterSequence` to read the next page.
+
+## Typed model evaluation receipts
+
+`_centaeris/model/evaluate_typed` records the operation before sending the model
+request. Retry with the same session, operation ID, and input to recover a
+completed receipt. If the request was admitted and a receipt is unavailable,
+the Runtime returns `typed_model_operation_indeterminate`. Query
+`_centaeris/model/typed_operation` for the recorded request, provider response,
+and failure or receipt. A retry does not send another model request.
 
 ## Transcript page and committed patch reads
 
@@ -262,6 +300,7 @@ authorization grant.
 | Method | Operation kind | Retry policy | Reconcile method |
 | --- | --- | --- | --- |
 | `agent_context_usage_get` | `read` | `safeRetry` | — |
+| `_centaeris/session/model_requests` | `read` | `safeRetry` | — |
 | `_centaeris/session/compact_context` | `oneShotAction` | `noAutomaticRetry` | — |
 | `agent_dead_letter_dismiss` | `identityMutation` | `noAutomaticRetry` | `agent_dead_letter_get` |
 | `agent_dead_letter_get` | `read` | `safeRetry` | — |
@@ -272,6 +311,7 @@ authorization grant.
 | `_centaeris/session/answer_question` | `oneShotAction` | `noAutomaticRetry` | — |
 | `_centaeris/session/delete` | `identityMutation` | `noAutomaticRetry` | `session/list` |
 | `_centaeris/session/diagnostics` | `read` | `safeRetry` | — |
+| `_centaeris/session/fork` | `creation` | `sameOperationId` | `_centaeris/session/fork` |
 | `_centaeris/session/reorder` | `desiredStateWrite` | `noAutomaticRetry` | `session/list` |
 | `_centaeris/session/search` | `read` | `safeRetry` | — |
 | `_centaeris/session/agent-runs` | `read` | `safeRetry` | — |
@@ -285,6 +325,8 @@ authorization grant.
 | `agent_runtime_config_get` | `read` | `safeRetry` | — |
 | `agent_runtime_config_reset` | `desiredStateWrite` | `noAutomaticRetry` | `agent_runtime_config_get` |
 | `agent_runtime_config_set` | `desiredStateWrite` | `noAutomaticRetry` | `agent_runtime_config_get` |
+| `_centaeris/model/typed_operation` | `read` | `safeRetry` | — |
+| `_centaeris/model/evaluate_typed` | `oneShotAction` | `sameOperationId` | `_centaeris/model/evaluate_typed` |
 | `agent_runtime_model_test` | `oneShotAction` | `noAutomaticRetry` | — |
 | `mcp/catalog` | `read` | `safeRetry` | — |
 | `mcp/configure` | `desiredStateWrite` | `noAutomaticRetry` | `mcp/catalog` |

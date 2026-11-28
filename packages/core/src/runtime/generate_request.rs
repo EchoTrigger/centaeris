@@ -901,33 +901,38 @@ impl<
             } else {
                 (None, None)
             };
-
         crate::runtime::context_window::validate_model_context_window(
             session.context_window.as_slice(),
             &session.model_semantics,
         )?;
         crate::runtime::context_window::validate_context_window_materialization(session)?;
-        let (context_messages, runtime_context_anchor_message_id) = build_model_context_messages(
-            session.context_window.as_slice(),
-            match input {
-                TurnInput::HostEvent(input) => Some(input.chat_message(session_id, now_ms())?),
-                TurnInput::CompletionDeliveryRepair { .. } => Some(
-                    session
-                        .context_window
-                        .iter()
-                        .rfind(|message| {
-                            crate::runtime::context_window::is_reliable_tool_chain_user_anchor(
-                                message,
-                            )
-                        })
-                        .cloned()
-                        .ok_or("completion_delivery_user_anchor_missing")?,
-                ),
-                _ => input
-                    .user_message()
-                    .map(|message| build_input_user_message(session_id, turn_id, input, message)),
-            },
-        )?;
+        let (mut context_messages, runtime_context_anchor_message_id) =
+            build_model_context_messages(
+                session_id,
+                session.context_window.as_slice(),
+                match input {
+                    TurnInput::HostEvent(input) => Some(input.chat_message(session_id, now_ms())?),
+                    TurnInput::CompletionDeliveryRepair { .. } => Some(
+                        session
+                            .context_window
+                            .iter()
+                            .rfind(|message| {
+                                crate::runtime::context_window::is_reliable_tool_chain_user_anchor(
+                                    message,
+                                )
+                            })
+                            .cloned()
+                            .ok_or("completion_delivery_user_anchor_missing")?,
+                    ),
+                    _ => input.user_message().map(|message| {
+                        build_input_user_message(session_id, turn_id, input, message)
+                    }),
+                },
+            )?;
+        prompt_projection::normalize_legacy_host_context(
+            &mut context_messages,
+            self.config.host_prompt.as_ref(),
+        );
         let model_messages = context_messages
             .iter()
             .map(|message| {
@@ -952,16 +957,31 @@ impl<
             .iter()
             .position(|message| message.message_id == runtime_context_anchor_message_id)
             .ok_or_else(|| "runtime_context_user_anchor_projection_missing".to_string())?;
+        let host_prompt = self.config.host_prompt.as_ref();
+        let execution_context = if let Some(cwd) = self
+            .tools_port
+            .cwd()
+            .filter(|_| !answer_now || host_prompt.is_some())
+        {
+            Some(prompt_projection::build_execution_context_message(
+                session_id,
+                turn_id,
+                cwd,
+                self.tools_port.bash_description()?,
+            ))
+        } else {
+            None
+        };
+        let system_prompt = prompt_projection::with_host_system_instructions(
+            system_prompt,
+            host_prompt,
+            execution_context
+                .as_ref()
+                .map(|message| message.content.as_str()),
+        );
         let mut runtime_context_messages = Vec::new();
-        if !answer_now {
-            if let Some(cwd) = self.tools_port.cwd() {
-                runtime_context_messages.push(prompt_projection::build_execution_context_message(
-                    session_id,
-                    turn_id,
-                    cwd,
-                    self.tools_port.bash_description()?,
-                ));
-            }
+        if host_prompt.is_none() {
+            runtime_context_messages.extend(execution_context);
         }
         let agent_instructions_message = prompt_projection::build_agent_instructions_message(
             session_id,
@@ -1366,29 +1386,16 @@ impl<
         if model_input_already_persisted(session, session_id, turn_id) {
             return Ok(false);
         }
-        let mut input_messages = vec![build_input_user_message(
+        let message = build_input_user_message(
             session_id,
             turn_id,
             input,
             user_message.expect("user message is checked above"),
-        )];
-        if let Some(user_message) = input_messages
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == MessageRole::User)
-        {
-            user_message.metadata.insert(
-                MESSAGE_SEMANTIC_KIND_META_KEY.to_string(),
-                input.semantic_kind().to_string(),
-            );
-        }
-        for message in &input_messages {
-            session.model_semantics.insert(
-                message.message_id.clone(),
-                crate::session::state::ModelMessageSemanticsV1::Plain,
-            );
-        }
-        session.messages.extend(input_messages);
+        );
+        session
+            .model_semantics
+            .insert(message.message_id.clone(), ModelMessageSemanticsV1::Plain);
+        session.messages.push(message);
         refresh_session_context_window(session);
         Ok(true)
     }
@@ -1715,9 +1722,15 @@ fn build_input_user_message(
     message: &str,
 ) -> ChatMessage {
     let mut current = prompt_projection::build_current_user_message(session_id, turn_id, message);
+    current.metadata.insert(
+        MESSAGE_SEMANTIC_KIND_META_KEY.into(),
+        input.semantic_kind().into(),
+    );
     if matches!(
         input,
-        TurnInput::UserMessageBatch { .. } | TurnInput::TurnSupplement { .. }
+        TurnInput::UserMessage(_)
+            | TurnInput::UserMessageBatch { .. }
+            | TurnInput::TurnSupplement { .. }
     ) {
         current.content = message.to_owned();
     }
@@ -1822,6 +1835,7 @@ fn skill_catalog_prompt_budget_chars(context_limit_tokens: u32) -> usize {
 }
 
 fn build_model_context_messages(
+    session_id: &str,
     base_context_window: &[ChatMessage],
     current_input: Option<ChatMessage>,
 ) -> Result<(Vec<ChatMessage>, String), String> {
@@ -1893,7 +1907,135 @@ fn build_model_context_messages(
     } else {
         continuation_anchor.expect("tool continuation anchor is resolved above")
     };
+    let anchor_message_id =
+        project_admitted_user_inputs(session_id, &mut context_messages, anchor_message_id)?;
     Ok((context_messages, anchor_message_id))
+}
+
+// Admission and the prepared input batch are two records of one user turn.
+fn project_admitted_user_inputs(
+    session_id: &str,
+    messages: &mut Vec<ChatMessage>,
+    mut anchor_message_id: String,
+) -> Result<String, String> {
+    let driver_prefix = format!("msg:{session_id}:");
+    let drivers = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, driver)| {
+            if driver.role != MessageRole::User
+                || driver
+                    .metadata
+                    .get(MESSAGE_SEMANTIC_KIND_META_KEY)
+                    .map(String::as_str)
+                    != Some(MESSAGE_SEMANTIC_USER_REQUEST)
+            {
+                return None;
+            }
+            let source_id = if let Some(source_id) = driver
+                .metadata
+                .get(crate::runtime::keys::metadata::LEGACY_FORK_USER_INPUT_SOURCE)
+            {
+                source_id.clone()
+            } else {
+                let turn_id = driver
+                    .message_id
+                    .strip_prefix(&driver_prefix)?
+                    .strip_suffix(":driver_user")?;
+                format!("message:{turn_id}:user")
+            };
+            Some((source_id, index))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut replaced = HashSet::new();
+    for index in 0..messages.len() {
+        let source = &messages[index];
+        if source.role != MessageRole::User {
+            continue;
+        }
+        let Some(&driver_index) = drivers.get(&source.message_id) else {
+            continue;
+        };
+        let source_id = source.message_id.clone();
+        let source_images = read_message_image_sources(source)?;
+        let driver = &mut messages[driver_index];
+        if !source_images.is_empty() && !merge_admitted_user_images(driver, source_images)? {
+            continue;
+        }
+        if source_id == anchor_message_id {
+            anchor_message_id = driver.message_id.clone();
+        }
+        replaced.insert(source_id);
+    }
+    messages.retain(|message| !replaced.contains(&message.message_id));
+    Ok(anchor_message_id)
+}
+
+fn merge_admitted_user_images(
+    driver: &mut ChatMessage,
+    source_images: Vec<ModelInputImageSourceRefV1>,
+) -> Result<bool, String> {
+    use crate::runtime::keys::metadata::{MODEL_INPUT_IMAGES, MODEL_INPUT_IMAGE_SOURCES};
+
+    let mut driver_images = read_message_image_sources(driver)?;
+    let mut missing_placeholders = Vec::new();
+    for image in source_images {
+        if driver_images.contains(&image) {
+            continue;
+        }
+        let placeholder = image.placeholder();
+        // Keep the admission when the two records assign the same marker to
+        // different images. Reusing that marker would discard one attachment.
+        if driver_images
+            .iter()
+            .any(|other| other.placeholder() == placeholder)
+        {
+            return Ok(false);
+        }
+        match driver.content.match_indices(placeholder).count() {
+            0 => missing_placeholders.push(placeholder.to_owned()),
+            1 => {}
+            _ => return Ok(false),
+        }
+        driver_images.push(image);
+    }
+    for placeholder in missing_placeholders {
+        driver.content.push('\n');
+        driver.content.push_str(&placeholder);
+    }
+    driver.metadata.remove(MODEL_INPUT_IMAGES);
+    driver.metadata.insert(
+        MODEL_INPUT_IMAGE_SOURCES.into(),
+        serde_json::to_string(&driver_images).map_err(|error| error.to_string())?,
+    );
+    Ok(true)
+}
+
+fn read_message_image_sources(
+    message: &ChatMessage,
+) -> Result<Vec<ModelInputImageSourceRefV1>, String> {
+    use crate::runtime::keys::metadata::{MODEL_INPUT_IMAGES, MODEL_INPUT_IMAGE_SOURCES};
+
+    let mut sources = Vec::new();
+    if let Some(raw) = message.metadata.get(MODEL_INPUT_IMAGES) {
+        let references: Vec<ModelInputImageRefV1> =
+            serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        sources.extend(references.into_iter().map(|reference| {
+            ModelInputImageSourceRefV1::InputRef {
+                input_ref: reference.input_ref,
+                content_type: reference.content_type,
+                placeholder: reference.placeholder,
+            }
+        }));
+    }
+    if message.role != MessageRole::Tool {
+        if let Some(raw) = message.metadata.get(MODEL_INPUT_IMAGE_SOURCES) {
+            let observed: Vec<ModelInputImageSourceRefV1> =
+                serde_json::from_str(raw).map_err(|error| error.to_string())?;
+            sources.extend(observed);
+        }
+    }
+    Ok(sources)
 }
 
 fn project_model_input_images(
@@ -1902,40 +2044,12 @@ fn project_model_input_images(
 ) -> Result<(Vec<ModelMessageV1>, Vec<ModelInputImageObservationV1>), String> {
     let mut observations = Vec::new();
     for message in messages {
-        if let Some(raw) = message
-            .metadata
-            .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGES)
-        {
-            let references: Vec<ModelInputImageRefV1> =
-                serde_json::from_str(raw).map_err(|e| e.to_string())?;
-            for reference in references {
-                let source = ModelInputImageSourceRefV1::InputRef {
-                    input_ref: reference.input_ref,
-                    content_type: reference.content_type,
-                    placeholder: reference.placeholder,
-                };
-                source.validate()?;
-                observations.push(ModelInputImageObservationV1 {
-                    message_id: message.message_id.clone(),
-                    source,
-                });
-            }
-        }
-        if message.role != MessageRole::Tool {
-            if let Some(raw) = message
-                .metadata
-                .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES)
-            {
-                let sources: Vec<ModelInputImageSourceRefV1> =
-                    serde_json::from_str(raw).map_err(|e| e.to_string())?;
-                for source in sources {
-                    source.validate()?;
-                    observations.push(ModelInputImageObservationV1 {
-                        message_id: message.message_id.clone(),
-                        source,
-                    });
-                }
-            }
+        for source in read_message_image_sources(message)? {
+            source.validate()?;
+            observations.push(ModelInputImageObservationV1 {
+                message_id: message.message_id.clone(),
+                source,
+            });
         }
     }
     let mut projected = Vec::with_capacity(model_messages.len());

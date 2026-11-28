@@ -27,6 +27,13 @@ Model configuration is managed through the client and Local Runtime. Secrets
 must not be placed in a Plugin manifest, Skill, Session, or source repository.
 A missing or invalid credential prevents the affected model from running.
 
+## Single-response process profile
+
+When `CENTAERIS_PROCESS_PROFILE=single_response`, the generation deadline
+defaults to 10 seconds. Set `CENTAERIS_SINGLE_RESPONSE_TIMEOUT_MS` to a positive
+integer in milliseconds to change the deadline and the model HTTP request
+timeout. For example, `15000` sets a 15-second limit.
+
 ## Plugins
 
 Managed Plugins live below the user data root. The executable may also contain

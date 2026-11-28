@@ -249,9 +249,14 @@ pub(super) struct ModelControlFacts {
     committed_by_run: BTreeMap<String, std::collections::BTreeSet<String>>,
     by_turn: HashMap<(String, String), Vec<String>>,
     delivery: Option<(crate::runtime::RequiredCompletionDeliveryV1, String, String)>,
+    pub(super) legacy_fork_user_inputs: HashMap<String, String>,
 }
 impl ModelControlFacts {
-    fn apply(&mut self, record: &SessionLogRecord) -> Result<(), String> {
+    fn apply(
+        &mut self,
+        record: &SessionLogRecord,
+        projection: Option<&SessionProjection>,
+    ) -> Result<(), String> {
         if record.event_type != SessionRecordType::ModelRequestStarted
             || record.payload["purpose"] != "main"
         {
@@ -262,6 +267,9 @@ impl ModelControlFacts {
         let observations: Vec<ModelObservationV1> =
             serde_json::from_value(record.payload["observations"].clone())
                 .map_err(|error| format!("decode Session model observations failed: {error}"))?;
+        if let Some(projection) = projection {
+            self.capture_legacy_fork_user_input(record, &run, &turn, projection, &observations);
+        }
         for observation in observations {
             match observation {
                 ModelObservationV1::InputUptake { input_ids } => {
@@ -293,6 +301,54 @@ impl ModelControlFacts {
         }
         Ok(())
     }
+
+    fn capture_legacy_fork_user_input(
+        &mut self,
+        record: &SessionLogRecord,
+        run: &str,
+        turn: &str,
+        projection: &SessionProjection,
+        observations: &[ModelObservationV1],
+    ) {
+        // A fork used to hash an unbound driver message ID. The first main
+        // request of that run still records its opening input at the tail.
+        if !record.event_id.starts_with("evt_v1_fork_event:sha256:")
+            || record.payload["loopIndex"] != 0
+            || projection
+                .agent_runs
+                .get(run)
+                .is_none_or(|run| run.initial_turn_id != turn)
+        {
+            return;
+        }
+        let source_id = format!("message:{turn}:user");
+        let Some(source) = projection.messages.get(&source_id).filter(|source| {
+            source.role == ReducedMessageRole::User
+                && source.agent_run_id.as_deref() == Some(run)
+                && source.turn_id.as_deref() == Some(turn)
+        }) else {
+            return;
+        };
+        let Some(driver) = observations.iter().rev().find_map(|item| match item {
+            ModelObservationV1::ContextMessage { message } => Some(message),
+            _ => None,
+        }) else {
+            return;
+        };
+        if driver.role == ModelMessageRoleV1::User
+            && driver.message_id.starts_with("evt_v1_message:sha256:")
+            && (driver.content == source.text.trim()
+                || driver.content == source.text
+                || driver
+                    .content
+                    .strip_prefix(&source.text)
+                    .is_some_and(|suffix| suffix.starts_with("\n\n")))
+        {
+            self.legacy_fork_user_inputs
+                .insert(driver.message_id.clone(), source_id);
+        }
+    }
+
     pub(super) fn restore_into(
         &self,
         snapshot: &mut SessionStateSnapshot,
@@ -324,7 +380,7 @@ impl ModelControlFacts {
 pub(super) fn control_facts(records: &[SessionLogRecord]) -> Result<ModelControlFacts, String> {
     let mut facts = ModelControlFacts::default();
     for record in records {
-        facts.apply(record)?;
+        facts.apply(record, None)?;
     }
     Ok(facts)
 }
@@ -413,7 +469,7 @@ impl SessionRecoveryAccumulator {
             self.tool_call_origins.push(origin);
         }
         capture_source(&record, &mut self.latest_sources, &mut self.sources)?;
-        self.controls.apply(&record)?;
+        self.controls.apply(&record, Some(&self.projection))?;
         self.updated_at_ms = record.created_at_ms;
         if record.event_type == SessionRecordType::ModelRequestStarted {
             if record.payload["purpose"] == "main" {

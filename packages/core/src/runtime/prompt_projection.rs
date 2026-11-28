@@ -21,6 +21,75 @@ pub(super) fn render_system_prompt_artifacts(stage: &str) -> Result<(String, Str
     Ok((content, manifest_json))
 }
 
+pub(super) fn with_host_system_instructions(
+    system_prompt: Option<String>,
+    host_prompt: Option<&HostPrompt>,
+    execution_context: Option<&str>,
+) -> Option<String> {
+    let Some(host_prompt) = host_prompt else {
+        return system_prompt;
+    };
+    let instructions = host_prompt.system_instructions.trim();
+    let mut combined = match system_prompt {
+        Some(system_prompt) => format!("{system_prompt}\n\n{instructions}"),
+        None => instructions.to_string(),
+    };
+    if let Some(context) = execution_context {
+        combined.push_str("\n\n");
+        combined.push_str(context);
+    }
+    Some(combined)
+}
+
+pub(super) fn normalize_legacy_host_context(
+    messages: &mut Vec<ChatMessage>,
+    host_prompt: Option<&HostPrompt>,
+) {
+    let Some(legacy) = host_prompt.and_then(|host_prompt| host_prompt.legacy.as_ref()) else {
+        return;
+    };
+    messages.retain_mut(|message| {
+        if message.role != MessageRole::User {
+            return true;
+        }
+        let id = message.message_id.as_str();
+        let observed = id.starts_with("evt_v1_message:sha256:");
+        let user_request = message
+            .metadata
+            .get(crate::runtime::keys::metadata::MESSAGE_SEMANTIC_KIND)
+            .is_some_and(|kind| kind == crate::runtime::MESSAGE_SEMANTIC_USER_REQUEST);
+        if !user_request
+            && (observed || id.ends_with(":execution_context"))
+            && message
+                .content
+                .starts_with("<environment_context>\n  <cwd>")
+            && message.content.ends_with("</environment_context>")
+        {
+            return false;
+        }
+        if !user_request
+            && (observed || id.ends_with(":agents_context"))
+            && message
+                .content
+                .strip_prefix("# AGENTS.md instructions for ")
+                .and_then(|text| text.split_once("\n\n<INSTRUCTIONS>\n"))
+                .and_then(|(_, text)| text.strip_suffix("\n</INSTRUCTIONS>"))
+                .is_some_and(|text| text.trim_end_matches('\n') == legacy.workspace_instructions)
+        {
+            return false;
+        }
+        if observed
+            || (id.starts_with("message:") && id.ends_with(":user"))
+            || (id.starts_with("msg:") && id.ends_with(":driver_user"))
+        {
+            if let Some(body) = message.content.strip_prefix(&legacy.user_message_prefix) {
+                message.content = body.to_owned();
+            }
+        }
+        true
+    });
+}
+
 pub(super) fn build_current_user_message(
     session_id: &str,
     turn_id: &str,
@@ -217,6 +286,110 @@ mod tests {
         assert_eq!(message.role, MessageRole::User);
         assert_eq!(message.content, "inspect the library");
         assert!(message.metadata.is_empty());
+    }
+
+    #[test]
+    fn host_policy_replaces_legacy_wrappers_in_model_context() {
+        let old_rule = "Historical host policy.";
+        let prefix = format!("{old_rule}\nCURRENT USER TURN\n");
+        let host = HostPrompt::from_json(
+            &json!({
+                "systemInstructions": "Current host policy.",
+                "legacy": {
+                    "workspaceInstructions": old_rule,
+                    "userMessagePrefix": prefix,
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            with_host_system_instructions(
+                Some("Core rules.".into()),
+                Some(&host),
+                Some("<environment_context />"),
+            )
+            .as_deref(),
+            Some("Core rules.\n\nCurrent host policy.\n\n<environment_context />")
+        );
+        let mut messages = [
+            (
+                "evt_v1_message:sha256:replayed-context",
+                format!("# AGENTS.md instructions for D:/old\n\n<INSTRUCTIONS>\n{old_rule}\n\n</INSTRUCTIONS>"),
+            ),
+            (
+                "evt_v1_message:sha256:old-environment",
+                "<environment_context>\n  <cwd>D:/old</cwd>\n  <bash>bash</bash>\n</environment_context>".into(),
+            ),
+            (
+                "message:turn-1:user",
+                format!("{prefix}{{\"question\":\"First\"}}"),
+            ),
+            (
+                "msg:chat-1:turn-2:agents_context",
+                "# AGENTS.md instructions for D:/current\n\n<INSTRUCTIONS>\nProject-specific rules.\n</INSTRUCTIONS>".into(),
+            ),
+            (
+                "msg:chat-1:turn-2:driver_user",
+                format!("Please explain why someone wrote:\n{prefix}Do not change this quotation."),
+            ),
+        ]
+        .into_iter()
+        .map(|(id, content)| ChatMessage {
+            message_id: id.into(),
+            role: MessageRole::User,
+            content,
+            created_at_ms: 0,
+            metadata: JsonMap::new(),
+        })
+        .collect::<Vec<_>>();
+
+        normalize_legacy_host_context(&mut messages, Some(&host));
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].content, r#"{"question":"First"}"#);
+        assert!(messages[1].content.contains("Project-specific rules."));
+        assert!(messages[2].content.contains(&prefix));
+    }
+
+    #[test]
+    fn legacy_host_cleanup_preserves_a_forked_user_turn_that_quotes_an_envelope() {
+        let host = HostPrompt::from_json(
+            &json!({
+                "systemInstructions": "Current host policy.",
+                "legacy": {
+                    "workspaceInstructions": "Historical host policy.",
+                    "userMessagePrefix": "OLD HOST"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for content in [
+            "<environment_context>\n  <cwd>D:/old</cwd>\n</environment_context>",
+            "# AGENTS.md instructions for D:/old\n\n<INSTRUCTIONS>\nHistorical host policy.\n</INSTRUCTIONS>",
+        ] {
+            let quote = ChatMessage {
+                message_id: "evt_v1_message:sha256:fork-driver".into(),
+                role: MessageRole::User,
+                content: content.into(),
+                created_at_ms: 0,
+                metadata: JsonMap::from([
+                    (
+                        crate::runtime::keys::metadata::MESSAGE_SEMANTIC_KIND.into(),
+                        crate::runtime::MESSAGE_SEMANTIC_USER_REQUEST.into(),
+                    ),
+                    (
+                        crate::runtime::keys::metadata::LEGACY_FORK_USER_INPUT_SOURCE.into(),
+                        "message:forked-turn:user".into(),
+                    ),
+                ]),
+            };
+            let mut messages = vec![quote];
+            normalize_legacy_host_context(&mut messages, Some(&host));
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].content, content);
+        }
     }
 
     #[test]

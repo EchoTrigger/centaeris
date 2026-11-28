@@ -44,6 +44,7 @@ macro_rules! runtime_commands {
     ($consumer:ident) => {
         $consumer! {
             AgentContextUsageGet, "agent_context_usage_get", SharedRuntime, Read, SafeRetry, None;
+            SessionModelRequests, "_centaeris/session/model_requests", SharedRuntime, Read, SafeRetry, None;
             AgentContextCompact, "_centaeris/session/compact_context", SharedRuntime, OneShotAction, NoAutomaticRetry, None;
             AgentDeadLetterDismiss, "agent_dead_letter_dismiss", SharedRuntime, IdentityMutation, NoAutomaticRetry, Some("agent_dead_letter_get");
             AgentDeadLetterGet, "agent_dead_letter_get", SharedRuntime, Read, SafeRetry, None;
@@ -54,6 +55,7 @@ macro_rules! runtime_commands {
             AgentQuestionAnswer, "_centaeris/session/answer_question", SharedRuntime, OneShotAction, NoAutomaticRetry, None;
             SessionDelete, "_centaeris/session/delete", SharedRuntime, IdentityMutation, NoAutomaticRetry, Some("session/list");
             SessionDiagnostics, "_centaeris/session/diagnostics", SharedRuntime, Read, SafeRetry, None;
+            SessionFork, "_centaeris/session/fork", SharedRuntime, Creation, SameOperationId, Some("_centaeris/session/fork");
             SessionReorder, "_centaeris/session/reorder", SharedRuntime, DesiredStateWrite, NoAutomaticRetry, Some("session/list");
             SessionSearch, "_centaeris/session/search", SharedRuntime, Read, SafeRetry, None;
             AgentRunList, "_centaeris/session/agent-runs", SharedRuntime, Read, SafeRetry, None;
@@ -67,6 +69,8 @@ macro_rules! runtime_commands {
             AgentRuntimeConfigGet, "agent_runtime_config_get", SharedRuntime, Read, SafeRetry, None;
             AgentRuntimeConfigReset, "agent_runtime_config_reset", SharedRuntime, DesiredStateWrite, NoAutomaticRetry, Some("agent_runtime_config_get");
             AgentRuntimeConfigSet, "agent_runtime_config_set", SharedRuntime, DesiredStateWrite, NoAutomaticRetry, Some("agent_runtime_config_get");
+            ModelTypedOperation, "_centaeris/model/typed_operation", SharedRuntime, Read, SafeRetry, None;
+            ModelEvaluateTyped, "_centaeris/model/evaluate_typed", SharedRuntime, OneShotAction, SameOperationId, Some("_centaeris/model/evaluate_typed");
             AgentRuntimeModelTest, "agent_runtime_model_test", SharedRuntime, OneShotAction, NoAutomaticRetry, None;
             McpCatalog, "mcp/catalog", SharedRuntime, Read, SafeRetry, None;
             McpConfigure, "mcp/configure", SharedRuntime, DesiredStateWrite, NoAutomaticRetry, Some("mcp/catalog");

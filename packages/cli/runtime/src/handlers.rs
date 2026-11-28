@@ -103,6 +103,9 @@ pub(crate) fn handle_request(
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
         }
+        RuntimeHostCommand::SessionFork => {
+            crate::message_log::fork::fork_command(&event_writer, request.payload)
+        }
         RuntimeHostCommand::SessionActivate => {
             let payload: sessions::SessionActivateRequest =
                 runtime_bridge::deserialize_request(request.payload)?;
@@ -171,6 +174,17 @@ pub(crate) fn handle_request(
             event_writer.emit("runtime/config-changed", serde_json::json!({}))?;
             Ok(response)
         }
+        RuntimeHostCommand::ModelTypedOperation => {
+            let payload = crate::typed_model::parse_read_request(request.payload)?;
+            let response = crate::typed_model::read_operation(payload)?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::ModelEvaluateTyped => Err(RuntimeHostError::new(
+            "async_handler_required",
+            "_centaeris/model/evaluate_typed",
+        )),
         RuntimeHostCommand::AgentRuntimeModelTest => Err(RuntimeHostError::new(
             "model_test_requires_async_handler",
             "agent_runtime_model_test",
@@ -317,6 +331,14 @@ pub(crate) fn handle_request(
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = runtime_ops::agent_state_get(payload)
                 .map_err(|error| RuntimeHostError::new("agent_state_failed", error))?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
+        RuntimeHostCommand::SessionModelRequests => {
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = runtime_ops::session_model_requests(payload)
+                .map_err(|error| RuntimeHostError::new("session_model_requests_failed", error))?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -687,6 +709,13 @@ pub(crate) async fn handle_request_async(
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
         }
+        RuntimeHostCommand::ModelEvaluateTyped => {
+            let payload = crate::typed_model::parse_request(request.payload)?;
+            let response = crate::typed_model::evaluate(payload).await?;
+            serde_json::to_value(response).map_err(|error| {
+                RuntimeHostError::new("serialize_response_failed", error.to_string())
+            })
+        }
         RuntimeHostCommand::AgentRuntimeModelTest => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
             let response = agent_runtime::test_model(&event_writer, payload)
@@ -834,6 +863,8 @@ fn command_owns_store_lock(command: RuntimeHostCommand) -> bool {
         command,
         RuntimeHostCommand::AgentRuntimeConfigGet
             | RuntimeHostCommand::SessionSearch
+            | RuntimeHostCommand::SessionModelRequests
+            | RuntimeHostCommand::SessionFork
             | RuntimeHostCommand::AgentRuntimeConfigReset
             | RuntimeHostCommand::AgentRuntimeConfigSet
             | RuntimeHostCommand::McpCatalog

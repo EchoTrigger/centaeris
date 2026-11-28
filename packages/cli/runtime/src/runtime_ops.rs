@@ -835,3 +835,50 @@ mod tests {
         }
     }
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SessionModelRequestsRequest {
+    session_id: String,
+    agent_run_id: Option<String>,
+    after_sequence: Option<u64>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionModelRequestsResponse {
+    session_id: String,
+    records: Vec<serde_json::Value>,
+    next_sequence: u64,
+    has_more: bool,
+}
+
+pub(crate) fn session_model_requests(
+    request: SessionModelRequestsRequest,
+) -> Result<SessionModelRequestsResponse, String> {
+    let session_id = required_string(&request.session_id, "sessionId")?;
+    if request
+        .agent_run_id
+        .as_deref()
+        .is_some_and(|id| id.trim().is_empty())
+    {
+        return Err("agentRunId must be nonblank when supplied".into());
+    }
+    let limit = request.limit.unwrap_or(200);
+    if !(1..=1000).contains(&limit) {
+        return Err("limit must be between 1 and 1000".into());
+    }
+    let (records, next_sequence, has_more) = message_log::model_request_records(
+        &session_id,
+        request.agent_run_id.as_deref(),
+        request.after_sequence.unwrap_or(0),
+        limit as usize,
+    )?;
+    Ok(SessionModelRequestsResponse {
+        session_id,
+        records,
+        next_sequence,
+        has_more,
+    })
+}
