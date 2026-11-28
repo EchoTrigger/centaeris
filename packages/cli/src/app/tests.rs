@@ -2539,7 +2539,7 @@ fn open_occupied_session(available: Arc<AtomicBool>, draft_image: Option<PathBuf
                 "_centaeris/session/claim-writer" => {
                     json!({"claimed": id == "session-fork" || available.load(Ordering::SeqCst)})
                 }
-                "_centaeris/session/fork-before-user-turn" => {
+                "test/fork-latest-user-turn" => {
                     assert_eq!(id, "session-paged");
                     json!({
                         "id": "session-fork", "title": "Fork", "cwd": "D:/workspace",

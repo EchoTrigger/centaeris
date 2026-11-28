@@ -743,12 +743,19 @@ impl EventWriter {
         &self,
         session_id: &str,
     ) -> Result<SessionWritePermit, String> {
+        self.try_session_writer(session_id)?
+            .ok_or_else(|| format!("Session {session_id} is open in another window"))
+    }
+
+    pub(crate) fn try_session_writer(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionWritePermit>, String> {
         if self.claim_session_writer(session_id)? {
-            if let Some(permit) = self.pin_session(session_id)? {
-                return Ok(permit);
-            }
+            self.pin_session(session_id)
+        } else {
+            Ok(None)
         }
-        Err(format!("Session {session_id} is open in another window"))
     }
 
     pub(crate) fn release_session_writer(&self, session_id: &str) -> Result<(), String> {

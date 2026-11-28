@@ -2705,6 +2705,7 @@ fn restore_active_runtime_snapshot(
         }
     }
 
+    let mut admitted_driver_ids = HashSet::new();
     for event in active.iter().filter(|event| {
         matches!(
             event.event_type,
@@ -2714,6 +2715,12 @@ fn restore_active_runtime_snapshot(
         let payload = payload_object(event)?;
         let message_id = required_payload_string(payload, "messageId", event)?;
         let images = model_input_image_refs(payload)?;
+        if event.event_type == SessionRecordType::UserMessage {
+            admitted_driver_ids.insert(crate::runtime::driver_user_message_id(
+                expected_session_id,
+                &required_event_turn_id(event)?,
+            ));
+        }
         if let Some(message) = snapshot
             .messages
             .iter_mut()
@@ -2744,6 +2751,25 @@ fn restore_active_runtime_snapshot(
                     })?,
                 );
             }
+        }
+    }
+    for message in snapshot
+        .messages
+        .iter_mut()
+        .filter(|m| m.role == MessageRole::User)
+    {
+        let legacy_source = controls.legacy_fork_user_inputs.get(&message.message_id);
+        if let Some(source_id) = legacy_source {
+            message.metadata.insert(
+                crate::runtime::keys::metadata::LEGACY_FORK_USER_INPUT_SOURCE.into(),
+                source_id.clone(),
+            );
+        }
+        if legacy_source.is_some() || admitted_driver_ids.contains(&message.message_id) {
+            message.metadata.insert(
+                crate::runtime::keys::metadata::MESSAGE_SEMANTIC_KIND.into(),
+                crate::runtime::MESSAGE_SEMANTIC_USER_REQUEST.into(),
+            );
         }
     }
     host_event_input::restore_origins(

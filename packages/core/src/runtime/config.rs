@@ -1,7 +1,41 @@
 use super::*;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostPrompt {
+    pub(super) system_instructions: String,
+    pub(super) legacy: Option<LegacyHostPrompt>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct LegacyHostPrompt {
+    pub(super) workspace_instructions: String,
+    pub(super) user_message_prefix: String,
+}
+
+impl HostPrompt {
+    /// Decode instructions supplied by the trusted runtime host at startup.
+    pub fn from_json(raw: &str) -> Result<Self, String> {
+        let prompt: Self = serde_json::from_str(raw)
+            .map_err(|_| "invalid host prompt configuration".to_string())?;
+        let valid_text = |text: &str| !text.trim().is_empty() && text.chars().count() <= 16_000;
+        if !valid_text(&prompt.system_instructions)
+            || prompt.legacy.as_ref().is_some_and(|legacy| {
+                !valid_text(&legacy.workspace_instructions)
+                    || !valid_text(&legacy.user_message_prefix)
+            })
+        {
+            return Err("invalid host prompt text".into());
+        }
+        Ok(prompt)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeConfig {
     pub agent_instructions: String,
+    pub host_prompt: Option<HostPrompt>,
     pub max_message_chars: usize,
     pub max_recovery_attempts: u32,
     pub tool_parallelism: usize,
@@ -29,6 +63,7 @@ impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
             agent_instructions: String::new(),
+            host_prompt: None,
             max_message_chars: 72_000,
             max_recovery_attempts: 2,
             tool_parallelism: DEFAULT_TOOL_PARALLELISM,

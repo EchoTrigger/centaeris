@@ -9,52 +9,185 @@ use serde_json::{to_value, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+const FORK_EVENT_KIND: &str = "fork_event";
+
+/// Returns whether a canonical event ID identifies history copied by a Session fork.
+pub fn is_fork_inherited_event_id(event_id: &str) -> bool {
+    event_id
+        .strip_prefix("evt_v1_")
+        .and_then(|id| id.split_once(":sha256:"))
+        .is_some_and(|(kind, digest)| {
+            kind == FORK_EVENT_KIND
+                && digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+}
+
 /// A Session prefix ending before an independently admitted user turn.
 /// Admission provenance comes from the host's durable input records.
+#[derive(Debug)]
 pub struct SessionFork {
     prefix: Vec<SessionLogRecord>,
     openings: HashSet<(String, String)>,
     retired_messages: HashSet<String>,
-    pub draft: String,
+    opening_message: SessionLogRecord,
+}
+
+/// The text and editable attachment references for a local composer.
+#[derive(Debug)]
+pub struct ForkDraft {
+    pub text: String,
     pub attachments: Vec<ForkDraftAttachment>,
 }
 
+/// An attachment reference retained in the source user message.
+#[derive(Debug)]
 pub struct ForkDraftAttachment {
     pub input_ref: String,
     pub content_type: String,
     pub placeholder: String,
 }
 
+/// Rebased records and the externally admitted openings they retain.
+#[derive(Debug)]
 pub struct ForkHistory {
     pub records: Vec<SessionLogRecord>,
     pub openings: HashSet<(String, String)>,
 }
 
+/// A rejected selection of a verified user opening.
+#[derive(Debug, thiserror::Error)]
+pub enum ForkSelectionError {
+    /// A source run still owns execution.
+    #[error("Cannot fork a Session with an active AgentRun")]
+    ActiveRun,
+    /// The source has no independently verified opening.
+    #[error("No verified user turn is available to fork")]
+    MissingOpening,
+    /// The verified opening lacks its committed user message.
+    #[error("The verified user turn has no committed opening message")]
+    MissingOpeningMessage,
+    /// The requested turn does not have an active, verified opening.
+    #[error("The requested turn has no active verified user opening")]
+    StaleOpening,
+    /// More than one active record establishes the requested opening.
+    #[error("The requested user opening is ambiguous")]
+    AmbiguousOpening,
+    /// The source journal could not be reduced.
+    #[error("{0}")]
+    InvalidHistory(String),
+}
+
 impl SessionFork {
+    /// Selects the latest externally admitted opening from a journal snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot or the verified opening is invalid.
     pub fn before_latest_user_turn(
         session_id: &str,
         records: &[SessionLogRecord],
         verified_openings: &HashSet<(String, String)>,
     ) -> Result<Self, String> {
-        let mut prefix = active_session_records(session_id, records)?;
+        let prefix = active_session_records(session_id, records)?;
         let cutoff = prefix
             .iter()
             .rposition(|record| {
                 record.event_type == SessionRecordType::AgentRunStarted
                     && opening_identity(record).is_some_and(|id| verified_openings.contains(&id))
             })
-            .ok_or("No verified user turn is available to fork")?;
+            .ok_or(ForkSelectionError::MissingOpening.to_string())?;
+        Self::from_cutoff(session_id, records, verified_openings, prefix, cutoff)
+            .map_err(|error| error.to_string())
+    }
+
+    fn from_cutoff(
+        session_id: &str,
+        records: &[SessionLogRecord],
+        verified_openings: &HashSet<(String, String)>,
+        mut prefix: Vec<SessionLogRecord>,
+        cutoff: usize,
+    ) -> Result<Self, ForkSelectionError> {
         let opening = &prefix[cutoff];
-        let prompt = prefix[cutoff + 1..]
+        let mut messages = prefix[cutoff + 1..]
             .iter()
-            .find(|record| {
+            .enumerate()
+            .filter(|(_, record)| {
                 record.event_type == SessionRecordType::UserMessage
                     && record.agent_run_id == opening.agent_run_id
                     && record.turn_id == opening.turn_id
-            })
-            .ok_or("The verified user turn has no committed opening message")?;
+            });
+        let (prompt_offset, _) = messages
+            .next()
+            .ok_or(ForkSelectionError::MissingOpeningMessage)?;
+        if messages.next().is_some() {
+            return Err(ForkSelectionError::AmbiguousOpening);
+        }
+        let opening_message = prefix.swap_remove(cutoff + 1 + prompt_offset);
+        prefix.truncate(cutoff);
+        let openings = prefix
+            .iter()
+            .filter(|record| record.event_type == SessionRecordType::AgentRunStarted)
+            .filter_map(opening_identity)
+            .filter(|id| verified_openings.contains(id))
+            .collect();
+        Ok(Self {
+            prefix,
+            openings,
+            retired_messages: retired_plaintext_source_message_ids(session_id, records)
+                .map_err(ForkSelectionError::InvalidHistory)?
+                .into_iter()
+                .collect(),
+            opening_message,
+        })
+    }
+
+    /// Selects a verified opening by its Turn ID from an inactive Session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid snapshot, an active run, or a missing or ambiguous opening.
+    pub fn before_user_turn(
+        session_id: &str,
+        records: &[SessionLogRecord],
+        verified_openings: &HashSet<(String, String)>,
+        before_turn_id: &str,
+    ) -> Result<Self, ForkSelectionError> {
+        if reduce_events(session_id, records.iter())
+            .map_err(ForkSelectionError::InvalidHistory)?
+            .agent_runs
+            .values()
+            .any(|run| run.state == ReducedAgentRunState::Running)
+        {
+            return Err(ForkSelectionError::ActiveRun);
+        }
+        let prefix = active_session_records(session_id, records)
+            .map_err(ForkSelectionError::InvalidHistory)?;
+        let mut openings = prefix.iter().enumerate().filter(|(_, record)| {
+            record.event_type == SessionRecordType::AgentRunStarted
+                && record.turn_id.as_deref() == Some(before_turn_id)
+        });
+        let (cutoff, opening) = openings.next().ok_or(ForkSelectionError::StaleOpening)?;
+        if openings.next().is_some() {
+            return Err(ForkSelectionError::AmbiguousOpening);
+        }
+        if !opening_identity(opening).is_some_and(|id| verified_openings.contains(&id)) {
+            return Err(ForkSelectionError::StaleOpening);
+        }
+        Self::from_cutoff(session_id, records, verified_openings, prefix, cutoff)
+    }
+
+    /// Decodes an editable draft for the local composer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the opening contains invalid or non-editable attachments.
+    pub fn draft(&self) -> Result<ForkDraft, String> {
+        let prompt = &self.opening_message;
         let payload = payload_object(prompt)?;
-        let draft = required_payload_string_allow_empty(payload, "text", prompt)?;
+        let text = required_payload_string_allow_empty(payload, "text", prompt)?;
         let attachments =
             serde_json::from_value::<Vec<MessageAttachmentRef>>(payload["attachments"].clone())
                 .map_err(|error| format!("decode opening attachments failed: {error}"))?
@@ -69,26 +202,15 @@ impl SessionFork {
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-        prefix.truncate(cutoff);
-        let openings = prefix
-            .iter()
-            .filter(|record| record.event_type == SessionRecordType::AgentRunStarted)
-            .filter_map(opening_identity)
-            .filter(|id| verified_openings.contains(id))
-            .collect();
-        Ok(Self {
-            prefix,
-            openings,
-            retired_messages: retired_plaintext_source_message_ids(session_id, records)?
-                .into_iter()
-                .collect(),
-            draft,
-            attachments,
-        })
+        Ok(ForkDraft { text, attachments })
     }
 
     /// Rebind committed history to a fresh Session without carrying over the
     /// source's live execution, checkpoints, or input and delivery controls.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prefix has invalid records or an unfinished run.
     pub fn rebase(&self, session_id: &str) -> Result<ForkHistory, String> {
         let identities = ForkIdentity::new(session_id, &self.prefix, &self.retired_messages)?;
         let records = self
@@ -232,7 +354,7 @@ impl<'a> ForkIdentity<'a> {
     fn record(&self, source: &SessionLogRecord) -> Result<SessionLogRecord, String> {
         let mut record = source.clone();
         record.session_id = self.session_id.to_owned();
-        record.event_id = self.id("fork_event", &source.event_id);
+        record.event_id = self.id(FORK_EVENT_KIND, &source.event_id);
         record.agent_run_id = source
             .agent_run_id
             .as_deref()
@@ -282,8 +404,9 @@ impl<'a> ForkIdentity<'a> {
 mod tests {
     use super::*;
     use crate::session::{
-        completed_agent_run_record, sealed_assistant_message_record, started_agent_run_records,
-        started_agent_run_records_with_attachments, turn_supplement_record,
+        completed_agent_run_record, interrupted_agent_run_record, sealed_assistant_message_record,
+        started_agent_run_records, started_agent_run_records_with_attachments,
+        turn_supplement_record,
     };
     use serde_json::json;
 
@@ -329,9 +452,10 @@ mod tests {
         ]);
 
         let fork = SessionFork::before_latest_user_turn("source", &source, &openings).unwrap();
-        assert_eq!(fork.draft, "  latest [Image #1]\n");
-        assert_eq!(fork.attachments[0].placeholder, "[Image #1]");
-        assert_eq!(fork.attachments[0].input_ref, "local-image:sample");
+        let draft = fork.draft().unwrap();
+        assert_eq!(draft.text, "  latest [Image #1]\n");
+        assert_eq!(draft.attachments[0].placeholder, "[Image #1]");
+        assert_eq!(draft.attachments[0].input_ref, "local-image:sample");
         let history = fork.rebase("new-session").unwrap();
         assert!(history.records.iter().all(|record| {
             record.session_id == "new-session"
@@ -355,7 +479,7 @@ mod tests {
             &history.openings,
         )
         .unwrap();
-        assert_eq!(inherited.draft, "earlier");
+        assert_eq!(inherited.draft().unwrap().text, "earlier");
         assert!(inherited.rebase("second-fork").unwrap().records.is_empty());
     }
 
@@ -365,5 +489,81 @@ mod tests {
             started_agent_run_records("source", "turn", "run", "internal response", 1).unwrap();
         let result = SessionFork::before_latest_user_turn("source", &source, &HashSet::new());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn historical_fork_requires_a_verified_opening_and_an_inactive_source() {
+        let mut source = started_agent_run_records("source", "turn-1", "run-1", "first", 1)
+            .unwrap()
+            .to_vec();
+        source.push(
+            sealed_assistant_message_record("source", "turn-1", "run-1", "first reply", "done", 2)
+                .unwrap(),
+        );
+        source.push(
+            completed_agent_run_record("source", "turn-1", "run-1", "final_response", 3).unwrap(),
+        );
+        source.extend(started_agent_run_records("source", "turn-2", "run-2", "latest", 4).unwrap());
+        let openings = HashSet::from([
+            ("run-1".into(), "turn-1".into()),
+            ("run-2".into(), "turn-2".into()),
+        ]);
+        let active =
+            SessionFork::before_user_turn("source", &source, &openings, "turn-1").unwrap_err();
+        assert!(matches!(active, ForkSelectionError::ActiveRun), "{active}");
+        source.push(
+            sealed_assistant_message_record("source", "turn-2", "run-2", "latest reply", "done", 5)
+                .unwrap(),
+        );
+        source.push(
+            completed_agent_run_record("source", "turn-2", "run-2", "final_response", 6).unwrap(),
+        );
+        let unverified = HashSet::from([("other-run".into(), "turn-1".into())]);
+        let stale =
+            SessionFork::before_user_turn("source", &source, &unverified, "turn-1").unwrap_err();
+        assert!(matches!(stale, ForkSelectionError::StaleOpening), "{stale}");
+        let fork = SessionFork::before_user_turn("source", &source, &openings, "turn-2").unwrap();
+        let history = fork.rebase("child").unwrap();
+        let restored =
+            super::super::recovery::recover_session_records("child", &history.records).unwrap();
+        let messages = restored
+            .snapshot
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, ["first", "first reply"]);
+    }
+
+    #[test]
+    fn historical_fork_rejects_two_active_openings_with_the_same_turn_id() {
+        let mut source = Vec::new();
+        for (run, timestamp) in [("run-1", 1), ("run-2", 3)] {
+            source.extend(
+                started_agent_run_records("source", "turn", run, "prompt", timestamp).unwrap(),
+            );
+            source.push(
+                interrupted_agent_run_record(
+                    "source",
+                    "turn",
+                    run,
+                    "stopped",
+                    "Stopped",
+                    false,
+                    timestamp + 1,
+                )
+                .unwrap(),
+            );
+        }
+        let openings = HashSet::from([
+            ("run-1".into(), "turn".into()),
+            ("run-2".into(), "turn".into()),
+        ]);
+        let error =
+            SessionFork::before_user_turn("source", &source, &openings, "turn").unwrap_err();
+        assert!(
+            matches!(error, ForkSelectionError::AmbiguousOpening),
+            "{error}"
+        );
     }
 }

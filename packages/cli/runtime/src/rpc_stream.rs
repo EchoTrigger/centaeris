@@ -488,6 +488,7 @@ mod tests {
         fn enter(label: &str) -> Self {
             let root = unique_test_root(label);
             fs::create_dir_all(root.join("workspace")).unwrap();
+            let root = root.canonicalize().unwrap();
             let previous = [
                 ("CENTAERIS_DESKTOP_DATA_DIR", root.clone()),
                 ("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", root.join("sessions")),
@@ -517,6 +518,315 @@ mod tests {
             }
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn session_fork_rpc_keeps_the_prefix_and_recovers_a_published_child() {
+        let _guard = crate::message_log::test_env_mutex().lock().unwrap();
+        let profile = TestProfile::enter("native-session-fork");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(check_session_fork_rpc(&profile));
+    }
+
+    async fn check_session_fork_rpc(profile: &TestProfile) {
+        use crate::message_log;
+        use crate::operation_receipts;
+        use crate::session_files::SessionFiles;
+        use centaeris_core::runtime::contracts::current_timestamp_ms;
+        use centaeris_core::session::recovery::recover_session_records;
+        use serde_json::{json, Value};
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        const METHOD: &str = "_centaeris/session/fork";
+        crate::user_data_layout::ensure_user_data_layout().unwrap();
+        crate::sqlite_store::SqliteRuntimeStore::new(
+            crate::user_data_layout::runtime_store_db_path(),
+        )
+        .unwrap();
+        let sessions = SessionFiles::new(profile.root.join("sessions"));
+        let now = current_timestamp_ms();
+        let source = sessions
+            .create(
+                Some("source"),
+                profile.root.join("workspace").to_str().unwrap(),
+                now,
+            )
+            .unwrap();
+        let source_path = profile.root.join(&source.session_path);
+        let commit_turn = |operation_id: &str, user_text: &str, reply: &str, at_ms| {
+            let run = operation_receipts::deterministic_identity(
+                "agent-run-",
+                "session/prompt",
+                operation_id,
+            );
+            let turn =
+                operation_receipts::deterministic_identity("turn-", "session/prompt", operation_id);
+            operation_receipts::write_prompt(
+                operation_id,
+                "fixture-digest".into(),
+                json!({"sessionId":source.id, "agentRunId":run, "turnId":turn, "streamItems":[]}),
+                true,
+            )
+            .unwrap();
+            message_log::append_agent_run_started(&source.id, &turn, &run, user_text, at_ms)
+                .unwrap();
+            message_log::append_assistant_message(
+                &source.id,
+                &turn,
+                Some(&run),
+                reply,
+                "done",
+                at_ms + 1,
+            )
+            .unwrap();
+            message_log::append_agent_run_terminal(
+                &source.id,
+                &turn,
+                &run,
+                "succeeded",
+                None,
+                at_ms + 2,
+            )
+            .unwrap();
+            turn
+        };
+        let first = commit_turn("first", "first prompt", "first reply", now + 1);
+        let middle = commit_turn("middle", "middle prompt", "middle reply", now + 4);
+        let latest = commit_turn("latest", "latest prompt", "latest reply", now + 7);
+        let original = fs::read(&source_path).unwrap();
+        let request = |operation: &str, target: &str| {
+            json!({"request": {
+                "operationId": operation, "sessionId": source.id,
+                "beforeTurnId": target,
+            }})
+        };
+        let recover_only = |operation: &str, target: &str| {
+            let mut params = request(operation, target);
+            params["recoverOnly"] = json!(true);
+            params
+        };
+
+        let clients = Arc::new(RuntimeServerClientHub::default());
+        let (writer, outbound) = clients.connect().unwrap().unwrap();
+        let controller = writer.clone();
+        let (server, peer) = tokio::io::duplex(8192);
+        let serving = tokio::spawn(serve_connection(
+            server,
+            Arc::new(Mutex::new(RuntimeHostState::default())),
+            clients,
+            writer,
+            outbound,
+        ));
+        let mut peer = BufReader::new(peer);
+        async fn call(
+            peer: &mut BufReader<tokio::io::DuplexStream>,
+            id: u64,
+            method: &str,
+            params: Value,
+        ) -> Value {
+            let request = json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params});
+            peer.write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(10), peer.read_line(&mut line))
+                .await
+                .expect("fork RPC response timeout")
+                .unwrap();
+            let response: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(response["id"], id, "{response}");
+            response
+        }
+        let initialize = call(
+            &mut peer,
+            1,
+            "initialize",
+            json!({"request":{
+                "clientKind":"desktop", "viewerId":"native-session-fork"
+            }}),
+        )
+        .await;
+        assert!(
+            initialize["result"]["capabilities"]
+                .as_array()
+                .is_some_and(|capabilities| { capabilities.contains(&json!("session_fork")) }),
+            "{initialize}"
+        );
+        let mut invalid = request("fork-operation", &latest);
+        invalid["request"]["draft"] = json!("may not be supplied");
+        let invalid = call(&mut peer, 2, METHOD, invalid).await;
+        assert_eq!(
+            invalid["error"]["data"]["code"], "invalid_request",
+            "{invalid}"
+        );
+        let missing = call(
+            &mut peer,
+            3,
+            METHOD,
+            request("fork-missing", "missing-turn"),
+        )
+        .await;
+        assert_eq!(
+            missing["error"]["data"]["code"], "session_fork_stale",
+            "{missing}"
+        );
+        let lease = controller
+            .start_agent_run(
+                &source.id,
+                "active-lease",
+                "pending-turn",
+                centaeris_core::runtime::TurnControl::new(),
+            )
+            .unwrap();
+        let active = call(&mut peer, 4, METHOD, request("fork-active", &middle)).await;
+        assert_eq!(
+            active["error"]["data"]["code"], "session_fork_active",
+            "{active}"
+        );
+        controller.finish_agent_run(&lease.lease_id).unwrap();
+        let unpublished = call(
+            &mut peer,
+            5,
+            METHOD,
+            recover_only("fork-operation", &latest),
+        )
+        .await;
+        assert_eq!(
+            unpublished["error"]["data"]["code"], "session_fork_stale",
+            "{unpublished}"
+        );
+        assert!(operation_receipts::read(METHOD, "fork-operation")
+            .unwrap()
+            .is_none());
+        assert_eq!(sessions.list().unwrap().len(), 1);
+
+        let cutoffs: [(u64, &str, &str, &[&str]); 3] = [
+            (6, "fork-first", &first, &[]),
+            (7, "fork-middle", &middle, &["first prompt", "first reply"]),
+            (
+                8,
+                "fork-operation",
+                &latest,
+                &[
+                    "first prompt",
+                    "first reply",
+                    "middle prompt",
+                    "middle reply",
+                ],
+            ),
+        ];
+        for (id, operation, turn, expected_messages) in cutoffs {
+            let response = call(&mut peer, id, METHOD, request(operation, turn)).await;
+            let child_id = response["result"]["sessionId"]
+                .as_str()
+                .expect("fork child id");
+            assert_ne!(child_id, source.id);
+            assert_eq!(
+                response["result"],
+                json!({
+                    "operationId": operation, "sourceSessionId": source.id,
+                    "sourceTurnId": turn, "sessionId": child_id,
+                })
+            );
+            let child = sessions.get(child_id).unwrap();
+            let child_path = profile.root.join(&child.session_path);
+            let document = message_log::read_session_document(&child_path).unwrap();
+            let restored = recover_session_records(child_id, &document.records).unwrap();
+            let messages = restored
+                .snapshot
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(messages, expected_messages);
+        }
+        assert_eq!(fs::read(&source_path).unwrap(), original);
+        let published = call(
+            &mut peer,
+            9,
+            METHOD,
+            recover_only("fork-operation", &latest),
+        )
+        .await;
+        let expected = &published["result"];
+        let child = sessions
+            .get(expected["sessionId"].as_str().unwrap())
+            .unwrap();
+        let child_path = profile.root.join(&child.session_path);
+        let document = message_log::read_session_document(&child_path).unwrap();
+
+        let stored = operation_receipts::read(METHOD, "fork-operation")
+            .unwrap()
+            .unwrap();
+        operation_receipts::write(
+            METHOD,
+            "fork-operation",
+            stored.request_digest,
+            json!({"state":"prepared", "createdAtMs":document.manifest.created_at_ms}),
+        )
+        .unwrap();
+        let messages = message_log::project_chat_messages(&source.id).unwrap();
+        let latest_user = messages
+            .iter()
+            .rfind(|message| message.role == "user")
+            .unwrap();
+        message_log::rewrite_last_user_input(message_log::RewriteLastUserInputRequest {
+            session_id: &source.id,
+            target_chat_message_id: &latest_user.id,
+            expected_tail_chat_message_id: &messages.last().unwrap().id,
+            new_turn_id: "replacement",
+            new_agent_run_id: "replacement-run",
+            new_content: "updated since publication",
+            reason: "rewrite_last_user_input",
+            at_ms: now + 10,
+        })
+        .unwrap();
+        message_log::append_assistant_message(
+            &source.id,
+            "replacement",
+            Some("replacement-run"),
+            "new reply",
+            "done",
+            now + 12,
+        )
+        .unwrap();
+        message_log::append_agent_run_terminal(
+            &source.id,
+            "replacement",
+            "replacement-run",
+            "succeeded",
+            None,
+            now + 13,
+        )
+        .unwrap();
+        let changed_source = fs::read(&source_path).unwrap();
+        let stale = call(&mut peer, 10, METHOD, request("fork-stale", &latest)).await;
+        assert_eq!(
+            stale["error"]["data"]["code"], "session_fork_stale",
+            "{stale}"
+        );
+        let conflict = call(&mut peer, 11, METHOD, request("fork-operation", &middle)).await;
+        assert_eq!(
+            conflict["error"]["data"]["code"], "operation_id_conflict",
+            "{conflict}"
+        );
+        let recovered = call(
+            &mut peer,
+            12,
+            METHOD,
+            recover_only("fork-operation", &latest),
+        )
+        .await;
+        assert_eq!(&recovered["result"], expected, "{recovered}");
+        let replay = call(&mut peer, 13, METHOD, request("fork-operation", &latest)).await;
+        assert_eq!(&replay["result"], expected, "{replay}");
+        assert_eq!(sessions.list().unwrap().len(), 4);
+        assert_eq!(fs::read(source_path).unwrap(), changed_source);
+        drop(peer);
+        serving.await.unwrap();
     }
 
     #[test]

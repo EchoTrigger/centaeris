@@ -263,7 +263,7 @@ pub(crate) fn remove(request: PluginRemoveRequestV1) -> Result<PluginRemoveRespo
     })
 }
 
-fn copy_directory_tree(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn copy_directory_tree(source: &Path, destination: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|error| format!("inspect plugin install source failed: {error}"))?;
     if metadata.file_type().is_symlink() {

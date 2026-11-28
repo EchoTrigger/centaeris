@@ -13,6 +13,7 @@ pub const CENTAERIS_RUNTIME_PROTOCOL_VERSION: u32 = 1;
 pub const CENTAERIS_RUNTIME_PROTOCOL_CAPABILITIES: &[&str] = &[
     "json_rpc_2_over_jsonl",
     "session_log",
+    "session_fork",
     "question_resume",
     "agent_run_intervention",
     "stream_replay",

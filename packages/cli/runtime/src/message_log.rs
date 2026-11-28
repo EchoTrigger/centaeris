@@ -735,6 +735,89 @@ pub(crate) fn append_session_metadata(
     append_incremental(path, vec![record])
 }
 
+// Fork history and conversation rewrites leave the original charges in their owning Session.
+pub(crate) fn model_request_records(
+    session_id: &str,
+    agent_run_id: Option<&str>,
+    after_sequence: u64,
+    limit: usize,
+) -> Result<(Vec<Value>, u64, bool), String> {
+    let guard = lock_session_logs_for_read()?;
+    let path = existing_session_log_file_path(session_id)?;
+    observation_cas::validate_session_log_path(&path, session_id)?;
+    let file = fs::File::open(&path)
+        .map_err(|error| format!("open session log failed for {}: {error}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| format!("read session manifest failed: {error}"))?;
+    if !line.ends_with('\n') {
+        return Err("session log manifest is missing or truncated".to_string());
+    }
+    let manifest = serde_json::from_str::<Value>(&line)
+        .map_err(|error| format!("decode session manifest failed: {error}"))?;
+    let manifest = parse_manifest(&manifest).map_err(|error| error.to_string())?;
+    if manifest.session_id != session_id {
+        return Err("session manifest sessionId mismatch".to_string());
+    }
+
+    let mut wires = Vec::new();
+    let mut ids = HashSet::new();
+    let mut next_sequence = after_sequence;
+    let mut has_more = false;
+    for expected_sequence in 1_u64.. {
+        line.clear();
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read session record failed: {error}"))?;
+        if bytes == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            return Err(format!("session record {expected_sequence} is truncated"));
+        }
+        let wire = serde_json::from_str::<Value>(&line).map_err(|error| {
+            format!("decode session record {expected_sequence} failed: {error}")
+        })?;
+        let envelope =
+            parse_transcript_projection_source_envelope(stored_record_view(&wire)?.as_ref())?;
+        if envelope.session_id != session_id || envelope.sequence != expected_sequence {
+            return Err(format!(
+                "session record identity or sequence mismatch at sequence {expected_sequence}"
+            ));
+        }
+        let matches = expected_sequence > after_sequence
+            && matches!(
+                envelope.event_type,
+                SessionRecordType::ModelRequestStarted | SessionRecordType::ProviderUsage
+            )
+            && !centaeris_core::session::fork::is_fork_inherited_event_id(&envelope.event_id)
+            && agent_run_id
+                .is_none_or(|id| wire.get("agentRunId").and_then(Value::as_str) == Some(id));
+        if !ids.insert(envelope.event_id) {
+            return Err(format!(
+                "session record {expected_sequence} has a duplicate eventId"
+            ));
+        }
+        if !matches {
+            continue;
+        }
+        if wires.len() == limit {
+            has_more = true;
+            break;
+        }
+        wires.push(wire);
+        next_sequence = expected_sequence;
+    }
+    observation_cas::hydrate_wires(&path, session_id, &mut wires)?;
+    drop(guard);
+    for wire in &wires {
+        parse_stored_record(wire)?;
+    }
+    Ok((wires, next_sequence, has_more))
+}
+
 pub(crate) fn read_session_document(path: &Path) -> Result<SessionDocument, String> {
     let _guard = lock_session_logs_for_read()?;
     read_session_document_unlocked(path, None)
@@ -2193,11 +2276,12 @@ fn active_records(records: &[SessionLogRecord]) -> Result<Vec<SessionLogRecord>,
 }
 
 fn existing_session_log_file_path(session_id: &str) -> Result<PathBuf, String> {
-    crate::session_catalog::path_unlocked(
-        &crate::user_data_layout::sessions_dir_path(),
-        session_id,
-    )?
-    .ok_or_else(|| format!("session log not found: {session_id}"))
+    find_session_log_file_path(session_id)?
+        .ok_or_else(|| format!("session log not found: {session_id}"))
+}
+
+fn find_session_log_file_path(session_id: &str) -> Result<Option<PathBuf>, String> {
+    crate::session_catalog::path_unlocked(&crate::user_data_layout::sessions_dir_path(), session_id)
 }
 
 fn session_metadata_record(
@@ -2887,6 +2971,192 @@ mod tests {
             fs::write(&path, &original).unwrap();
         }
         read_state::invalidate(&path);
+    }
+
+    #[test]
+    fn model_request_ledger_paginates_local_charges_before_hydrating() {
+        use centaeris_core::runtime::contracts::ProviderTokenUsageV1;
+        use centaeris_core::session::{
+            completed_agent_run_record, provider_usage_record, sealed_assistant_message_record,
+            started_agent_run_records,
+        };
+
+        let request = |session, turn: &str, run: &str, id: &str, at| {
+            canonical_session_record(
+                format!("event:{id}"),
+                SessionRecordType::ModelRequestStarted,
+                session,
+                Some(turn.to_string()),
+                Some(run.to_string()),
+                at,
+                test_model_request_payload(vec![json!({"kind":"system_prompt", "content":id})], id),
+            )
+            .unwrap()
+        };
+        let usage = ProviderTokenUsageV1 {
+            input_tokens: Some(17),
+            output_tokens: Some(5),
+            total_tokens: Some(22),
+            prompt_cache_hit_tokens: Some(3),
+            prompt_cache_miss_tokens: Some(14),
+        };
+        let mut source = started_agent_run_records("parent", "first", "parent-run", "earlier", 1)
+            .unwrap()
+            .to_vec();
+        source.extend([
+            request("parent", "first", "parent-run", "inherited-request", 2),
+            provider_usage_record("parent", "first", "parent-run", &usage, 3).unwrap(),
+            sealed_assistant_message_record("parent", "first", "parent-run", "reply", "done", 4)
+                .unwrap(),
+            completed_agent_run_record("parent", "first", "parent-run", "final_response", 5)
+                .unwrap(),
+        ]);
+        source
+            .extend(started_agent_run_records("parent", "next", "next-run", "latest", 6).unwrap());
+        let openings = HashSet::from([("next-run".into(), "next".into())]);
+        let session = "ledger-child";
+        let inherited = centaeris_core::session::fork::SessionFork::before_latest_user_turn(
+            "parent", &source, &openings,
+        )
+        .unwrap()
+        .rebase(session)
+        .unwrap();
+
+        let first = request(session, "native", "native-run", "first-native", 9);
+        let later = request(session, "native", "native-run", "second-native", 10);
+        let usage = provider_usage_record(session, "native", "native-run", &usage, 11).unwrap();
+        let tombstone = canonical_session_record(
+            "tombstone:ledger-rewrite",
+            SessionRecordType::Tombstone,
+            session,
+            Some("replacement".to_string()),
+            Some("replacement-run".to_string()),
+            12,
+            json!({
+                "tombstoneId": "ledger-rewrite",
+                "targetEventIds": [&first.event_id, &later.event_id, &usage.event_id],
+                "reasonType": "rewrite_last_user_input",
+            }),
+        )
+        .unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let sessions = root.path().join("sessions");
+        let day = sessions.join("26").join("11").join("28");
+        fs::create_dir_all(&day).unwrap();
+        let path = day.join(format!("{session}.jsonl"));
+        let mut records = inherited.records;
+        records.push(request(
+            session,
+            "other",
+            "other-run",
+            "irrelevant-request",
+            7,
+        ));
+        let first_sequence = records.len() as u64 + 1;
+        records.extend([first, later, usage, tombstone]);
+        let mut wires = records
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, event)| {
+                wire_record_value(&SequencedSessionRecord {
+                    sequence: index as u64 + 1,
+                    event,
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        observation_cas::compact_and_install_new_wires(&path, session, &mut wires).unwrap();
+        let mut file = fs::File::create(&path).unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &SessionManifestV1::new(session, 1, "test").unwrap(),
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+        for wire in wires {
+            serde_json::to_writer(&mut file, &wire).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        drop(file);
+        assert_eq!(read_session_document(&path).unwrap().records, records);
+
+        let content_dir = observation_cas::content_directory_path(&path, session).unwrap();
+        let find_blob = |marker: &str| {
+            fs::read_dir(&content_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| fs::read_to_string(path).unwrap().contains(marker))
+                .expect("the compacted observation content must exist on disk")
+        };
+        let inherited_blob = find_blob("inherited-request");
+        let irrelevant_blob = find_blob("irrelevant-request");
+        let first_blob = find_blob("first-native");
+        let later_blob = find_blob("second-native");
+        let later_bytes = fs::read(&later_blob).unwrap();
+
+        let _guard = test_env_mutex().lock().unwrap_or_else(|p| p.into_inner());
+        let env_key = "CENTAERIS_MESSAGE_LOG_SESSIONS_DIR";
+        let previous = std::env::var_os(env_key);
+        std::env::set_var(env_key, &sessions);
+        let result = (|| -> Result<_, String> {
+            let all = model_request_records(session, None, 0, 20)?;
+            for blob in [&inherited_blob, &irrelevant_blob, &later_blob] {
+                fs::write(blob, b"{}").map_err(|error| error.to_string())?;
+            }
+            let first = model_request_records(session, Some("native-run"), 0, 1)?;
+            let unreadable = model_request_records(session, Some("native-run"), first.1, 1);
+            fs::write(&later_blob, later_bytes).map_err(|error| error.to_string())?;
+            fs::write(&first_blob, b"{}").map_err(|error| error.to_string())?;
+            let later = model_request_records(session, Some("native-run"), first.1, 1)?;
+            let usage = model_request_records(session, Some("native-run"), later.1, 1)?;
+            let end = model_request_records(session, Some("native-run"), usage.1, 1)?;
+            Ok((all, first, unreadable, later, usage, end))
+        })();
+        if let Some(previous) = previous {
+            std::env::set_var(env_key, previous);
+        } else {
+            std::env::remove_var(env_key);
+        }
+
+        let (all, first, unreadable, later, usage, end) = result.unwrap();
+        assert_eq!(
+            all.0
+                .iter()
+                .map(|record| record["eventId"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "event:irrelevant-request",
+                "event:first-native",
+                "event:second-native",
+                "evt:provider_usage:ledger-child:native"
+            ],
+        );
+        assert_eq!((first.0.len(), first.1, first.2), (1, first_sequence, true));
+        assert_eq!(first.0[0]["agentRunId"], "native-run");
+        assert_eq!(
+            first.0[0]["payload"]["observations"][0]["content"],
+            "first-native"
+        );
+        assert!(
+            unreadable.is_err(),
+            "a selected corrupt observation must fail"
+        );
+        assert_eq!(
+            (later.0.len(), later.1, later.2),
+            (1, first_sequence + 1, true)
+        );
+        assert_eq!(
+            later.0[0]["payload"]["observations"][0]["content"],
+            "second-native"
+        );
+        assert_eq!(
+            (usage.0.len(), usage.1, usage.2),
+            (1, first_sequence + 2, false)
+        );
+        assert_eq!(usage.0[0]["payload"]["inputTokens"], 17);
+        assert_eq!((end.0.len(), end.1, end.2), (0, first_sequence + 2, false));
     }
 
     fn test_model_request_payload(observations: Vec<Value>, request_id: &str) -> Value {

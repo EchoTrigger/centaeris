@@ -40,6 +40,7 @@ mod provider_registry;
 mod settings;
 mod store;
 mod transport;
+pub mod typed;
 
 pub use protocol_adapters::{
     validate_provider_tool_call_arguments, AnthropicMessagesModelClient,

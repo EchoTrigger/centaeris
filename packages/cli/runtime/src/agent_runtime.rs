@@ -1,4 +1,5 @@
 use crate::http_transport::ReqwestJsonHttpTransport;
+use crate::process_profile::{ProcessProfile, ProfileTransport};
 use crate::runtime_config;
 use crate::runtime_rpc_transport::EventWriter;
 use crate::runtime_server::{
@@ -75,6 +76,13 @@ static AGENT_RUNTIME_JOB_STORE: OnceLock<
 > = OnceLock::new();
 static SESSION_PROMPT_OPERATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const SESSION_PROMPT_METHOD: &str = "session/prompt";
+
+pub(crate) fn lock_prompt_admission() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    SESSION_PROMPT_OPERATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "session prompt operation lock poisoned".to_string())
+}
 const RUNTIME_JOB_WAIT_POLL_MS: u64 = 500;
 // Preserve the original Actor's 128 queued + one executing accepted work,
 // shared by snapshot Actor and native Job operations for this database.
@@ -992,10 +1000,7 @@ fn input_with_origin(
         ),
         stream_items: Vec::new(),
     };
-    let _guard = SESSION_PROMPT_OPERATION_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| AgentInputCommandError::failed("session/prompt operation lock poisoned"))?;
+    let _guard = lock_prompt_admission()?;
     let _receipt_lock = crate::local_host::lock_profile_file("prompt-receipts", false)?;
     if let Some(receipt) =
         operation_receipts::read(SESSION_PROMPT_METHOD, request.operation_id.as_str())?
@@ -1083,10 +1088,7 @@ pub(crate) async fn compact_context(
 ) -> Result<AgentContextCompactResponse, String> {
     let session_id = required_string(request.session_id.as_str(), "sessionId")?;
     let (agent_run_id, source_sequence, source_generation) = {
-        let _guard = SESSION_PROMPT_OPERATION_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .map_err(|_| "session prompt operation lock poisoned".to_string())?;
+        let _guard = lock_prompt_admission()?;
         if event_writer
             .active_agent_run_for_session(session_id.as_str())?
             .is_some()
@@ -1390,10 +1392,7 @@ async fn start_agent_run_blocking(
     request: StartAgentRunRequest,
 ) -> Result<StartedAgentRun, String> {
     tokio::task::spawn_blocking(move || {
-        let _guard = SESSION_PROMPT_OPERATION_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .map_err(|_| "session prompt operation lock poisoned".to_string())?;
+        let _guard = lock_prompt_admission()?;
         start_agent_run(request)
     })
     .await
@@ -1785,16 +1784,21 @@ async fn run_agent_query_loop(
     turn_control: &TurnControl,
     tool_safe_point: &mut (dyn FnMut(ToolSafePoint) -> Result<(), String> + Send),
 ) -> Result<centaeris_core::runtime::AgentRunResult, String> {
-    let (model_config, registry) = model_session_config_and_registry(runtime_config)?;
+    let (mut model_config, mut registry) = model_session_config_and_registry(runtime_config)?;
+    let profile = ProcessProfile::from_env()?;
+    profile.configure_model(&mut model_config, &mut registry)?;
     let config_store = SingleModelSessionConfigStore {
         session_id: request.session_id.clone(),
         config: model_config.clone(),
     };
-    let transport = ReqwestJsonHttpTransport::for_session(
-        &request.session_id,
-        &model_config.provider_id,
-        || event_writer.model_http_client(),
-    )?;
+    let transport = ProfileTransport::new(
+        ReqwestJsonHttpTransport::for_session(
+            &request.session_id,
+            &model_config.provider_id,
+            || event_writer.model_http_client(),
+        )?,
+        profile,
+    );
     match model_config_wire_api(&registry, &model_config)? {
         WireApi::AnthropicMessages => {
             let client = AnthropicMessagesModelClient::new(registry, transport);
@@ -2000,7 +2004,16 @@ pub(crate) fn build_agent_runtime(
             .and_then(|runner| runner.with_environment_overrides(command_environment))
             .map_err(|error| error.internal_debug_message())?,
     );
-    let mut skill_catalog_config = skills::skill_catalog_config_for_workspace_root(cwd.as_path())?;
+    let process_profile = ProcessProfile::from_env()?;
+    process_profile.validate_workspace(&cwd)?;
+    let mut skill_catalog_config = if process_profile.is_single() {
+        centaeris_core::extension::skills::SkillCatalogLoadConfig {
+            cwd: Some(cwd.clone()),
+            ..Default::default()
+        }
+    } else {
+        skills::skill_catalog_config_for_workspace_root(cwd.as_path())?
+    };
     skill_catalog_config
         .sources_config
         .sources
@@ -2378,6 +2391,7 @@ async fn run_session_agent_run(
     agent_runtime: ResolvedAgentRuntime,
     turn_control: TurnControl,
 ) -> Result<(), String> {
+    let generation_started = tokio::time::Instant::now();
     let StartAgentRunRequest {
         event_writer,
         session_id,
@@ -2397,9 +2411,21 @@ async fn run_session_agent_run(
         session_id.as_str(),
         &agent_runtime.cwd,
     )?;
+    let profile = ProcessProfile::from_env()?;
+    let auto_continue_after_resume_wait = if profile.is_single() {
+        Some(false)
+    } else {
+        auto_continue_after_resume_wait
+    };
     let mut engine_config = agent_runtime_config(&runtime_config, auto_continue_after_resume_wait)?;
-    let native_plugin_activation = mcp::connect_enabled_plugins().await?;
-    engine_config.plugin_activation_digest = Some(native_plugin_activation.digest.clone());
+    let native_plugin_activation = if profile.is_single() {
+        None
+    } else {
+        Some(mcp::connect_enabled_plugins().await?)
+    };
+    engine_config.plugin_activation_digest = native_plugin_activation
+        .as_ref()
+        .map(|activation| activation.digest.clone());
     let runtime = build_agent_runtime(AgentRuntimeBuildRequest {
         store: store.clone(),
         session_id: session_id.clone(),
@@ -2409,7 +2435,7 @@ async fn run_session_agent_run(
         execution_owner: agent_run_identity.agent_run_id.clone(),
         bash_path: runtime_config.bash_path.as_deref().map(PathBuf::from),
         runtime_config: engine_config,
-        native_plugin_activation: Some(native_plugin_activation),
+        native_plugin_activation,
         execution_cancellation_probe: Some(execution_cancellation_probe),
         file_mutation_commit_port: Some(file_mutation_commit_port(
             session_id.as_str(),
@@ -2432,7 +2458,7 @@ async fn run_session_agent_run(
     let mut streamed_runtime_error = false;
     let mut live_text =
         LiveTextAccumulator::new(session_id.clone(), turn_id.clone(), agent_run_id.clone());
-    let loop_result: Result<AgentRunStop, String> = async {
+    let loop_future = async {
         loop {
             let mut stream_persistence_error = None::<String>;
             let cancellation_probe =
@@ -2692,8 +2718,9 @@ async fn run_session_agent_run(
                 }
             }
         }
-    }
-    .await;
+    };
+    let loop_result: Result<AgentRunStop, String> =
+        profile.run_from(generation_started, loop_future).await;
     let live_payloads = live_text.flush()?;
     emit_live_text_payloads(
         &event_writer,
@@ -2806,6 +2833,13 @@ fn agent_runtime_config(
     auto_continue_after_resume_wait: Option<bool>,
 ) -> Result<AgentRuntimeConfig, String> {
     let mut config = AgentRuntimeConfig::default();
+    config.host_prompt = match std::env::var("CENTAERIS_HOST_PROMPT") {
+        Ok(raw) => Some(centaeris_core::runtime::HostPrompt::from_json(&raw)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("CENTAERIS_HOST_PROMPT must be valid UTF-8".into())
+        }
+    };
     config.auto_continue_after_resume_wait =
         auto_continue_after_resume_wait.unwrap_or(runtime_config.auto_continue_after_resume_wait);
     config.model_context_tokens = runtime_config
@@ -2819,7 +2853,81 @@ fn agent_runtime_config(
     config.tool_parallelism = runtime_config
         .tool_parallelism
         .unwrap_or(config.tool_parallelism);
+    config.allowed_tools = match std::env::var("CENTAERIS_ALLOWED_TOOLS") {
+        Ok(raw) => process_allowed_tools(Some(raw.as_str()))?,
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("CENTAERIS_ALLOWED_TOOLS must be Unicode".into());
+        }
+    };
+    ProcessProfile::from_env()?.configure_engine(&mut config);
     Ok(config)
+}
+
+// An explicit process policy narrows this host's tools; Core owns projection
+// and execution enforcement. Absence keeps the ordinary CLI tool catalogue.
+fn process_allowed_tools(raw: Option<&str>) -> Result<Option<Vec<String>>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let tools: Vec<String> = serde_json::from_str(raw)
+        .map_err(|error| format!("CENTAERIS_ALLOWED_TOOLS must be a JSON string array: {error}"))?;
+    if tools.len() > 64 {
+        return Err("CENTAERIS_ALLOWED_TOOLS exceeds the Core tool limit".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for name in &tools {
+        if !name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(format!(
+                "CENTAERIS_ALLOWED_TOOLS requires lower_snake_case names: {name}"
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!(
+                "CENTAERIS_ALLOWED_TOOLS contains duplicate tool: {name}"
+            ));
+        }
+    }
+    Ok(Some(tools))
+}
+
+#[cfg(test)]
+mod process_tool_policy_tests {
+    use super::process_allowed_tools;
+
+    #[test]
+    fn explicit_process_tool_policy_preserves_default_or_exact_subset() {
+        assert_eq!(process_allowed_tools(None).unwrap(), None);
+        assert_eq!(process_allowed_tools(Some("[]")).unwrap(), Some(vec![]));
+        assert_eq!(
+            process_allowed_tools(Some(r#"["list_sources","search_records","read_record"]"#))
+                .unwrap(),
+            Some(vec![
+                "list_sources".into(),
+                "search_records".into(),
+                "read_record".into()
+            ])
+        );
+    }
+
+    #[test]
+    fn process_tool_policy_rejects_ambiguous_or_invalid_configuration() {
+        for raw in [
+            "null",
+            "read,bash",
+            r#"["read","read"]"#,
+            r#"["Read"]"#,
+            r#"[" read"]"#,
+            r#"["read-record"]"#,
+            r#"[1]"#,
+        ] {
+            assert!(process_allowed_tools(Some(raw)).is_err(), "accepted {raw}");
+        }
+    }
 }
 
 fn final_answer_from_stream_payload(payload: &serde_json::Value) -> Option<String> {

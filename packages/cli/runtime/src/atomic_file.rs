@@ -64,14 +64,44 @@ fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
     fs::rename(source, target)
 }
 
+// Win32 APIs do not apply Rust's automatic extended-length path conversion.
+#[cfg(windows)]
+pub(crate) fn windows_file_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "file parent is missing")
+    })?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let parent = fs::canonicalize(parent)?;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename is missing")
+    })?;
+    Ok(parent.join(name))
+}
+
 #[cfg(windows)]
 fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    let source = source
+    move_windows_file(source, target, MOVEFILE_REPLACE_EXISTING)
+}
+
+#[cfg(windows)]
+pub(crate) fn move_new_file_write_through(source: &Path, target: &Path) -> std::io::Result<()> {
+    move_windows_file(source, target, 0)
+}
+
+#[cfg(windows)]
+fn move_windows_file(source: &Path, target: &Path, flags: u32) -> std::io::Result<()> {
+    let source_path = windows_file_path(source)?;
+    let target_path = windows_file_path(target)?;
+    let source = source_path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let target = target
+    let target = target_path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -84,7 +114,7 @@ fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
         MoveFileExW(
             source.as_ptr(),
             target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            flags | MOVEFILE_WRITE_THROUGH,
         )
     };
     if result == 0 {
@@ -257,4 +287,20 @@ mod tests {
         assert_only_target(root.path(), &target);
         drop(held);
     }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn atomic_replace_supports_long_dedicated_profile_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let mut directory = root.path().to_path_buf();
+    while directory.as_os_str().len() < 280 {
+        directory.push("dedicated-profile-operation-receipts");
+    }
+    fs::create_dir_all(&directory).unwrap();
+    let target = directory.join("receipt.json");
+    write_file_atomically(&target, b"first", "long receipt").unwrap();
+    write_file_atomically(&target, b"replacement", "long receipt").unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"replacement");
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
 }

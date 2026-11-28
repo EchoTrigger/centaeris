@@ -51,7 +51,7 @@ function wireFixture() {
   };
 }
 
-async function connected(t, registration = { viewerId: "sdk-viewer" }) {
+async function connected(t, registration = { viewerId: "sdk-viewer" }, runtime = descriptor) {
   const fixture = wireFixture();
   const pending = SessionClient.connect(fixture.transport, registration);
   const initialize = await fixture.next();
@@ -60,11 +60,61 @@ async function connected(t, registration = { viewerId: "sdk-viewer" }) {
     viewerId: registration.viewerId,
     clientKind: registration.clientKind ?? "sdk",
   });
-  fixture.respond(initialize, descriptor);
+  fixture.respond(initialize, runtime);
   const client = await pending;
   t.after(() => client.close());
   return { ...fixture, client };
 }
+
+const forkRequest = {
+  operationId: "fork-1",
+  sessionId: "source",
+  beforeTurnId: "turn-2",
+};
+const forkReceipt = {
+  operationId: "fork-1",
+  sourceSessionId: "source",
+  sourceTurnId: "turn-2",
+  sessionId: "child",
+};
+const forkDescriptor = {
+  ...descriptor,
+  capabilities: [...descriptor.capabilities, "session_fork"],
+};
+
+test("fork sends an exclusive turn cutoff and decodes the receipt", async (t) => {
+  const fixture = await connected(t, undefined, forkDescriptor);
+  assert.equal(fixture.client.supportsSessionFork, true);
+  const pending = fixture.client.fork(forkRequest);
+  const frame = await fixture.next();
+  assert.equal(frame.method, "_centaeris/session/fork");
+  assert.deepEqual(frame.params, { request: forkRequest });
+  fixture.respond(frame, forkReceipt);
+  assert.deepEqual(await pending, forkReceipt);
+  const recovery = fixture.client.fork(forkRequest, { recoverOnly: true });
+  const retry = await fixture.next();
+  assert.equal(retry.method, frame.method);
+  assert.deepEqual(retry.params, { request: forkRequest, recoverOnly: true });
+  fixture.respond(retry, forkReceipt);
+  assert.deepEqual(await recovery, forkReceipt);
+});
+
+test("fork fails at the SDK boundary for an unsupported host or mismatched receipt", async (t) => {
+  const legacy = await connected(t);
+  assert.equal(legacy.client.supportsSessionFork, false);
+  await assert.rejects(legacy.client.fork(forkRequest), RpcProtocolError);
+  const list = legacy.client.listRuns();
+  const next = await legacy.next();
+  assert.equal(next.method, "_centaeris/session/agent-runs");
+  legacy.respond(next, { agentRuns: [] });
+  await list;
+
+  const supported = await connected(t, undefined, forkDescriptor);
+  await assert.rejects(supported.client.fork({ ...forkRequest, draft: "unexpected" }), TypeError);
+  const pending = supported.client.fork(forkRequest);
+  supported.respond(await supported.next(), { ...forkReceipt, sourceTurnId: "different-turn" });
+  await assert.rejects(pending, RpcProtocolError);
+});
 
 function sessionItem(id) {
   return {
@@ -665,4 +715,184 @@ test("initialize rejects missing, wrong-typed, unknown and legacy descriptor fie
       assert.equal(fixture.requests.destroyed, true);
     });
   }
+});
+
+test("typed questions use CET RPC and preserve authoritative attempt identity and usage", async (t) => {
+  const fixture = await connected(t);
+  const request = {
+    operationId: "typed-operation", sessionId: "typed-session", state: { task: "inspect" },
+    questions: { relation: { type: "choice", instructions: "Compare", criteria: { withinTask: "Within", outsideTask: "Outside" } } },
+  };
+  const pending = fixture.client.evaluateTyped(request);
+  const rpc = await fixture.next();
+  assert.equal(rpc.method, "_centaeris/model/evaluate_typed");
+  assert.deepEqual(rpc.params.request, request);
+  const receipt = {
+    operationId: request.operationId, sessionId: request.sessionId, attemptId: "attempt-1",
+    requestId: "cet-typed-1", upstreamRequestId: "upstream-1", responseId: "response-1",
+    recordPath: "/profile/runtime/typed-model/record-1",
+    request: { model: "jev-fixture", state: request.state, questions: request.questions },
+    response: { id: "response-1", model: "jev-fixture", answers: { relation: { type: "choice", choice: "withinTask" } }, usage: { input_tokens: 4, output_tokens: 2 } },
+    usage: { input_tokens: 4, output_tokens: 2 },
+  };
+  fixture.respond(rpc, receipt);
+  assert.deepEqual(await pending, receipt);
+  const invalid = fixture.client.evaluateTyped(request);
+  const invalidRpc = await fixture.next();
+  fixture.respond(invalidRpc, { ...receipt, response: { ...receipt.response, answers: { relation: { type: "choice", choice: "unbounded" } } } });
+  await assert.rejects(invalid, RpcProtocolError);
+});
+
+test("model request pages preserve canonical per-request usage across tool-loop steps", async (t) => {
+  const fixture = await connected(t);
+  const request = { sessionId: "session-ledger", agentRunId: "run-ledger", afterSequence: 2, limit: 1000 };
+  const pending = fixture.client.listModelRequests(request);
+  const rpc = await fixture.next();
+  assert.equal(rpc.method, "_centaeris/session/model_requests");
+  assert.deepEqual(rpc.params.request, request);
+  const page = {
+    sessionId: request.sessionId, nextSequence: 6, hasMore: false,
+    records: [
+      { schemaVersion: "session.event.v1", eventVersion: 1, sequence: 3, type: "model_request_started", eventId: "request-event-1", sessionId: request.sessionId, agentRunId: request.agentRunId, turnId: "turn-1", createdAtMs: 5, payload: { requestId: "request-1", loopIndex: 0 } },
+      { schemaVersion: "session.event.v1", eventVersion: 1, sequence: 4, type: "provider_usage", eventId: "usage-event-1", sessionId: request.sessionId, agentRunId: request.agentRunId, turnId: "turn-1", createdAtMs: 6, payload: { latest: { inputTokens: 14, totalTokens: 17 }, session: { totalTokens: 17 } } },
+      { schemaVersion: "session.event.v1", eventVersion: 1, sequence: 5, type: "model_request_started", eventId: "request-event-2", sessionId: request.sessionId, agentRunId: request.agentRunId, turnId: "turn-1", createdAtMs: 7, payload: { requestId: "request-2", loopIndex: 1 } },
+      { schemaVersion: "session.event.v1", eventVersion: 1, sequence: 6, type: "provider_usage", eventId: "usage-event-2", sessionId: request.sessionId, agentRunId: request.agentRunId, turnId: "turn-1", createdAtMs: 8, payload: { latest: { inputTokens: 21, totalTokens: 24 }, session: { totalTokens: 41 } } },
+    ],
+  };
+  fixture.respond(rpc, page);
+  assert.deepEqual(await pending, page);
+  const malformed = fixture.client.listModelRequests(request);
+  const nextRpc = await fixture.next();
+  fixture.respond(nextRpc, { ...page, records: [{ ...page.records[0], legacy: true }] });
+  await assert.rejects(malformed, RpcProtocolError);
+});
+
+test("model request pages bind each response to its dispatched cursor and IDs", async (t) => {
+  const fixture = await connected(t);
+  const first = { sessionId: "session-1", agentRunId: "run-1", afterSequence: 2, limit: 1 };
+  const second = { sessionId: "session-2", agentRunId: "run-2", afterSequence: 6, limit: 2 };
+  const request = { ...first };
+  const firstPending = fixture.client.listModelRequests(request);
+  Object.assign(request, second);
+  const secondPending = fixture.client.listModelRequests(request);
+  const pages = Promise.all([firstPending, secondPending]);
+  request.sessionId = "session-3";
+  request.agentRunId = "run-3";
+  request.afterSequence = 20;
+
+  const firstRpc = await fixture.next();
+  const secondRpc = await fixture.next();
+  assert.deepEqual(firstRpc.params.request, first);
+  assert.deepEqual(secondRpc.params.request, second);
+  const page = ({ sessionId, agentRunId, afterSequence }) => ({
+    sessionId, nextSequence: afterSequence + 1, hasMore: false,
+    records: [{
+      schemaVersion: "session.event.v1", eventVersion: 1, sequence: afterSequence + 1,
+      type: "model_request_started", eventId: "event-" + sessionId, sessionId, agentRunId,
+      createdAtMs: 5, payload: { requestId: "request-" + sessionId },
+    }],
+  });
+  const firstPage = page(first);
+  const secondPage = page(second);
+  fixture.respond(secondRpc, secondPage);
+  fixture.respond(firstRpc, firstPage);
+  assert.deepEqual(await pages, [firstPage, secondPage]);
+});
+
+test("model request pages accept CET's trimmed session ID and preserve its run filter", async (t) => {
+  const fixture = await connected(t);
+  const request = { sessionId: "\u0085 session-ledger\uFEFF ", agentRunId: " run-ledger ", afterSequence: 2 };
+  const pending = fixture.client.listModelRequests(request);
+  const rpc = await fixture.next();
+  assert.deepEqual(rpc.params.request, request);
+  const page = { sessionId: "session-ledger\uFEFF", records: [], nextSequence: 2, hasMore: false };
+  fixture.respond(rpc, page);
+  assert.deepEqual(await pending, page);
+});
+
+test("runtime configuration omits undefined optional fields and rejects unsupported keys", async (t) => {
+  const fixture = await connected(t);
+  assert.throws(() => fixture.client.setRuntimeConfig({ legacyThinkingMode: undefined }), RpcProtocolError);
+  assert.throws(() => fixture.client.setRuntimeConfig({ modelThinkingMode: null }), RpcProtocolError);
+  const pending = fixture.client.setRuntimeConfig({
+    modelThinkingMode: undefined, clearModelApiKey: undefined, customModelProviders: undefined,
+    autoContinueAfterResumeWait: false, toolParallelism: 1,
+  });
+  const rpc = await fixture.next();
+  assert.equal(rpc.method, "agent_runtime_config_set");
+  assert.deepEqual(rpc.params.request, { autoContinueAfterResumeWait: false, toolParallelism: 1 });
+  const config = {
+    executionHost: "native", bashPath: null, autoContinueAfterResumeWait: false,
+    agentTransportMode: "stdio", modelProviderId: null, model: null, modelProviders: [],
+    selectableModels: [], customModelProviders: [], modelApiBase: null, modelTimeoutMs: null,
+    modelMaxRetries: null, modelRetryBackoffMs: null, modelContextTokens: null,
+    modelMaxOutputTokens: null, modelThinkingMode: null, toolParallelism: 1, updatedAt: 1,
+  };
+  fixture.respond(rpc, config);
+  assert.deepEqual(await pending, config);
+});
+
+test("typed receipts bind the exact sent state, finite schema and raw usage", async (t) => {
+  const original = {
+    operationId: "typed-binding", sessionId: "typed-session", state: '{"task":"inspect"}',
+    questions: { relation: { type: "choice", instructions: { question: "Compare", context: "Task" }, criteria: { withinTask: "Within", outsideTask: "Outside" } } },
+  };
+  const receipt = {
+    operationId: original.operationId, sessionId: original.sessionId, attemptId: "attempt-binding",
+    requestId: "cet-binding", upstreamRequestId: null, responseId: null,
+    recordPath: "/profile/runtime/typed-model/binding",
+    request: { model: "jev-fixture", state: original.state, questions: original.questions },
+    response: { model: "jev-fixture", answers: { relation: { type: "choice", choice: "withinTask" } }, usage: { input_tokens: 5, output_tokens: 2 } },
+    usage: { output_tokens: 2, input_tokens: 5 },
+  };
+  for (const mutate of [
+    (value) => { value.request.state = '{"task":"different"}'; },
+    (value) => { value.request.questions.relation.instructions.question = "Different"; },
+    (value) => { value.request.questions.relation.criteria.withinTask = "Different"; },
+    (value) => { value.usage.input_tokens = 999; },
+  ]) {
+    const fixture = await connected(t);
+    const pending = fixture.client.evaluateTyped(original);
+    const rpc = await fixture.next();
+    const changed = structuredClone(receipt);
+    mutate(changed);
+    fixture.respond(rpc, changed);
+    await assert.rejects(pending, RpcProtocolError);
+  }
+  const fixture = await connected(t);
+  const request = structuredClone(original);
+  const pending = fixture.client.evaluateTyped(request);
+  request.state = "caller mutation after send";
+  const rpc = await fixture.next();
+  const reordered = structuredClone(receipt);
+  reordered.request.questions.relation = {
+    criteria: { outsideTask: "Outside", withinTask: "Within" },
+    instructions: { context: "Task", question: "Compare" }, type: "choice",
+  };
+  fixture.respond(rpc, reordered);
+  assert.deepEqual(await pending, reordered);
+});
+
+test("typed operation lookup preserves failed finite-answer HTTP evidence and raw usage", async (t) => {
+  const fixture = await connected(t);
+  const request = { operationId: "typed-failed", sessionId: "typed-session" };
+  const pending = fixture.client.readTypedOperation(request);
+  const rpc = await fixture.next();
+  assert.equal(rpc.method, "_centaeris/model/typed_operation");
+  assert.deepEqual(rpc.params.request, request);
+  const originalBody = '{"model":"jev-fixture","answers":{"relation":{"type":"choice","choice":"invented"}},"usage":{"total_tokens":9,"provider_extra":{"detail":4}}}';
+  const operation = {
+    ...request, attemptId: "attempt-failed", requestId: "cet-failed", recordPath: "/profile/runtime/typed-model/failed",
+    request: { model: "jev-fixture", state: '{"task":"inspect"}', questions: { relation: { type: "choice", instructions: "Compare", criteria: { withinTask: "Within", outsideTask: "Outside" } } } },
+    rawResponse: { statusCode: 200, headers: { "x-request-id": "upstream-failed" }, body: originalBody },
+    failure: { stage: "validation", message: "invalid choice" }, receipt: null,
+  };
+  fixture.respond(rpc, operation);
+  assert.deepEqual(await pending, operation);
+  const absent = fixture.client.readTypedOperation(request);
+  fixture.respond(await fixture.next(), null);
+  assert.equal(await absent, null);
+  const malformed = fixture.client.readTypedOperation(request);
+  fixture.respond(await fixture.next(), { ...operation, legacy: true });
+  await assert.rejects(malformed, RpcProtocolError);
 });

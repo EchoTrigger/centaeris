@@ -1,4 +1,9 @@
+import { decodeTypedModelReceipt, decodeTypedOperation } from "./typed-model.ts";
 import type {
+  EvaluateTypedRequest,
+  ReadTypedOperationRequest,
+  TypedOperation,
+  TypedModelReceipt,
   AgentRun,
   AgentRunSummary,
   AnswerNowReceipt,
@@ -9,6 +14,10 @@ import type {
   CompactContextReceipt,
   CompactContextRequest,
   CreateSessionRequest,
+  ForkSessionReceipt,
+  ForkSessionRequest,
+  ListModelRequestsRequest,
+  ModelRequestPage,
   ListRunsRequest,
   LoadSessionRequest,
   PersistedMessage,
@@ -18,6 +27,10 @@ import type {
   RunSubscription,
   RunTarget,
   RuntimeDescriptor,
+  RuntimeConfig,
+  SetRuntimeConfigRequest,
+  SetPluginEnabledRequest,
+  PluginCatalogState,
   SendReceipt,
   SendRequest,
   SessionCancelReceipt,
@@ -104,6 +117,63 @@ function isNullableInteger(value: unknown): value is number | null {
   return value === null || Number.isInteger(value);
 }
 
+const modelWireApis = ["openai-completions", "openai-responses", "anthropic-messages"];
+function customModelProvider(value: unknown): boolean {
+  return isRecord(value) && exactFields(value,["providerId","name","baseUrl","api","models"])
+    && [value.providerId,value.name,value.baseUrl].every(item => typeof item === "string")
+    && typeof value.api === "string" && modelWireApis.includes(value.api)
+    && Array.isArray(value.models) && value.models.every(item => isRecord(item)
+      && exactFields(item,["model","contextTokens","maxOutputTokens","supportsVision"],["displayName","apiOverride"])
+      && [item.model,item.contextTokens,item.maxOutputTokens].every(field => typeof field === "string")
+      && (item.displayName === undefined || isNullableString(item.displayName))
+      && (item.apiOverride === undefined || item.apiOverride === null || typeof item.apiOverride === "string" && modelWireApis.includes(item.apiOverride))
+      && typeof item.supportsVision === "boolean");
+}
+function selectableModel(value: unknown, catalog = false): boolean {
+  const required = ["providerId","providerName","model","displayName","modelApiBase","modelContextTokens","modelMaxOutputTokens","modelThinkingMode","modelThinkingModes","preferredThinkingMode","modelApi"];
+  return isRecord(value) && exactFields(value,catalog ? [...required,"supportsVision","builtIn","diagnostic"] : required)
+    && [value.providerId,value.providerName,value.model].every(item => typeof item === "string")
+    && [value.displayName,value.modelApiBase,value.modelThinkingMode,value.preferredThinkingMode].every(isNullableString)
+    && [value.modelContextTokens,value.modelMaxOutputTokens].every(isNullableInteger)
+    && isStringArray(value.modelThinkingModes)
+    && (value.modelApi === null || typeof value.modelApi === "string" && modelWireApis.includes(value.modelApi))
+    && (!catalog || typeof value.supportsVision === "boolean" && typeof value.builtIn === "boolean" && isNullableString(value.diagnostic));
+}
+function decodePluginCatalogState(value: unknown): PluginCatalogState {
+  if (!isRecord(value) || !exactFields(value,["schema","enabledPlugins","disabledPlugins"])
+    || value.schema !== "plugin_catalog_state_v1" || !isStringArray(value.enabledPlugins)
+    || !isStringArray(value.disabledPlugins)) throw new RpcProtocolError("Invalid native plugin catalog state");
+  return value as unknown as PluginCatalogState;
+}
+function decodeRuntimeConfig(value: unknown): RuntimeConfig {
+  const fields = ["executionHost","bashPath","autoContinueAfterResumeWait","agentTransportMode","modelProviderId","model","modelProviders","selectableModels","customModelProviders","modelApiBase","modelTimeoutMs","modelMaxRetries","modelRetryBackoffMs","modelContextTokens","modelMaxOutputTokens","modelThinkingMode","toolParallelism","updatedAt"];
+  if (!isRecord(value) || !exactFields(value,fields)
+    || typeof value.executionHost !== "string" || typeof value.agentTransportMode !== "string" || typeof value.autoContinueAfterResumeWait !== "boolean"
+    || ![value.bashPath,value.modelProviderId,value.model,value.modelApiBase,value.modelThinkingMode].every(isNullableString)
+    || ![value.modelTimeoutMs,value.modelMaxRetries,value.modelRetryBackoffMs,value.modelContextTokens,value.modelMaxOutputTokens,value.toolParallelism].every(isNullableInteger)
+    || !Number.isInteger(value.updatedAt)
+    || !Array.isArray(value.selectableModels) || !value.selectableModels.every(item=>selectableModel(item))
+    || !Array.isArray(value.customModelProviders) || !value.customModelProviders.every(customModelProvider)
+    || !Array.isArray(value.modelProviders) || !value.modelProviders.every(item => isRecord(item)
+      && exactFields(item,["providerId","name","tier","logoSvg","builtIn","accessKind","configured","credentialSource","models"])
+      && [item.providerId,item.name,item.accessKind].every(field=>typeof field === "string")
+      && isNullableString(item.tier) && isNullableString(item.logoSvg)
+      && typeof item.builtIn === "boolean" && typeof item.configured === "boolean"
+      && [null,"stored","environment"].includes(item.credentialSource as string | null)
+      && Array.isArray(item.models) && item.models.every(model=>selectableModel(model,true)))) throw new RpcProtocolError("Invalid native runtime configuration result");
+  return value as unknown as RuntimeConfig;
+}
+function validateRuntimeConfigRequest(value: unknown): asserts value is SetRuntimeConfigRequest {
+  if (!isRecord(value) || !exactFields(value,[],["bashPath","autoContinueAfterResumeWait","agentTransportMode","modelProviderId","model","modelThinkingMode","modelApiKey","clearModelApiKey","customModelProviders","toolParallelism"])) throw new RpcProtocolError("Unsupported runtime configuration request");
+  for (const [key,item] of Object.entries(value)) {
+    if (item === undefined) continue;
+    if (key === "customModelProviders" ? !Array.isArray(item) || !item.every(customModelProvider)
+      : key === "toolParallelism" ? !isUnsignedInteger(item)
+      : ["autoContinueAfterResumeWait","clearModelApiKey"].includes(key) ? typeof item !== "boolean"
+      : typeof item !== "string") throw new RpcProtocolError("Invalid runtime configuration field: " + key);
+  }
+}
+
 function decodeDescriptor(value: unknown): RuntimeDescriptor {
   if (!isRecord(value) || !exactFields(value, [
     "status", "runtime", "protocol", "protocolVersion", "capabilities", "events",
@@ -159,6 +229,17 @@ function decodeSessionData(value: unknown): SessionData {
     throw new RpcProtocolError("Invalid session/load result");
   }
   return value as unknown as SessionData;
+}
+
+function decodeForkReceipt(value: unknown, expected: ForkSessionRequest): ForkSessionReceipt {
+  if (!isRecord(value) || !exactFields(value, [
+    "operationId", "sourceSessionId", "sourceTurnId", "sessionId",
+  ]) || value.operationId !== expected.operationId || value.sourceSessionId !== expected.sessionId
+    || value.sourceTurnId !== expected.beforeTurnId || typeof value.sessionId !== "string"
+    || !value.sessionId.trim() || value.sessionId === expected.sessionId) {
+    throw new RpcProtocolError("Invalid Session fork receipt");
+  }
+  return value as unknown as ForkSessionReceipt;
 }
 
 function decodeSendReceipt(value: unknown): SendReceipt {
@@ -241,6 +322,37 @@ function decodeRunList(value: unknown): RunList {
   return value as unknown as RunList;
 }
 
+function decodeModelRequestPage(value: unknown, expected: ListModelRequestsRequest): ModelRequestPage {
+  const sessionId = typeof expected.sessionId === "string"
+    ? expected.sessionId.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "")
+    : undefined;
+  if (!isRecord(value) || !exactFields(value, ["sessionId", "records", "nextSequence", "hasMore"])
+    || typeof value.sessionId !== "string" || value.sessionId !== sessionId || !Array.isArray(value.records)
+    || !isUnsignedInteger(value.nextSequence) || typeof value.hasMore !== "boolean") {
+    throw new RpcProtocolError("Invalid session/model_requests result");
+  }
+  let previous = expected.afterSequence ?? 0;
+  for (const row of value.records) {
+    if (!isRecord(row) || !exactFields(row, [
+      "schemaVersion", "eventVersion", "sequence", "type", "eventId", "sessionId", "createdAtMs", "payload",
+    ], ["turnId", "agentRunId"])
+      || row.schemaVersion !== "session.event.v1" || row.eventVersion !== 1
+      || !isUnsignedInteger(row.sequence) || row.sequence <= previous
+      || (row.type !== "model_request_started" && row.type !== "provider_usage")
+      || typeof row.eventId !== "string" || !row.eventId
+      || row.sessionId !== sessionId || !Number.isInteger(row.createdAtMs)
+      || (row.turnId !== undefined && typeof row.turnId !== "string")
+      || (row.agentRunId !== undefined && typeof row.agentRunId !== "string")
+      || (expected.agentRunId !== undefined && row.agentRunId !== expected.agentRunId)) {
+      throw new RpcProtocolError("Invalid canonical model-request record");
+    }
+    previous = row.sequence;
+  }
+  if (value.nextSequence < previous || (value.hasMore && value.nextSequence <= (expected.afterSequence ?? 0))) {
+    throw new RpcProtocolError("Invalid model-request pagination cursor");
+  }
+  return value as unknown as ModelRequestPage;
+}
 function decodeFrame(text: string): RpcNotification | RpcResponse {
   const value: unknown = JSON.parse(text);
   if (!isRecord(value) || value.jsonrpc !== "2.0") {
@@ -327,6 +439,46 @@ export class SessionClient {
     return this.#descriptor;
   }
 
+  /** Read CET's authoritative providers, registered models and active selection. */
+  getRuntimeConfig(): Promise<RuntimeConfig> {
+    return this.#request("agent_runtime_config_get", {}, decodeRuntimeConfig);
+  }
+
+  /** Apply native CET settings. Credential values are never returned. */
+  setRuntimeConfig(request: SetRuntimeConfigRequest): Promise<RuntimeConfig> {
+    validateRuntimeConfigRequest(request);
+    return this.#request("agent_runtime_config_set", structuredClone(request), decodeRuntimeConfig);
+  }
+
+  /** Change one plugin's activation in this CET profile through its native API. */
+  setPluginEnabled(request: SetPluginEnabledRequest): Promise<PluginCatalogState> {
+    if (!isRecord(request) || !exactFields(request,["id","enabled"])
+      || typeof request.id !== "string" || !request.id.trim() || typeof request.enabled !== "boolean") throw new RpcProtocolError("Invalid plugin activation request");
+    return this.#request("plugin/set_enabled", structuredClone(request), decodePluginCatalogState);
+  }
+
+  get supportsSessionFork(): boolean {
+    return this.#descriptor.capabilities.includes("session_fork");
+  }
+
+  /** Fork the committed history before the selected user turn. */
+  async fork(
+    request: ForkSessionRequest,
+    { recoverOnly = false }: { recoverOnly?: boolean } = {},
+  ): Promise<ForkSessionReceipt> {
+    if (!this.supportsSessionFork) {
+      throw new RpcProtocolError("Runtime does not support Session forks");
+    }
+    const fields = ["operationId", "sessionId", "beforeTurnId"] as const;
+    if (!isRecord(request) || !exactFields(request, [...fields])) {
+      throw new TypeError("Invalid Session fork request fields");
+    }
+    for (const field of fields) requiredIdentity(request[field], field);
+    const expected = { ...request };
+    return this.#request("_centaeris/session/fork", expected,
+      (value) => decodeForkReceipt(value, expected), recoverOnly ? { recoverOnly: true } : undefined);
+  }
+
   create(request: CreateSessionRequest): Promise<SessionItem> {
     return this.#request("session/new", request, decodeSessionItem);
   }
@@ -340,6 +492,19 @@ export class SessionClient {
     return this.#request("session/prompt", request, decodeSendReceipt);
   }
 
+  /** Evaluate finite native questions through CET, resolving after durable persistence. */
+  evaluateTyped(request: EvaluateTypedRequest): Promise<TypedModelReceipt> {
+    const expected = structuredClone(request);
+    return this.#request("_centaeris/model/evaluate_typed", expected,
+      (value) => decodeTypedModelReceipt(value, expected));
+  }
+
+  /** Read durable typed-attempt evidence, including failed validation and raw usage. */
+  readTypedOperation(request: ReadTypedOperationRequest): Promise<TypedOperation | null> {
+    const expected = structuredClone(request);
+    return this.#request("_centaeris/model/typed_operation", expected,
+      (value) => decodeTypedOperation(value, expected));
+  }
   /** Attach this connection's registered viewer; updates use onUpdate. */
   subscribe(request: RunTarget): Promise<SubscriptionReceipt> {
     return this.#request("_centaeris/session/agent-runs/attach", {
@@ -369,6 +534,12 @@ export class SessionClient {
     return this.#request("_centaeris/session/compact_context", request, decodeCompactContextReceipt);
   }
 
+  /** Read authoritative per-request starts and provider usage across every tool-loop step. */
+  listModelRequests(request: ListModelRequestsRequest): Promise<ModelRequestPage> {
+    const expected = { ...request };
+    return this.#request("_centaeris/session/model_requests", expected,
+      (value) => decodeModelRequestPage(value, expected));
+  }
   listRuns(request: ListRunsRequest = {}): Promise<RunList> {
     return this.#request("_centaeris/session/agent-runs", request, decodeRunList);
   }
@@ -403,14 +574,19 @@ export class SessionClient {
     this.#finish(new RpcConnectionClosedError());
   }
 
-  #request<Result>(method: string, request: unknown, decode: (value: unknown) => Result): Promise<Result> {
+  #request<Result>(
+    method: string,
+    request: unknown,
+    decode: (value: unknown) => Result,
+    envelope?: { recoverOnly: true },
+  ): Promise<Result> {
     if (this.#closed) return Promise.reject(this.#closed);
     const id = `sdk-${++this.#nextId}`;
     return new Promise<Result>((resolve, reject) => {
       this.#pending.set(id, { resolve: (value) => resolve(decode(value)), reject });
       try {
         const sent = this.#transport.send(JSON.stringify({
-          jsonrpc: "2.0", id, method, params: { request },
+          jsonrpc: "2.0", id, method, params: { request, ...envelope },
         }));
         Promise.resolve(sent).catch((cause: unknown) => this.#sendFailed(cause));
       } catch (cause) {

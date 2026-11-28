@@ -7,8 +7,8 @@ use centaeris_core::extension::skills::{
 };
 use centaeris_core::extension::{
     build_plugin_activation_snapshot, load_mcp_servers_file, load_plugin_registry_from_manifests,
-    resolve_plugin_package, McpServerDeclarationV1, McpTransportV1, PluginDescriptorV1,
-    PluginListRequestV1, PluginTrustPolicyV1,
+    resolve_plugin_package, ActivatedPluginPackageV1, McpServerDeclarationV1, McpTransportV1,
+    PluginDescriptorV1, PluginListRequestV1, PluginTrustPolicyV1,
 };
 use centaeris_core::runtime::contracts::current_timestamp_ms;
 use centaeris_core::runtime::QueryLifecycleHookRuntime;
@@ -16,13 +16,18 @@ use centaeris_core::tool::layer::DynamicToolProvider;
 use centaeris_core::tool::limits::ToolContractBudget;
 use centaeris_core::tool::{DynamicToolContract, DynamicToolRegistry};
 use centaeris_mcp::{
-    connect_streamable_http_mcp_server, lazy_mcp_server_binding, valid_bearer_token,
-    McpConnectError, McpServerConnector,
+    bounded_stdio_transport, connect_mcp_server_transport, connect_streamable_http_mcp_server,
+    lazy_mcp_server_binding, valid_bearer_token, BoundedStdioTransport, McpConnectError,
+    McpServerConnector,
 };
+use rmcp::service::{RxJsonRpcMessage, TxJsonRpcMessage};
+use rmcp::transport::Transport;
+use rmcp::RoleClient;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -82,7 +87,6 @@ enum NativeMcpServerStatusV1 {
     Ready,
     NeedsConfiguration,
     Disabled,
-    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -118,12 +122,82 @@ pub(crate) struct NativePluginActivation {
     pub(crate) execution_readonly_roots: Vec<PathBuf>,
 }
 
-struct NativeHttpMcpConnector {
+struct NativeMcpConnector {
     plugin_name: String,
+    package: Option<Arc<FrozenStdioPackage>>,
     server: McpServerDeclarationV1,
 }
 
-impl McpServerConnector for NativeHttpMcpConnector {
+struct FrozenStdioPackage {
+    root: PathBuf,
+    _directory: tempfile::TempDir,
+}
+
+impl FrozenStdioPackage {
+    fn copy_from(source: &Path, package: &ActivatedPluginPackageV1) -> Result<Self, String> {
+        let mut directory = tempfile::Builder::new();
+        directory.prefix("centaeris-mcp-package-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            directory.permissions(fs::Permissions::from_mode(0o700));
+        }
+        let directory = directory
+            .tempdir()
+            .map_err(|error| format!("create private MCP package directory failed: {error}"))?;
+        let source = source.canonicalize().map_err(|error| {
+            format!(
+                "canonicalize MCP package {} failed: {error}",
+                source.display()
+            )
+        })?;
+        let root = directory.path().join(&package.name);
+        plugins::copy_directory_tree(&source, &root)?;
+        let root = root.canonicalize().map_err(|error| {
+            format!(
+                "canonicalize private MCP package {} failed: {error}",
+                root.display()
+            )
+        })?;
+        if resolve_plugin_package(&root)? != *package {
+            return Err(format!(
+                "MCP plugin package changed during activation: {}",
+                package.name
+            ));
+        }
+        Ok(Self {
+            root,
+            _directory: directory,
+        })
+    }
+}
+
+// The MCP service may close the transport after the AgentRun drops its provider.
+struct LeasedStdioTransport {
+    inner: BoundedStdioTransport,
+    _package: Arc<FrozenStdioPackage>,
+}
+
+impl Transport<RoleClient> for LeasedStdioTransport {
+    type Error = io::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        self.inner.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        self.inner.receive().await
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+        self.inner.close().await
+    }
+}
+
+impl McpServerConnector for NativeMcpConnector {
     fn connect<'a>(
         &'a self,
     ) -> Pin<
@@ -154,11 +228,31 @@ impl McpServerConnector for NativeHttpMcpConnector {
                             })
                     })
                     .transpose()?,
-                McpTransportV1::Stdio { .. } => {
-                    return Err(McpConnectError::Unavailable(format!(
-                        "Native MCP does not support stdio transport: pluginName={} serverId={}",
-                        self.plugin_name, self.server.id
-                    )))
+                McpTransportV1::Stdio { program, args } => {
+                    let package = self.package.as_ref().ok_or_else(|| {
+                        McpConnectError::ContractMismatch("MCP stdio package was not frozen".into())
+                    })?;
+                    let root = &package.root;
+                    let executable = root.join(program).canonicalize()
+                        .map_err(|error| McpConnectError::Unavailable(error.to_string()))?;
+                    if !executable.starts_with(root) || !executable.is_file() {
+                        return Err(McpConnectError::ContractMismatch(
+                            "MCP stdio program must be a file inside its plugin package".into(),
+                        ));
+                    }
+                    let mut command = tokio::process::Command::new(executable);
+                    command.args(args).current_dir(root);
+                    #[cfg(windows)]
+                    command.creation_flags(0x08000000);
+                    let inner = bounded_stdio_transport(command)
+                        .map_err(|error| McpConnectError::Unavailable(error.to_string()))?;
+                    let transport = LeasedStdioTransport {
+                        inner,
+                        _package: Arc::clone(package),
+                    };
+                    return connect_mcp_server_transport(
+                        &self.plugin_name, self.server.clone(), transport,
+                    ).await;
                 }
             };
             connect_streamable_http_mcp_server(
@@ -223,7 +317,7 @@ pub(crate) async fn configure(
             ..
         } => return Err("MCP server does not require configuration".to_string()),
         McpTransportV1::Stdio { .. } => {
-            return Err("Native MCP does not support stdio transport".to_string())
+            return Err("MCP stdio servers do not accept bearer credentials".to_string())
         }
     };
 
@@ -302,12 +396,26 @@ fn activation_from_descriptors(
                 return Err(format!("duplicate activated plugin name: {}", package.name));
             }
 
+            let (mcp_servers, staged_budget) =
+                package_mcp_servers(root, &package, &declaration_budget)?;
+            let frozen_package = mcp_servers
+                .iter()
+                .any(|server| matches!(server.transport, McpTransportV1::Stdio { .. }))
+                .then(|| FrozenStdioPackage::copy_from(root, &package).map(Arc::new))
+                .transpose()?;
+            let (root, mcp_servers, staged_budget) = match &frozen_package {
+                Some(frozen) => {
+                    let (servers, budget) =
+                        package_mcp_servers(&frozen.root, &package, &declaration_budget)?;
+                    (frozen.root.as_path(), servers, budget)
+                }
+                None => (root, mcp_servers, staged_budget),
+            };
             let mut staged_contracts = Vec::new();
             let mut staged_providers = Vec::new();
             let mut staged_skill_sources = Vec::new();
             let mut staged_cli_directories = Vec::new();
             let mut staged_hook_handlers = Vec::new();
-            let mut staged_budget = declaration_budget.clone();
             for (index, resource) in package.skills.iter().enumerate() {
                 let path = root
                     .join(resource.path.as_str())
@@ -362,34 +470,25 @@ fn activation_from_descriptors(
                 )?;
                 staged_hook_handlers.extend(registry.hook_handlers);
             }
-            for resource in &package.mcp_servers {
-                let declaration =
-                    load_mcp_servers_file(root.join(resource.path.as_str()).as_path())?;
-                staged_budget.add(&declaration)?;
-                for server in declaration.servers {
-                    if matches!(&server.transport, McpTransportV1::Stdio { .. }) {
-                        return Err(format!(
-                            "Native MCP does not support stdio transport: pluginName={} serverId={}",
-                            package.name, server.id
-                        ));
-                    }
-                    let binding = lazy_mcp_server_binding(
-                        package.name.as_str(),
-                        &server,
-                        Arc::new(NativeHttpMcpConnector {
-                            plugin_name: package.name.clone(),
-                            server: server.clone(),
-                        }),
-                    )?;
-                    staged_contracts.extend(binding.contracts);
-                    staged_providers.push(binding.provider);
-                }
+            for server in mcp_servers {
+                let binding = lazy_mcp_server_binding(
+                    package.name.as_str(),
+                    &server,
+                    Arc::new(NativeMcpConnector {
+                        plugin_name: package.name.clone(),
+                        package: frozen_package.clone(),
+                        server: server.clone(),
+                    }),
+                )?;
+                staged_contracts.extend(binding.contracts);
+                staged_providers.push(binding.provider);
             }
             let mut candidate_contracts = contracts.clone();
             candidate_contracts.extend(staged_contracts.iter().cloned());
             DynamicToolRegistry::from_contracts(candidate_contracts)?;
             Ok((
                 package.name,
+                root.to_path_buf(),
                 staged_budget,
                 staged_contracts,
                 staged_providers,
@@ -401,6 +500,7 @@ fn activation_from_descriptors(
         match staged {
             Ok((
                 package_name,
+                activated_root,
                 budget,
                 new_contracts,
                 new_providers,
@@ -419,7 +519,7 @@ fn activation_from_descriptors(
                     }
                 }
                 hook_handlers.extend(new_hook_handlers);
-                enabled_roots.push(root.to_path_buf());
+                enabled_roots.push(activated_root);
             }
             Err(error) => isolate_plugin(&descriptor.id, error.as_str()),
         }
@@ -447,6 +547,21 @@ fn activation_from_descriptors(
         lifecycle_hooks,
         execution_readonly_roots: enabled_roots,
     })
+}
+
+fn package_mcp_servers(
+    root: &Path,
+    package: &ActivatedPluginPackageV1,
+    active_budget: &ToolContractBudget,
+) -> Result<(Vec<McpServerDeclarationV1>, ToolContractBudget), String> {
+    let mut servers = Vec::new();
+    let mut budget = active_budget.clone();
+    for resource in &package.mcp_servers {
+        let declaration = load_mcp_servers_file(root.join(&resource.path).as_path())?;
+        budget.add(&declaration)?;
+        servers.extend(declaration.servers);
+    }
+    Ok((servers, budget))
 }
 
 fn catalog_from(
@@ -560,8 +675,6 @@ fn project_server(
         .unwrap_or(true);
     let status = if !descriptor.enabled {
         NativeMcpServerStatusV1::Disabled
-    } else if matches!(server.transport, McpTransportV1::Stdio { .. }) {
-        NativeMcpServerStatusV1::Unsupported
     } else if configured {
         NativeMcpServerStatusV1::Ready
     } else {
@@ -724,7 +837,7 @@ mod tests {
     use super::*;
     use centaeris_core::extension::{
         mcp_model_contract_digest, McpLifecycleV1, McpServersFileV1, McpToolDeclarationV1,
-        MCP_SERVERS_SCHEMA_V1,
+        McpToolDiscoveryV1, MCP_SERVERS_SCHEMA_V1,
     };
     use serde_json::json;
 
@@ -818,6 +931,214 @@ mod tests {
         .expect("serialize ready catalog");
         assert_eq!(ready["servers"][0]["status"], "ready");
         fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[tokio::test]
+    async fn stdio_plugin_activates_and_rejects_program_outside_package() {
+        let root = tempfile::tempdir().expect("plugin root");
+        fs::create_dir_all(root.path().join(".centaeris-plugin")).expect("manifest dir");
+        fs::create_dir_all(root.path().join("mcp")).expect("MCP dir");
+        fs::write(root.path().join(".centaeris-plugin/plugin.json"),
+            r#"{"name":"demo-plugin","version":"1.0.0","paths":{"mcpServers":["mcp/server.json"]}}"#,
+        ).expect("manifest");
+        let tools = vec![McpToolDeclarationV1 {
+            source_name: "search".into(),
+            name: "demo_search".into(),
+            description: "Search demos.".into(),
+            input_schema: json!({"type":"object"}),
+            concurrency_safe: true,
+            scopes: Vec::new(),
+        }];
+        let server = McpServerDeclarationV1 {
+            id: "demo-server".into(),
+            model_contract_digest: Some(mcp_model_contract_digest("demo-server", &tools).unwrap()),
+            tool_discovery: None,
+            transport: McpTransportV1::Stdio {
+                program: "bin/missing".into(),
+                args: Vec::new(),
+            },
+            lifecycle: McpLifecycleV1::Auto,
+            startup_timeout_ms: 1000,
+            tool_timeout_ms: 1000,
+            tools,
+        };
+        fs::write(
+            root.path().join("mcp/server.json"),
+            serde_json::to_vec(&McpServersFileV1 {
+                schema: MCP_SERVERS_SCHEMA_V1.into(),
+                servers: vec![server.clone()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let descriptor = test_descriptor(root.path());
+        let catalog = catalog_from(
+            vec![descriptor.clone()],
+            &McpCredentialStoreV1 {
+                schema: CREDENTIALS_SCHEMA.into(),
+                credentials: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(catalog).unwrap()["servers"][0]["status"],
+            "ready"
+        );
+        let activation = activation_from_descriptors(vec![descriptor]).unwrap();
+        assert_eq!(
+            activation
+                .dynamic_tool_registry
+                .list_dynamic_contracts()
+                .len(),
+            1
+        );
+        assert_eq!(activation.providers.len(), 1);
+        let package = resolve_plugin_package(root.path()).expect("resolve test package");
+        let frozen = Arc::new(
+            FrozenStdioPackage::copy_from(root.path(), &package).expect("freeze test package"),
+        );
+        // Canonicalization rejects missing executables before creating a process.
+        let connector = NativeMcpConnector {
+            plugin_name: "demo-plugin".into(),
+            package: Some(Arc::clone(&frozen)),
+            server: server.clone(),
+        };
+        assert!(matches!(
+            connector.connect().await,
+            Err(McpConnectError::Unavailable(_))
+        ));
+        // Defense in depth if a declaration is changed after initial validation.
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let mut escaped = server;
+        escaped.transport = McpTransportV1::Stdio {
+            program: outside.path().to_string_lossy().into_owned(),
+            args: Vec::new(),
+        };
+        let connector = NativeMcpConnector {
+            plugin_name: "demo-plugin".into(),
+            package: Some(frozen),
+            server: escaped,
+        };
+        assert!(matches!(
+            connector.connect().await,
+            Err(McpConnectError::ContractMismatch(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stdio_activation_retains_package_bytes_across_native_reinstall() {
+        let work = tempfile::tempdir().expect("test directory");
+        let source = work.path().join("source");
+        let report = work.path().join("started-from");
+        fs::create_dir_all(source.join(".centaeris-plugin")).expect("manifest directory");
+        fs::write(
+            source.join(".centaeris-plugin/plugin.json"),
+            r#"{"name":"demo-plugin","version":"1.0.0","paths":{"mcpServers":["server.json"]}}"#,
+        )
+        .expect("manifest");
+        fs::write(
+            source.join("server.json"),
+            serde_json::to_vec(&McpServersFileV1 {
+                schema: MCP_SERVERS_SCHEMA_V1.into(),
+                servers: vec![McpServerDeclarationV1 {
+                    id: "demo-server".into(),
+                    model_contract_digest: None,
+                    tool_discovery: Some(McpToolDiscoveryV1 {
+                        name_prefix: "demo".into(),
+                        concurrency_safe: true,
+                        scopes: Vec::new(),
+                    }),
+                    transport: McpTransportV1::Stdio {
+                        program: "start".into(),
+                        args: vec![report.to_string_lossy().into_owned()],
+                    },
+                    lifecycle: McpLifecycleV1::Auto,
+                    startup_timeout_ms: 2_000,
+                    tool_timeout_ms: 1_000,
+                    tools: Vec::new(),
+                }],
+            })
+            .expect("encode MCP declaration"),
+        )
+        .expect("MCP declaration");
+        let original = "#!/bin/sh\ncat generation > \"$1\"\n";
+        let replacement = "#!/bin/sh\nprintf 'replacement process' > \"$1\"\n";
+        let program = source.join("start");
+        fs::write(&program, original).expect("stdio program");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
+                .expect("make stdio fixture executable");
+        }
+        fs::write(source.join("generation"), "original generation").expect("package data");
+
+        let (activation, next) = {
+            let _guard = crate::message_log::test_env_mutex()
+                .lock()
+                .expect("test environment lock");
+            let previous = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+            std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", work.path().join("data"));
+            let result = (|| {
+                user_data_layout::ensure_user_data_layout()?;
+                let install = || {
+                    plugins::install(plugins::PluginInstallRequestV1 {
+                        source_path: source.to_string_lossy().into_owned(),
+                    })
+                };
+                let installed = install()?;
+                let activation = activation_from_descriptors(vec![installed.descriptor])?;
+                plugins::remove(plugins::PluginRemoveRequestV1 {
+                    id: "demo-plugin".into(),
+                })?;
+                fs::write(&program, replacement).map_err(|error| error.to_string())?;
+                fs::write(source.join("generation"), "replacement generation")
+                    .map_err(|error| error.to_string())?;
+                let installed = install()?;
+                let next = activation_from_descriptors(vec![installed.descriptor])?;
+                Ok::<_, String>((activation, next))
+            })();
+            if let Some(previous) = previous {
+                std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", previous);
+            } else {
+                std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR");
+            }
+            result.expect("activate, remove and reinstall stdio plugin")
+        };
+
+        let retained_root = activation.execution_readonly_roots[0].clone();
+        assert_eq!(
+            fs::read_to_string(retained_root.join("start")).expect("retained program"),
+            original
+        );
+        assert_eq!(
+            fs::read_to_string(next.execution_readonly_roots[0].join("start"))
+                .expect("newly activated program"),
+            replacement
+        );
+        assert_ne!(activation.digest, next.digest);
+
+        #[cfg(unix)]
+        {
+            // The fixture exits without serving MCP, after writing its working-directory data.
+            assert_eq!(activation.providers.len(), 1);
+            assert!(activation.providers[0]
+                .refresh_catalog()
+                .await
+                .expect("refresh result")
+                .expect("discovery directory")
+                .is_empty());
+            assert_eq!(
+                fs::read_to_string(report).expect("actual stdio process receipt"),
+                "original generation"
+            );
+        }
+        drop(activation);
+        #[cfg(not(unix))]
+        assert!(
+            !retained_root.exists(),
+            "unused lease must release its files"
+        );
     }
 
     #[test]

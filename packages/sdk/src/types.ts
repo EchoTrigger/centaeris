@@ -37,6 +37,19 @@ export interface CreateSessionRequest {
   title?: string | null;
 }
 
+export interface ForkSessionRequest {
+  operationId: string;
+  sessionId: string;
+  beforeTurnId: string;
+}
+
+export interface ForkSessionReceipt {
+  operationId: string;
+  sourceSessionId: string;
+  sourceTurnId: string;
+  sessionId: string;
+}
+
 export interface LoadSessionRequest {
   sessionId: string;
 }
@@ -231,4 +244,193 @@ export interface SessionUpdate {
   sessionId: string | undefined;
   agentRunId: string | undefined;
   turnId: string | undefined;
+}
+
+/** Native typed-model data is JSON, with finite named criteria owned by Core. */
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export interface TypedQuestion {
+  type: "choice" | "noul";
+  instructions: JsonValue;
+  criteria: Record<string, string>;
+}
+
+export interface EvaluateTypedRequest {
+  operationId: string;
+  sessionId: string;
+  /** Optional assertion; the dedicated CET process owns the selected model. */
+  model?: string;
+  state: JsonValue;
+  questions: Record<string, TypedQuestion>;
+}
+
+export type TypedAnswer =
+  | { type: "choice"; choice: string; confidence?: number; probabilities?: Record<string, number> }
+  | { type: "noul"; noul: number };
+
+export interface TypedModelRequest {
+  model: string;
+  state: JsonValue;
+  questions: Record<string, TypedQuestion>;
+}
+
+export interface TypedModelResponse {
+  model: string;
+  answers: Record<string, TypedAnswer>;
+  id?: string;
+  usage?: JsonValue;
+}
+
+/** Projection of immutable CET request, raw response, and validated receipt files. */
+export interface TypedModelReceipt {
+  operationId: string;
+  sessionId: string;
+  attemptId: string;
+  /** CET-generated identity sent to the provider as X-Request-Id. */
+  requestId: string;
+  upstreamRequestId: string | null;
+  responseId: string | null;
+  recordPath: string;
+  request: TypedModelRequest;
+  response: TypedModelResponse;
+  /** Raw provider usage; no SDK token accounting or identity reconstruction. */
+  usage: JsonValue;
+}
+
+export interface ListModelRequestsRequest {
+  sessionId: string;
+  agentRunId?: string;
+  afterSequence?: number;
+  limit?: number;
+}
+
+/** Canonical CET session-log wire event; Core owns the payload schema. */
+export interface ModelRequestRecord {
+  schemaVersion: "session.event.v1";
+  eventVersion: 1;
+  sequence: number;
+  type: "model_request_started" | "provider_usage";
+  eventId: string;
+  sessionId: string;
+  turnId?: string;
+  agentRunId?: string;
+  createdAtMs: number;
+  payload: JsonValue;
+}
+
+export interface ModelRequestPage {
+  sessionId: string;
+  records: ModelRequestRecord[];
+  nextSequence: number;
+  hasMore: boolean;
+}
+
+export interface ReadTypedOperationRequest {
+  operationId: string;
+  sessionId: string;
+}
+
+/** Original HTTP evidence remains available even when finite answers fail validation. */
+export interface TypedOperation {
+  operationId: string;
+  sessionId: string;
+  attemptId: string;
+  requestId: string;
+  recordPath: string;
+  request: TypedModelRequest;
+  rawResponse: { statusCode: number; headers: Record<string, string>; body: string } | null;
+  failure: JsonValue;
+  receipt: TypedModelReceipt | null;
+}
+
+/** Native CET model configuration. Credentials are write-only. */
+export type ModelWireApi = "openai-completions" | "openai-responses" | "anthropic-messages";
+export interface RuntimeCustomModelDraft {
+  model: string;
+  displayName: string | null;
+  contextTokens: string;
+  maxOutputTokens: string;
+  apiOverride: ModelWireApi | null;
+  supportsVision: boolean;
+}
+export interface RuntimeCustomModelProviderDraft {
+  providerId: string;
+  name: string;
+  baseUrl: string;
+  api: ModelWireApi;
+  models: RuntimeCustomModelDraft[];
+}
+export interface RuntimeSelectableModel {
+  providerId: string;
+  providerName: string;
+  model: string;
+  displayName: string | null;
+  modelApiBase: string | null;
+  modelContextTokens: number | null;
+  modelMaxOutputTokens: number | null;
+  modelThinkingMode: string | null;
+  modelThinkingModes: string[];
+  preferredThinkingMode: string | null;
+  modelApi: ModelWireApi | null;
+}
+export interface RuntimeCatalogModel extends RuntimeSelectableModel {
+  supportsVision: boolean;
+  builtIn: boolean;
+  diagnostic: string | null;
+}
+export interface RuntimeModelProvider {
+  providerId: string;
+  name: string;
+  tier: string | null;
+  logoSvg: string | null;
+  builtIn: boolean;
+  accessKind: string;
+  configured: boolean;
+  credentialSource: "stored" | "environment" | null;
+  models: RuntimeCatalogModel[];
+}
+export interface RuntimeConfig {
+  executionHost: string;
+  bashPath: string | null;
+  autoContinueAfterResumeWait: boolean;
+  agentTransportMode: string;
+  modelProviderId: string | null;
+  model: string | null;
+  modelProviders: RuntimeModelProvider[];
+  selectableModels: RuntimeSelectableModel[];
+  customModelProviders: RuntimeCustomModelProviderDraft[];
+  modelApiBase: string | null;
+  modelTimeoutMs: number | null;
+  modelMaxRetries: number | null;
+  modelRetryBackoffMs: number | null;
+  modelContextTokens: number | null;
+  modelMaxOutputTokens: number | null;
+  modelThinkingMode: string | null;
+  toolParallelism: number | null;
+  updatedAt: number;
+}
+export interface SetRuntimeConfigRequest {
+  bashPath?: string;
+  autoContinueAfterResumeWait?: boolean;
+  agentTransportMode?: string;
+  modelProviderId?: string;
+  model?: string;
+  modelThinkingMode?: string;
+  /** Sent only to CET; never included in RuntimeConfig responses. */
+  modelApiKey?: string;
+  clearModelApiKey?: boolean;
+  /** Complete replacement collection, validated and persisted by CET. */
+  customModelProviders?: RuntimeCustomModelProviderDraft[];
+  toolParallelism?: number;
+}
+
+/** Native per-profile plugin activation; model/session semantics remain in CET. */
+export interface SetPluginEnabledRequest {
+  id: string;
+  enabled: boolean;
+}
+export interface PluginCatalogState {
+  schema: "plugin_catalog_state_v1";
+  enabledPlugins: string[];
+  disabledPlugins: string[];
 }
